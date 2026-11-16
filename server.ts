@@ -280,7 +280,7 @@ const WEBHOOK_SECRET = process.env.PAYMENT_WEBHOOK_SECRET || 'boss_secure_webhoo
 const SUPABASE_URL = (
   process.env.SUPABASE_URL ||
   process.env.VITE_SUPABASE_URL ||
-  'https://njykxcvfckzwedginpvh.supabase.co'
+  'https://sumeemoqtnveiftzjhsl.supabase.co'
 )
   .replace(/\/rest\/v1\/?$/i, '')
   .replace(/\/$/, '');
@@ -288,7 +288,7 @@ const SUPABASE_SERVER_KEY =
   process.env.SUPABASE_PUBLISHABLE_KEY ||
   process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
   process.env.SUPABASE_KEY ||
-  'sb_publishable_7aV54en4ydYJGJ--lgIufA_DOU8h4X-';
+  'sb_publishable_rEQFsCRG9_kjgPvauNvocg_hhxDPjOd';
 
 // Ensure data folder and files exist
 function ensureDataFiles() {

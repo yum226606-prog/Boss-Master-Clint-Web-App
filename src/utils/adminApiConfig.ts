@@ -421,6 +421,19 @@ export async function syncRegisteredUserToAdminUac(entry: {
         timeoutMs: 8000,
       });
     }
+
+    if (!res.data.some((r: any) => r?.id === 'master_engine_config')) {
+      await callSupabaseProxy({
+        table: 'app_configs',
+        method: 'POST',
+        upsert: true,
+        payload: {
+          id: 'master_engine_config',
+          value: { userAccessControl: [uacItem] },
+        },
+        timeoutMs: 8000,
+      });
+    }
   } catch {
     // non-fatal best-effort sync
   }

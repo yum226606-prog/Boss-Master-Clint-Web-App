@@ -1,10 +1,10 @@
 export const DEFAULT_SUPABASE_URL = (
-  import.meta.env.VITE_SUPABASE_URL || 'https://njykxcvfckzwedginpvh.supabase.co'
+  import.meta.env.VITE_SUPABASE_URL || 'https://sumeemoqtnveiftzjhsl.supabase.co'
 ).trim();
 export const DEFAULT_PUBLISHABLE_KEY = (
   import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
   import.meta.env.VITE_SUPABASE_ANON_KEY ||
-  'sb_publishable_7aV54en4ydYJGJ--lgIufA_DOU8h4X-'
+  'sb_publishable_rEQFsCRG9_kjgPvauNvocg_hhxDPjOd'
 ).trim();
 
 export interface SmsOtpGatewayConfig {
