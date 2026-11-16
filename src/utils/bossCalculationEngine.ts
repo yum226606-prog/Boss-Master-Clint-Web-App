@@ -1,0 +1,1128 @@
+import {
+  AluminiumCostRow,
+  CutPiece,
+  DeductionDim,
+  DoorItem,
+  DragDropBlueprint,
+  ExtraPiece,
+  FixFrameItem,
+  FormulaCategorySettings,
+  FSectionFormula,
+  GlassCostLine,
+  GlassCutResult,
+  GlassFormula,
+  MeasurementUnit,
+  OpenableWindowItem,
+  PackedBar,
+  PackedResult,
+  QuotationResult,
+  SlidingDoorFormulaSettings,
+  SlidingDoorItem,
+  TallyInfo,
+  WindowFormulaSettings,
+  WindowItem,
+} from '../types/bossModels';
+import { MASTER_PASSCODES } from './bossDefaultRates';
+
+export const ELEVEN_FT_IN = 132.0; // 11 ft
+export const BAR_EXTRA_IN = 1.0; // 1 inch extra stock margin
+
+export function dimToInches(d: DeductionDim): number {
+  return (d?.inch || 0) + (d?.sutar || 0) / 8.0;
+}
+
+export function calcFHeight(f: FSectionFormula, frameHeight: number): number {
+  const sign = f.heightIsAdd ? 1.0 : -1.0;
+  const offset = dimToInches(f.heightDim) * sign;
+  return Math.max(0, frameHeight + offset);
+}
+
+export function calcFWidth(f: FSectionFormula, frameWidth: number): number {
+  const sign = f.widthIsAdd ? 1.0 : -1.0;
+  const offset = dimToInches(f.widthDim) * sign;
+  return Math.max(0, frameWidth + offset);
+}
+
+export function toDotSutar(decIn: number): string {
+  if (isNaN(decIn) || !isFinite(decIn)) return '0.0';
+  const neg = decIn < 0;
+  const v = Math.abs(decIn);
+  const sutar = Math.round(v * 8.0);
+  const inch = Math.floor(sutar / 8);
+  const rem = sutar % 8;
+  const s = `${inch}.${rem}`;
+  return neg ? `-${s}` : s;
+}
+
+export function parseInSutar(raw: string): number {
+  const str = String(raw || '').trim();
+  if (!str) return 0.0;
+  const sign = str.startsWith('-') ? -1.0 : 1.0;
+  const body = str.replace(/^[-+]/, '');
+  if (/^\d+(?:\.\d+)?$/.test(body)) {
+    const parts = body.split('.');
+    const inch = parseFloat(parts[0] || '0') || 0;
+    const sutRaw = (parts[1] || '0').slice(0, 2);
+    const sutar = parseFloat(sutRaw) || 0;
+    return sign * (inch + sutar / 8.0);
+  }
+  return parseFloat(str) || 0.0;
+}
+
+export function billFeet(decIn: number): number {
+  if (isNaN(decIn) || decIn <= 0) return 0.0;
+  const eighths = Math.round(decIn * 8.0);
+  const rem = eighths % 48;
+  const rounded = rem === 0 ? eighths : eighths - rem + 48;
+  return rounded / 96.0;
+}
+
+export function barLengthsFor(section: string): number[] {
+  const u = section.toUpperCase().trim();
+  const isF =
+    /(?:^|[^A-Z0-9])(?:M26F|M30F|DC26F|DC30F|D42F|D51F|D54F|E60F|EC26F|EC30F|DG26F|CW1F)/.test(u) ||
+    u.includes('M26F') ||
+    u.includes('M30F') ||
+    u.includes('DC26F') ||
+    u.includes('DC30F') ||
+    u.endsWith('F');
+  if (isF) return [15, 17, 19];
+  if (
+    u.startsWith('ANGLE') ||
+    u.startsWith('PIPE') ||
+    u.startsWith('U') ||
+    u.startsWith('PATTI') ||
+    u.startsWith('LOOM') ||
+    u.startsWith('OVALTUBE')
+  ) {
+    return [12];
+  }
+  return [14, 16, 18];
+}
+
+export function pricingGaugeForSection(section: string, fallbackGauge: string): string {
+  const k = section.toUpperCase().replace(/\s+/g, '');
+  if (k === 'D29' || k === 'D41' || k === 'D31') return '1.2';
+  return fallbackGauge && fallbackGauge.trim() ? fallbackGauge.trim() : '1.2';
+}
+
+export function formatDim(inches: number, unit: MeasurementUnit = 'INCH_SUTAR'): string {
+  if (isNaN(inches) || !isFinite(inches)) return '0';
+  if (unit === 'CM') return `${(inches * 2.54).toFixed(1)} cm`;
+  if (unit === 'MM') return `${Math.round(inches * 25.4)} mm`;
+  return `${toDotSutar(inches)}"`;
+}
+
+export function formatDimValueOnly(inches: number, unit: MeasurementUnit = 'INCH_SUTAR'): string {
+  if (isNaN(inches) || !isFinite(inches) || inches <= 0) return '';
+  if (unit === 'CM') return (inches * 2.54).toFixed(1);
+  if (unit === 'MM') return String(Math.round(inches * 25.4));
+  return toDotSutar(inches);
+}
+
+export function parseDimToInches(raw: string, unit: MeasurementUnit = 'INCH_SUTAR'): number {
+  const str = String(raw || '').trim();
+  if (!str) return 0;
+  if (unit === 'CM') {
+    const v = parseFloat(str.replace(/cm/i, '').trim()) || 0;
+    return v / 2.54;
+  }
+  if (unit === 'MM') {
+    const v = parseFloat(str.replace(/mm/i, '').trim()) || 0;
+    return v / 25.4;
+  }
+  return parseInSutar(str);
+}
+
+export function unitLabel(unit: MeasurementUnit = 'INCH_SUTAR'): string {
+  if (unit === 'CM') return 'cm';
+  if (unit === 'MM') return 'mm';
+  return 'in.sut';
+}
+
+export function evaluateParametricFormula(
+  expr: string,
+  W: number,
+  H: number,
+  panels: number = 2,
+  M24: number = (W - 6.25) / 2
+): number {
+  const clean = String(expr || '').trim();
+  if (!clean) return 0;
+  try {
+    const sanitized = clean
+      .replace(/\bW\b/gi, String(W))
+      .replace(/\bH\b/gi, String(H))
+      .replace(/\bP\b/gi, String(panels))
+      .replace(/\bM24\b/gi, String(M24));
+    if (!/^[0-9+\-*/().\s]+$/.test(sanitized)) return 0;
+    const val = Function(`"use strict"; return (${sanitized});`)();
+    return typeof val === 'number' && isFinite(val) ? Math.max(0, val) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function packSection(pieceList: CutPiece[], lengthsFt: number[]): PackedResult {
+  const pool: CutPiece[] = [];
+  pieceList.forEach((p) => {
+    for (let i = 0; i < p.qty; i++) {
+      pool.push({ ...p, qty: 1 });
+    }
+  });
+  pool.sort((a, b) => b.length - a.length);
+
+  const lens = [...lengthsFt].sort((a, b) => a - b);
+  const maxIn = lens.length > 0 ? Math.max(...lens) * 12.0 + BAR_EXTRA_IN : 0.0;
+  const bins: PackedBar[] = [];
+  const unfit: CutPiece[] = [];
+
+  while (pool.length > 0) {
+    const item = pool.shift()!;
+    const len = item.length;
+    if (len > maxIn + 1e-6) {
+      unfit.push(item);
+      continue;
+    }
+    let bestIdx = -1;
+    let bestRemain = Number.MAX_VALUE;
+    for (let i = 0; i < bins.length; i++) {
+      const b = bins[i];
+      if (b.remainInches >= len - 1e-6 && b.remainInches - len < bestRemain) {
+        bestIdx = i;
+        bestRemain = b.remainInches - len;
+      }
+    }
+    if (bestIdx >= 0) {
+      const b = bins[bestIdx];
+      bins[bestIdx] = {
+        ...b,
+        remainInches: b.remainInches - len,
+        pieces: [...b.pieces, item],
+      };
+      continue;
+    }
+
+    let bestSl = lens[0] ?? 14;
+    let bestUtil = -1.0;
+    let bestFit: CutPiece[] = [];
+
+    for (const L of lens) {
+      const cap = L * 12.0 + BAR_EXTRA_IN;
+      if (cap < len - 1e-6) continue;
+      let rem = cap - len;
+      let used = len;
+      const fit: CutPiece[] = [];
+      for (const p of pool) {
+        if (p.length <= rem + 1e-6) {
+          rem -= p.length;
+          used += p.length;
+          fit.push(p);
+        }
+      }
+      const util = used / cap;
+      if (util > bestUtil + 1e-9 || (Math.abs(util - bestUtil) <= 1e-9 && fit.length > bestFit.length)) {
+        bestUtil = util;
+        bestSl = L;
+        bestFit = [...fit];
+      }
+    }
+
+    const piecesInBin: CutPiece[] = [item];
+    let rem = bestSl * 12.0 + BAR_EXTRA_IN - len;
+    bestFit.forEach((p) => {
+      rem -= p.length;
+      piecesInBin.push(p);
+      const idx = pool.indexOf(p);
+      if (idx >= 0) pool.splice(idx, 1);
+    });
+    bins.push({
+      lenFt: bestSl,
+      isCustom: false,
+      remainInches: rem,
+      pieces: piecesInBin,
+    });
+  }
+
+  // Apply <= 11ft offcut rule
+  const finalBins: PackedBar[] = bins.map((b) => {
+    const content = b.pieces.reduce((acc, it) => acc + it.length, 0);
+    if (content <= ELEVEN_FT_IN) {
+      const customLenFt = Math.max(1, Math.ceil(content / 12.0));
+      return {
+        ...b,
+        lenFt: customLenFt,
+        isCustom: true,
+        remainInches: customLenFt * 12.0 - content,
+      };
+    }
+    return b;
+  });
+
+  const tally: Record<number, TallyInfo> = {};
+  finalBins.forEach((b) => {
+    const cur = tally[b.lenFt];
+    if (!cur) {
+      tally[b.lenFt] = { count: 1, isCustom: b.isCustom };
+    } else {
+      tally[b.lenFt] = { count: cur.count + 1, isCustom: cur.isCustom || b.isCustom };
+    }
+  });
+
+  return { tally, unfit, bins: finalBins };
+}
+
+export function computeSlidingWindowPieces(
+  w: WindowItem,
+  overrideFrameType: string | null,
+  formula: WindowFormulaSettings,
+  fFormula: FSectionFormula
+): CutPiece[] {
+  const ft = (overrideFrameType ?? (w.frameType.trim() ? w.frameType : 'C')).trim();
+  const isCustom = ft !== 'C' && ft !== 'F' && ft !== '';
+  const isF = isCustom ? ft.toUpperCase().endsWith('F') : ft.toUpperCase() === 'F';
+  const c = isF ? 'F' : 'C';
+  const h = w.height;
+  const width = w.width;
+  const q = Math.max(1, w.qty);
+  const pieces: CutPiece[] = [];
+  const src = 'Window';
+  const g = w.sectionGauge;
+
+  const isPair = ft.includes('/');
+  const topSec = isPair ? ft.split('/')[0].trim() : isCustom ? ft : `DC30${c}`;
+  const botSec = isPair
+    ? ft.split('/')[1]?.trim() || ft.split('/')[0].trim()
+    : isCustom
+    ? ft
+    : `DC26${c}`;
+
+  if (isF && fFormula.enabled) {
+    const hLen = calcFHeight(fFormula, h);
+    const hQty = fFormula.qtyH;
+    pieces.push({ section: topSec, length: hLen, qty: hQty * q, source: src, label: 'Frame side F (Height)', gauge: g });
+    const wLen = calcFWidth(fFormula, width);
+    const wTopQty = Math.max(1, Math.floor(fFormula.qtyW / 2));
+    const wBotQty = Math.max(1, fFormula.qtyW - wTopQty);
+    pieces.push({ section: topSec, length: wLen, qty: wTopQty * q, source: src, label: 'Frame top F (Width)', gauge: g });
+    pieces.push({ section: botSec, length: wLen, qty: wBotQty * q, source: src, label: 'Frame bottom F (Width)', gauge: g });
+  } else {
+    pieces.push({ section: topSec, length: h, qty: 2 * q, source: src, label: 'Frame side (Height)', gauge: g });
+    pieces.push({ section: topSec, length: width, qty: 1 * q, source: src, label: 'Frame top (Width)', gauge: g });
+    pieces.push({ section: botSec, length: width, qty: 1 * q, source: src, label: 'Frame bottom (Width)', gauge: g });
+  }
+
+  const panels = Math.min(4, Math.max(2, w.panelCount));
+  const sashH = Math.max(0, h - dimToInches(formula.m23HeightDeduction));
+  const m24Deduction =
+    panels === 3
+      ? dimToInches(formula.m24WidthDeduction3)
+      : panels === 4
+      ? dimToInches(formula.m24WidthDeduction4)
+      : dimToInches(formula.m24WidthDeduction);
+  const sashW = Math.max(0, (width - m24Deduction) / panels);
+
+  // M23 Sash
+  const m23Apply = formula.m23ApplyTo;
+  const m23Pcs =
+    panels === 3
+      ? formula.m23Qty3 > 0
+        ? formula.m23Qty3
+        : 2
+      : panels === 4
+      ? formula.m23Qty4 > 0
+        ? formula.m23Qty4
+        : 4
+      : Math.max(0, formula.m23Qty);
+
+  if (m23Pcs > 0) {
+    if (m23Apply === 'H' || m23Apply === 'both') {
+      pieces.push({ section: 'M23', length: sashH, qty: m23Pcs * q, source: src, label: 'Sash height (M23)', gauge: g });
+    }
+    if (m23Apply === 'W' || m23Apply === 'both') {
+      pieces.push({ section: 'M23', length: sashW, qty: m23Pcs * q, source: src, label: 'Sash width (M23)', gauge: g });
+    }
+  }
+
+  // M28 Sash
+  const m28Apply = formula.m28ApplyTo;
+  const m28Pcs =
+    panels === 3
+      ? formula.m28Qty3 > 0
+        ? formula.m28Qty3
+        : 4
+      : panels === 4
+      ? formula.m28Qty4 > 0
+        ? formula.m28Qty4
+        : 4
+      : Math.max(0, formula.m28Qty);
+
+  if (m28Pcs > 0) {
+    if (m28Apply === 'H' || m28Apply === 'both') {
+      pieces.push({ section: 'M28', length: sashH, qty: m28Pcs * q, source: src, label: 'Sash height (M28)', gauge: g });
+    }
+    if (m28Apply === 'W' || m28Apply === 'both') {
+      pieces.push({ section: 'M28', length: sashW, qty: m28Pcs * q, source: src, label: 'Sash width (M28)', gauge: g });
+    }
+  }
+
+  // M24 & M24A Sash (Reads live formula settings!)
+  const defaultM24 = panels === 2 ? 4 : panels === 3 ? 6 : 8;
+  const m24Pcs = w.m24Qty > 0 ? w.m24Qty : defaultM24;
+  const m24Apply = formula.m24ApplyTo;
+
+  if (panels === 3) {
+    const centerDed = dimToInches(formula.m24WidthCenterDeduction3);
+    const sidesDed = dimToInches(formula.m24WidthSidesDeduction3) > 0 ? dimToInches(formula.m24WidthSidesDeduction3) : 2.0;
+    const sashWCenter = Math.max(0, (width - centerDed) / 2.0);
+    const sashWSides = Math.max(0, (width - sidesDed) / 4.0);
+
+    if (m24Pcs > 0) {
+      if (m24Apply === 'W' || m24Apply === 'both') {
+        const centerPcs = m24Pcs === 6 ? 2 : Math.max(1, Math.floor(m24Pcs / 3));
+        const sidesPcs = m24Pcs === 6 ? 4 : Math.max(0, m24Pcs - centerPcs);
+        if (centerPcs > 0) {
+          pieces.push({ section: 'M24', length: sashWCenter, qty: centerPcs * q, source: src, label: 'M24 Center width', gauge: g });
+        }
+        if (sidesPcs > 0) {
+          pieces.push({ section: 'M24', length: sashWSides, qty: sidesPcs * q, source: src, label: 'M24 Sides width', gauge: g });
+        }
+      }
+      if (m24Apply === 'H' || m24Apply === 'both') {
+        pieces.push({ section: 'M24', length: sashH, qty: m24Pcs * q, source: src, label: 'Sash height (M24)', gauge: g });
+      }
+    }
+    if (w.m24aQty > 0) {
+      const centerPcsA = w.m24aQty === 6 ? 2 : Math.max(1, Math.floor(w.m24aQty / 3));
+      const sidesPcsA = w.m24aQty === 6 ? 4 : Math.max(0, w.m24aQty - centerPcsA);
+      if (centerPcsA > 0) {
+        pieces.push({ section: 'M24A', length: sashWCenter, qty: centerPcsA * q, source: src, label: 'M24A Center width', gauge: g });
+      }
+      if (sidesPcsA > 0) {
+        pieces.push({ section: 'M24A', length: sashWSides, qty: sidesPcsA * q, source: src, label: 'M24A Sides width', gauge: g });
+      }
+    }
+  } else {
+    const sashWEff =
+      panels === 2
+        ? Math.max(0, (width - dimToInches(formula.m24WidthDeduction)) / 2.0)
+        : panels === 4
+        ? Math.max(0, (width - dimToInches(formula.m24WidthDeduction4)) / 4.0)
+        : sashW;
+
+    if (m24Pcs > 0) {
+      if (m24Apply === 'W' || m24Apply === 'both') {
+        pieces.push({ section: 'M24', length: sashWEff, qty: m24Pcs * q, source: src, label: 'M24 width', gauge: g });
+      }
+      if (m24Apply === 'H' || m24Apply === 'both') {
+        pieces.push({ section: 'M24', length: sashH, qty: m24Pcs * q, source: src, label: 'Sash height (M24)', gauge: g });
+      }
+    }
+    if (w.m24aQty > 0) {
+      pieces.push({ section: 'M24A', length: sashWEff, qty: w.m24aQty * q, source: src, label: 'M24A width', gauge: g });
+    }
+  }
+
+  // D29 Jali (Net Screen)
+  const jaliH = sashH;
+  const m24ForJali =
+    panels === 3
+      ? Math.max(0, (width - dimToInches(formula.m24WidthSidesDeduction3)) / 4.0)
+      : panels === 4
+      ? Math.max(0, (width - dimToInches(formula.m24WidthDeduction4)) / 4.0)
+      : Math.max(0, (width - dimToInches(formula.m24WidthDeduction)) / 2.0);
+
+  const d29ExtraW = dimToInches(formula.d29ExtraWidthAdd || { inch: 3, sutar: 2 });
+  let jaliW = Math.max(0, m24ForJali + d29ExtraW);
+  if (w.lockType === 'PUSH_HANDLE') {
+    jaliW = Math.max(0, jaliW - dimToInches(formula.d29PushHandleDeduction));
+  }
+
+  const defaultD29H = panels >= 3 ? 4 : 2;
+  const defaultD29W = panels >= 3 ? 4 : 2;
+  const d29HPcs = w.d29HeightQty >= 0 ? w.d29HeightQty : defaultD29H;
+  const d29WPcs = w.d29WidthQty >= 0 ? w.d29WidthQty : defaultD29W;
+  const jaliWLabel = w.lockType === 'PUSH_HANDLE' ? 'Jali width (D29) [Push Handle]' : 'Jali width (D29)';
+
+  if (d29HPcs > 0) {
+    pieces.push({ section: 'D29', length: jaliH, qty: d29HPcs * q, source: src, label: 'Jali height (D29)', gauge: '1.2' });
+  }
+  if (d29WPcs > 0) {
+    pieces.push({ section: 'D29', length: jaliW, qty: d29WPcs * q, source: src, label: jaliWLabel, gauge: '1.2' });
+  }
+
+  // D31 Interlock for 4-Palay
+  if (panels === 4) {
+    const d31Ded = dimToInches(formula.d31HeightDeduction4 || { inch: 2, sutar: 4 });
+    const d31H = Math.max(0, h - d31Ded);
+    pieces.push({ section: 'D31', length: d31H, qty: 1 * q, source: src, label: 'D31 Height (4-Palay)', gauge: '1.2' });
+  }
+
+  // Evaluate any custom per-section Height & Width formula boxes added in Window Formulas (skipping core sliding sections already added above)
+  const coreWinSecs = new Set([
+    topSec.toUpperCase(),
+    botSec.toUpperCase(),
+    'DC30C',
+    'DC26C',
+    'DC30F',
+    'DC26F',
+    'M23',
+    'M28',
+    'M24',
+    'M24A',
+    'D29',
+    'D31',
+  ]);
+  if (formula.customSectionRules && formula.customSectionRules.acc) {
+    Object.entries(formula.customSectionRules.acc).forEach(([key, accCfg]) => {
+      if (!accCfg.enabled) return;
+      const targetSec = accCfg.which && accCfg.which !== 'none' ? accCfg.which : key;
+      if (coreWinSecs.has(key.toUpperCase()) || coreWinSecs.has(targetSec.toUpperCase())) return;
+      const f = formula.customSectionRules?.formulas?.[key] || { h: { inch: 0, sutar: 0 }, w: { inch: 0, sutar: 0 } };
+      const qH = accCfg.qtyH ?? accCfg.qty ?? 0;
+      const qW = accCfg.qtyW ?? accCfg.qty ?? 0;
+      const divW = accCfg.wDivisor || 1;
+      if ((accCfg.applyTo === 'H' || accCfg.applyTo === 'both') && qH > 0) {
+        const dedH = dimToInches(f.h);
+        const lenH = Math.max(0, accCfg.hOp === 'PLUS' ? h + dedH : h - dedH);
+        if (lenH > 0) {
+          pieces.push({ section: targetSec, length: lenH, qty: qH * q, source: src, label: `${targetSec} height`, gauge: g });
+        }
+      }
+      if ((accCfg.applyTo === 'W' || accCfg.applyTo === 'both') && qW > 0) {
+        const dedW = dimToInches(f.w);
+        const rawW = accCfg.wOp === 'PLUS' ? width + dedW : width - dedW;
+        const lenW = Math.max(0, rawW / divW);
+        if (lenW > 0) {
+          pieces.push({ section: targetSec, length: lenW, qty: qW * q, source: src, label: `${targetSec} width`, gauge: g });
+        }
+      }
+    });
+  }
+
+  w.extras.forEach((ex) => {
+    if (ex.lengthFt > 0 && ex.qty > 0) {
+      pieces.push({
+        section: ex.section,
+        length: ex.lengthFt * 12.0,
+        qty: ex.qty * q,
+        source: src,
+        label: 'Extra piece',
+        gauge: g,
+      });
+    }
+  });
+
+  return pieces;
+}
+
+export function computeBlueprintWindowPieces(
+  w: WindowItem,
+  bp: DragDropBlueprint,
+  formula: WindowFormulaSettings
+): CutPiece[] {
+  const pieces: CutPiece[] = [];
+  const width = w.width;
+  const h = w.height;
+  const q = Math.max(1, w.qty);
+  const panels = Math.min(4, Math.max(2, w.panelCount || bp.panelCount || 2));
+  const g = w.sectionGauge || '1.6';
+  const src = `${bp.name} (${panels}P)`;
+
+  const m24Val =
+    panels === 3
+      ? Math.max(0, (width - dimToInches(formula.m24WidthSidesDeduction3)) / 4.0)
+      : panels === 4
+      ? Math.max(0, (width - dimToInches(formula.m24WidthDeduction4)) / 4.0)
+      : Math.max(0, (width - dimToInches(formula.m24WidthDeduction)) / 2.0);
+
+  bp.items
+    .filter((it) => it.isEnabled && it.applyTo !== 'UI' && it.sectionCode !== 'GLASS')
+    .forEach((it) => {
+      if (it.type === 'OUTER_FRAME') {
+        const pairStr = it.sectionCode.includes('/') ? it.sectionCode : bp.outerSectionCode || it.sectionCode || 'DC30C';
+        const pairParts = pairStr.split('/').map((s) => s.trim()).filter(Boolean);
+        const topSec = pairParts[0] || it.sectionCode || 'DC30C';
+        const botSec = pairParts[1] || topSec;
+        const effG = it.defaultGauge || g;
+        pieces.push({
+          section: topSec,
+          length: h,
+          qty: 2 * q,
+          source: src,
+          label: `${it.label} Side (H)`,
+          gauge: effG,
+        });
+        pieces.push({
+          section: topSec,
+          length: width,
+          qty: 1 * q,
+          source: src,
+          label: `${it.label} Top (W)`,
+          gauge: effG,
+        });
+        pieces.push({
+          section: botSec,
+          length: width,
+          qty: 1 * q,
+          source: src,
+          label: `${it.label} Bottom (W)`,
+          gauge: effG,
+        });
+      } else if (it.type === 'D29_NET_JALI') {
+        const jaliH = Math.max(0, h - dimToInches(formula.m23HeightDeduction));
+        const d29ExtraW = dimToInches(formula.d29ExtraWidthAdd || { inch: 3, sutar: 2 });
+        let jaliW = Math.max(0, m24Val + d29ExtraW);
+        if (w.lockType === 'PUSH_HANDLE') {
+          jaliW = Math.max(0, jaliW - dimToInches(formula.d29PushHandleDeduction));
+        }
+        const hPcs = w.d29HeightQty > 0 ? w.d29HeightQty : panels >= 3 ? 4 : 2;
+        const wPcs = w.d29WidthQty > 0 ? w.d29WidthQty : panels >= 3 ? 4 : 2;
+        const secCode = it.sectionCode || 'D29';
+        const effG = it.defaultGauge || '1.2';
+        if (hPcs > 0) {
+          pieces.push({
+            section: secCode,
+            length: jaliH,
+            qty: hPcs * q,
+            source: src,
+            label: `${secCode} Jali Height`,
+            gauge: effG,
+          });
+        }
+        if (wPcs > 0) {
+          pieces.push({
+            section: secCode,
+            length: jaliW,
+            qty: wPcs * q,
+            source: src,
+            label: `${secCode} Jali Width (${w.lockType})`,
+            gauge: effG,
+          });
+        }
+      } else {
+        const len =
+          evaluateParametricFormula(it.formulaExpression, width, h, panels, m24Val) ||
+          (it.applyTo === 'H' ? Math.max(0, h - 1.75) : m24Val);
+        const rawQty = parseInt(it.qtyFormula, 10);
+        const pcs =
+          it.sectionCode === 'M24' && w.m24Qty > 0
+            ? w.m24Qty
+            : !isNaN(rawQty) && rawQty > 0
+            ? rawQty
+            : panels * 2;
+        if (len > 0 && pcs > 0) {
+          pieces.push({
+            section: it.sectionCode,
+            length: len,
+            qty: pcs * q,
+            source: src,
+            label: it.label,
+            gauge: it.defaultGauge || g,
+          });
+        }
+      }
+    });
+
+  w.extras.forEach((ex) => {
+    if (ex.lengthFt > 0 && ex.qty > 0) {
+      pieces.push({
+        section: ex.section,
+        length: ex.lengthFt * 12.0,
+        qty: ex.qty * q,
+        source: src,
+        label: 'Extra piece',
+        gauge: g,
+      });
+    }
+  });
+
+  return pieces;
+}
+
+export function computeSlidingDoorPieces(
+  it: SlidingDoorItem,
+  formula: SlidingDoorFormulaSettings,
+  fFormula: FSectionFormula
+): CutPiece[] {
+  const rawOuter = (it.outer || 'NORMAL').trim();
+  const upOuter = rawOuter.toUpperCase();
+  const isDefaultC = upOuter === 'NORMAL' || upOuter === 'C' || upOuter === 'M30/M26' || upOuter === 'M30 / M26';
+  const isDefaultF = upOuter === 'F' || upOuter === 'M30F/M26F' || upOuter === 'M30F / M26F';
+  const isPair = rawOuter.includes('/') && !isDefaultC && !isDefaultF;
+
+  const topSec = isDefaultF
+    ? 'M30F'
+    : isDefaultC
+    ? 'M30'
+    : isPair
+    ? rawOuter.split('/')[0].trim()
+    : rawOuter;
+  const botSec = isDefaultF
+    ? 'M26F'
+    : isDefaultC
+    ? 'M26'
+    : isPair
+    ? rawOuter.split('/')[1]?.trim() || rawOuter.split('/')[0].trim()
+    : rawOuter;
+
+  const isF = isDefaultF || topSec.toUpperCase().endsWith('F') || botSec.toUpperCase().endsWith('F');
+  const h = it.height;
+  const width = it.width;
+  const q = Math.max(1, it.qty);
+  const pieces: CutPiece[] = [];
+  const src = 'Sliding Door';
+  const g = it.sectionGauge || '1.6';
+
+  if (isF && fFormula.enabled) {
+    const hLen = calcFHeight(fFormula, h);
+    pieces.push({ section: topSec, length: hLen, qty: fFormula.qtyH * q, source: src, label: `${topSec} Side height F`, gauge: g });
+    const wLen = calcFWidth(fFormula, width);
+    pieces.push({ section: topSec, length: wLen, qty: 1 * q, source: src, label: `${topSec} Top width F`, gauge: g });
+    pieces.push({ section: botSec, length: wLen, qty: 1 * q, source: src, label: `${botSec} Bottom width F`, gauge: g });
+  } else {
+    pieces.push({ section: topSec, length: h, qty: 2 * q, source: src, label: `${topSec} Side height`, gauge: g });
+    pieces.push({ section: topSec, length: width, qty: 1 * q, source: src, label: `${topSec} Top width`, gauge: g });
+    pieces.push({ section: botSec, length: width, qty: 1 * q, source: src, label: `${botSec} Bottom width`, gauge: g });
+  }
+
+  const panels = Math.min(4, Math.max(2, it.panelCount || 2));
+  const sashH = Math.max(0, h - dimToInches(formula.m23HeightDeduction));
+  const m23Pcs = panels === 3 ? (formula.m23Qty3 || 2) : panels === 4 ? (formula.m23Qty4 || 4) : formula.m23Qty;
+  const m28Pcs = panels === 3 ? (formula.m28Qty3 || 4) : panels === 4 ? (formula.m28Qty4 || 4) : formula.m28Qty;
+
+  if (m23Pcs > 0) {
+    pieces.push({ section: 'M23', length: sashH, qty: m23Pcs * q, source: src, label: 'Sash height (M23)', gauge: g });
+  }
+  if (m28Pcs > 0) {
+    pieces.push({ section: 'M28', length: sashH, qty: m28Pcs * q, source: src, label: 'Sash height (M28)', gauge: g });
+  }
+
+  const defaultM24 = panels === 2 ? 4 : panels === 3 ? 6 : 8;
+  const m24Pcs = it.m24Qty >= 0 ? it.m24Qty : defaultM24;
+
+  if (panels === 3) {
+    const centerDed = dimToInches(formula.m24WidthCenterDeduction3);
+    const sidesDed = dimToInches(formula.m24WidthSidesDeduction3) || 2.0;
+    const sashWCenter = Math.max(0, (width - centerDed) / 2.0);
+    const sashWSides = Math.max(0, (width - sidesDed) / 4.0);
+    if (m24Pcs > 0) {
+      const centerPcs = m24Pcs === 6 ? 2 : Math.max(1, Math.floor(m24Pcs / 3));
+      const sidesPcs = m24Pcs === 6 ? 4 : Math.max(0, m24Pcs - centerPcs);
+      if (centerPcs > 0) {
+        pieces.push({ section: 'M24', length: sashWCenter, qty: centerPcs * q, source: src, label: 'M24 Center width', gauge: g });
+      }
+      if (sidesPcs > 0) {
+        pieces.push({ section: 'M24', length: sashWSides, qty: sidesPcs * q, source: src, label: 'M24 Sides width', gauge: g });
+      }
+    }
+    if (it.m24aQty > 0) {
+      const centerPcsA = it.m24aQty === 6 ? 2 : Math.max(1, Math.floor(it.m24aQty / 3));
+      const sidesPcsA = it.m24aQty === 6 ? 4 : Math.max(0, it.m24aQty - centerPcsA);
+      if (centerPcsA > 0) {
+        pieces.push({ section: 'M24A', length: sashWCenter, qty: centerPcsA * q, source: src, label: 'M24A Center width', gauge: g });
+      }
+      if (sidesPcsA > 0) {
+        pieces.push({ section: 'M24A', length: sashWSides, qty: sidesPcsA * q, source: src, label: 'M24A Sides width', gauge: g });
+      }
+    }
+  } else {
+    const sashWEff =
+      panels === 2
+        ? Math.max(0, (width - dimToInches(formula.m24WidthDeduction)) / 2.0)
+        : Math.max(0, (width - dimToInches(formula.m24WidthDeduction4)) / 4.0);
+    if (m24Pcs > 0) {
+      pieces.push({ section: 'M24', length: sashWEff, qty: m24Pcs * q, source: src, label: 'M24 width', gauge: g });
+    }
+    if (it.m24aQty > 0) {
+      pieces.push({ section: 'M24A', length: sashWEff, qty: it.m24aQty * q, source: src, label: 'M24A width', gauge: g });
+    }
+  }
+
+  // D29 Jali (Net Screen) + Push Handle vs Latch on Sliding Door
+  const d29HPcs = it.d29HeightQty ?? 0;
+  const d29WPcs = it.d29WidthQty ?? 0;
+  if (d29HPcs > 0 || d29WPcs > 0) {
+    const jaliH = sashH;
+    const m24ForJali =
+      panels === 3
+        ? Math.max(0, (width - (dimToInches(formula.m24WidthSidesDeduction3) || 2.0)) / 4.0)
+        : panels === 4
+        ? Math.max(0, (width - dimToInches(formula.m24WidthDeduction4)) / 4.0)
+        : Math.max(0, (width - dimToInches(formula.m24WidthDeduction)) / 2.0);
+    const d29ExtraW = dimToInches(formula.d29ExtraWidthAdd || { inch: 3, sutar: 2 });
+    let jaliW = Math.max(0, m24ForJali + d29ExtraW);
+    if (it.lockType === 'PUSH_HANDLE') {
+      jaliW = Math.max(0, jaliW - dimToInches(formula.d29PushHandleDeduction));
+    }
+    const jaliWLabel = it.lockType === 'PUSH_HANDLE' ? 'Jali width (D29) [Push Handle]' : 'Jali width (D29)';
+    if (d29HPcs > 0) {
+      pieces.push({ section: 'D29', length: jaliH, qty: d29HPcs * q, source: src, label: 'Jali height (D29)', gauge: '1.2' });
+    }
+    if (d29WPcs > 0) {
+      pieces.push({ section: 'D29', length: jaliW, qty: d29WPcs * q, source: src, label: jaliWLabel, gauge: '1.2' });
+    }
+  }
+
+  if (panels === 4) {
+    const d31Ded = dimToInches(formula.d31HeightDeduction4 || { inch: 2, sutar: 4 });
+    pieces.push({ section: 'D31', length: Math.max(0, h - d31Ded), qty: 1 * q, source: src, label: 'D31 Height (4-Palay)', gauge: '1.2' });
+  }
+
+  // Evaluate any custom per-section Height & Width formula boxes added in Sliding Door Formulas (skipping core sliding sections already added above)
+  const coreSlidingDoorSecs = new Set([
+    topSec.toUpperCase(),
+    botSec.toUpperCase(),
+    'M30',
+    'M26',
+    'M30F',
+    'M26F',
+    'DC30C',
+    'DC26C',
+    'DC30F',
+    'DC26F',
+    'M23',
+    'M28',
+    'M24',
+    'M24A',
+    'D29',
+    'D31',
+  ]);
+  if (formula.customSectionRules && formula.customSectionRules.acc) {
+    Object.entries(formula.customSectionRules.acc).forEach(([key, accCfg]) => {
+      if (!accCfg.enabled) return;
+      const targetSec = accCfg.which && accCfg.which !== 'none' ? accCfg.which : key;
+      if (coreSlidingDoorSecs.has(key.toUpperCase()) || coreSlidingDoorSecs.has(targetSec.toUpperCase())) return;
+      const f = formula.customSectionRules?.formulas?.[key] || { h: { inch: 0, sutar: 0 }, w: { inch: 0, sutar: 0 } };
+      const qH = accCfg.qtyH ?? accCfg.qty ?? 0;
+      const qW = accCfg.qtyW ?? accCfg.qty ?? 0;
+      const divW = accCfg.wDivisor || 1;
+      if ((accCfg.applyTo === 'H' || accCfg.applyTo === 'both') && qH > 0) {
+        const dedH = dimToInches(f.h);
+        const lenH = Math.max(0, accCfg.hOp === 'PLUS' ? h + dedH : h - dedH);
+        if (lenH > 0) {
+          pieces.push({ section: targetSec, length: lenH, qty: qH * q, source: src, label: `${targetSec} height`, gauge: g });
+        }
+      }
+      if ((accCfg.applyTo === 'W' || accCfg.applyTo === 'both') && qW > 0) {
+        const dedW = dimToInches(f.w);
+        const rawW = accCfg.wOp === 'PLUS' ? width + dedW : width - dedW;
+        const lenW = Math.max(0, rawW / divW);
+        if (lenW > 0) {
+          pieces.push({ section: targetSec, length: lenW, qty: qW * q, source: src, label: `${targetSec} width`, gauge: g });
+        }
+      }
+    });
+  }
+
+  (it.extras || []).forEach((ex) => {
+    if (ex.lengthFt > 0 && ex.qty > 0) {
+      pieces.push({
+        section: ex.section,
+        length: ex.lengthFt * 12.0,
+        qty: ex.qty * q,
+        source: src,
+        label: 'Extra piece',
+        gauge: ex.gauge || g,
+      });
+    }
+  });
+
+  return pieces;
+}
+
+export function computeOpenablePieces(
+  width: number,
+  height: number,
+  qty: number,
+  outer: string,
+  kind: 'door' | 'fix' | 'openwin',
+  categorySettings: FormulaCategorySettings,
+  extras: ExtraPiece[],
+  gauge: string,
+  fFormula: FSectionFormula,
+  d59Qty: number = 0,
+  d59aQty: number = 0,
+  d52Qty: number = 0
+): CutPiece[] {
+  const q = Math.max(1, qty);
+  const pieces: CutPiece[] = [];
+  const src = kind === 'door' ? 'Door' : kind === 'fix' ? 'Fix Frame' : 'Openable Window';
+  const isOuterF = outer.toUpperCase().endsWith('F') || outer.toUpperCase().includes('F');
+
+  // Check if a specific formula box exists for this exact outer section (e.g. D54A, D51A, D42)
+  const outerSpecificAcc = categorySettings.acc[outer.toUpperCase()];
+  const outerSpecificForm = categorySettings.formulas[outer.toUpperCase()];
+
+  const baseOuterDedH = outerSpecificForm
+    ? dimToInches(outerSpecificForm.h)
+    : dimToInches(categorySettings.outerDeductH || { inch: 0, sutar: 0 });
+  const baseOuterDedW = outerSpecificForm
+    ? dimToInches(outerSpecificForm.w)
+    : dimToInches(categorySettings.outerDeductW || { inch: 0, sutar: 0 });
+
+  const effHeightAfterDed = Math.max(0, height - baseOuterDedH);
+  const effWidthAfterDed = Math.max(0, width - baseOuterDedW);
+
+  const hLen = isOuterF && fFormula.enabled ? calcFHeight(fFormula, effHeightAfterDed) : effHeightAfterDed;
+  const hQty = outerSpecificAcc
+    ? outerSpecificAcc.qtyH
+    : isOuterF && fFormula.enabled
+    ? fFormula.qtyH
+    : categorySettings.outerQtyH ?? 2;
+  if (hQty > 0 && hLen > 0) {
+    pieces.push({ section: outer, length: hLen, qty: hQty * q, source: src, label: 'Outer frame height', gauge });
+  }
+
+  const defWQty = kind === 'door' ? 1 : 2;
+  const wQty = outerSpecificAcc
+    ? outerSpecificAcc.qtyW
+    : isOuterF && fFormula.enabled
+    ? fFormula.qtyW
+    : categorySettings.outerQtyW ?? defWQty;
+  const wLen = isOuterF && fFormula.enabled ? calcFWidth(fFormula, effWidthAfterDed) : effWidthAfterDed;
+  if (wQty > 0 && wLen > 0) {
+    pieces.push({ section: outer, length: wLen, qty: wQty * q, source: src, label: 'Outer frame width', gauge });
+  }
+
+  // Process all enabled section formula boxes (e.g. D50A, D50, D45A, D54A, D51A, D42, D41, etc.)
+  Object.entries(categorySettings.acc || {}).forEach(([key, accCfg]) => {
+    if (!accCfg || !accCfg.enabled) return;
+    // Skip only if this exact key is the outer section already added as the main outer frame
+    if (key.toUpperCase() === outer.toUpperCase()) return;
+    if (key === 'D52' && (kind === 'fix' || d52Qty > 0)) return;
+    if (key === 'D59' && (d59Qty > 0 || d59aQty > 0)) return;
+
+    const targetSec = (accCfg.which && accCfg.which !== 'none' ? accCfg.which : key).toUpperCase();
+    const f = categorySettings.formulas?.[key] || { h: { inch: 0, sutar: 0 }, w: { inch: 0, sutar: 0 } };
+    const qH = accCfg.applyTo === 'H' ? (accCfg.qtyH ?? accCfg.qty ?? 2) : (accCfg.qtyH ?? 2);
+    const qW = accCfg.applyTo === 'W' ? (accCfg.qtyW ?? accCfg.qty ?? 2) : (accCfg.qtyW ?? 2);
+    const divW = accCfg.wDivisor || 1;
+
+    if ((accCfg.applyTo === 'H' || accCfg.applyTo === 'both') && qH > 0) {
+      const dedH = dimToInches(f.h);
+      const lenH = Math.max(0, accCfg.hOp === 'PLUS' ? height + dedH : height - dedH);
+      if (lenH > 0) {
+        pieces.push({ section: targetSec, length: lenH, qty: qH * q, source: src, label: `${targetSec} height`, gauge });
+      }
+    }
+    if ((accCfg.applyTo === 'W' || accCfg.applyTo === 'both') && qW > 0) {
+      const dedW = dimToInches(f.w);
+      const rawW = accCfg.wOp === 'PLUS' ? width + dedW : width - dedW;
+      const lenW = Math.max(0, rawW / divW);
+      if (lenW > 0) {
+        pieces.push({ section: targetSec, length: lenW, qty: qW * q, source: src, label: `${targetSec} width`, gauge });
+      }
+    }
+  });
+
+  if (d59Qty > 0) {
+    const f = categorySettings.formulas['D59'];
+    const len = f && dimToInches(f.w) > 0 ? Math.max(0, width - dimToInches(f.w)) : width;
+    pieces.push({ section: 'D59', length: len, qty: d59Qty * q, source: src, label: 'D59 width', gauge });
+  }
+  if (d59aQty > 0) {
+    const f = categorySettings.formulas['D59'];
+    const len = f && dimToInches(f.w) > 0 ? Math.max(0, width - dimToInches(f.w)) : width;
+    pieces.push({ section: 'D59A', length: len, qty: d59aQty * q, source: src, label: 'D59A width', gauge });
+  }
+  if (d52Qty > 0) {
+    const f = categorySettings.formulas['D52'];
+    const len = f && dimToInches(f.w) > 0 ? Math.max(0, width - dimToInches(f.w)) : width;
+    pieces.push({ section: 'D52', length: len, qty: d52Qty * q, source: src, label: 'D52 width', gauge });
+  }
+
+  extras.forEach((ex) => {
+    if (ex.lengthFt > 0 && ex.qty > 0) {
+      pieces.push({
+        section: ex.section,
+        length: ex.lengthFt * 12.0,
+        qty: ex.qty * q,
+        source: src,
+        label: 'Extra piece',
+        gauge,
+      });
+    }
+  });
+
+  return pieces;
+}
+
+export function computeGlassCutsForState(params: {
+  windows: WindowItem[];
+  doors: DoorItem[];
+  fixframes: FixFrameItem[];
+  openableWindows: OpenableWindowItem[];
+  slidingDoors: SlidingDoorItem[];
+  glassFormulas: Record<string, GlassFormula>;
+  windowFormula: WindowFormulaSettings;
+  slidingDoorFormula?: WindowFormulaSettings;
+  glassFittingOption: 'FIX_RUBBER' | 'U_PVC';
+  measurementUnit: MeasurementUnit;
+  ctxGlassMode: 'ON' | 'OFF';
+  ctxGlassGauge: string;
+  ctxGlassColor: string;
+}): GlassCutResult[] {
+  const cuts: GlassCutResult[] = [];
+  const masterGlassActive = params.ctxGlassMode === 'ON';
+  const fittingDeduction = params.glassFittingOption === 'U_PVC' ? 2.0 / 8.0 : 0.0;
+
+  const addCut = (
+    cutLabel: string,
+    wIn: number,
+    hIn: number,
+    rawGH: number,
+    rawGW: number,
+    pcs: number,
+    effGauge: string,
+    effColor: string
+  ) => {
+    const finalGH = Math.max(0, rawGH - fittingDeduction);
+    const finalGW = Math.max(0, rawGW - fittingDeduction);
+    const bH = billFeet(finalGH);
+    const bW = billFeet(finalGW);
+    cuts.push({
+      frameLabel: cutLabel,
+      frameDim: `${formatDim(wIn, params.measurementUnit)} × ${formatDim(hIn, params.measurementUnit)}`,
+      glassGauge: effGauge,
+      glassColor: effColor,
+      gH: finalGH,
+      gWpanel: finalGW,
+      billedHFt: bH,
+      billedWFt: bW,
+      pieces: pcs,
+      sqft: bH * bW * pcs,
+    });
+  };
+
+  const processItem = (
+    w: number,
+    h: number,
+    qty: number,
+    kind: string,
+    label: string,
+    enabled: boolean,
+    gGauge: string,
+    gColor: string,
+    panelOverride?: number
+  ) => {
+    if (!enabled) return;
+    const effGauge = masterGlassActive ? params.ctxGlassGauge : gGauge;
+    const effColor = masterGlassActive ? params.ctxGlassColor : gColor;
+    const f = params.glassFormulas[kind] || {
+      marginH: 1,
+      marginW: 1,
+      panels: 1,
+      marginHSutar: 0,
+      marginWSutar: 0,
+      slidingHeightDeductionInch: 5,
+      slidingHeightDeductionSutar: 5,
+      slidingWidthAddToM24Inch: 0,
+      slidingWidthAddToM24Sutar: 5,
+    };
+    const panels = panelOverride ?? Math.max(1, f.panels);
+    const actualQty = Math.max(1, qty);
+
+    if (kind === 'window' || kind === 'slidingdoor') {
+      const effMarginH = (f.slidingHeightDeductionInch ?? 5) + (f.slidingHeightDeductionSutar ?? 5) / 8.0;
+      const gH = Math.max(0, h - effMarginH);
+      const glassExtraW = (f.slidingWidthAddToM24Inch ?? 0) + (f.slidingWidthAddToM24Sutar ?? 5) / 8.0;
+
+      const slidingForm =
+        kind === 'slidingdoor' && params.slidingDoorFormula ? params.slidingDoorFormula : params.windowFormula;
+
+      if (panels === 3) {
+        const m24Center = Math.max(0, (w - dimToInches(slidingForm.m24WidthCenterDeduction3)) / 2.0);
+        const m24Sides = Math.max(0, (w - dimToInches(slidingForm.m24WidthSidesDeduction3)) / 4.0);
+        addCut(`${label} (Center 1 Pc)`, w, h, gH, m24Center + glassExtraW, 1 * actualQty, effGauge, effColor);
+        addCut(`${label} (Sides 2 Pcs)`, w, h, gH, m24Sides + glassExtraW, 2 * actualQty, effGauge, effColor);
+      } else {
+        const m24Size =
+          panels === 2
+            ? Math.max(0, (w - dimToInches(slidingForm.m24WidthDeduction)) / 2.0)
+            : panels === 4
+            ? Math.max(0, (w - dimToInches(slidingForm.m24WidthDeduction4)) / 4.0)
+            : Math.max(0, (w - dimToInches(slidingForm.m24WidthDeduction)) / panels);
+        addCut(label, w, h, gH, m24Size + glassExtraW, panels * actualQty, effGauge, effColor);
+      }
+    } else {
+      const effMarginH = f.marginH + f.marginHSutar / 8.0;
+      const effMarginW = f.marginW + f.marginWSutar / 8.0;
+      const gH = Math.max(0, h - effMarginH);
+      const gWpanel = Math.max(0, w - effMarginW) / panels;
+      addCut(label, w, h, gH, gWpanel, panels * actualQty, effGauge, effColor);
+    }
+  };
+
+  params.windows.forEach((it, i) =>
+    processItem(it.width, it.height, it.qty, 'window', `Window #${i + 1} (${it.panelCount} Palay)`, it.glassEnabled, it.glassGauge, it.glassColor, it.panelCount)
+  );
+  params.doors.forEach((it, i) =>
+    processItem(it.width, it.height, it.qty, 'door', `Door #${i + 1}`, it.glassEnabled, it.glassGauge, it.glassColor)
+  );
+  params.fixframes.forEach((it, i) =>
+    processItem(it.width, it.height, it.qty, 'fix', `Fix Frame #${i + 1}`, it.glassEnabled, it.glassGauge, it.glassColor)
+  );
+  params.openableWindows.forEach((it, i) =>
+    processItem(it.width, it.height, it.qty, 'openwin', `Openable Window #${i + 1}`, it.glassEnabled, it.glassGauge, it.glassColor)
+  );
+  params.slidingDoors.forEach((it, i) =>
+    processItem(it.width, it.height, it.qty, 'slidingdoor', `Sliding Door #${i + 1} (${it.panelCount} Palay)`, it.glassEnabled, it.glassGauge, it.glassColor, it.panelCount)
+  );
+
+  return cuts;
+}
+
+// ============================================================================
+// DEVICE-BOUND PASSCODE GENERATOR (PORTED FROM UserSecurityModels.kt)
+// ============================================================================
+export function generateDeviceActivationCode(clientKey: string, durationMonths: number = 1): string {
+  const cleanKey = String(clientKey || '').trim().toUpperCase().replace(/-/g, '');
+  if (!cleanKey) return 'BOSS2796';
+  let hash = 1125899906842597n;
+  const saltCode =
+    durationMonths === 1
+      ? 'M30'
+      : durationMonths === 3
+      ? 'Q90'
+      : durationMonths === 6
+      ? 'H180'
+      : durationMonths === 12
+      ? 'Y365'
+      : durationMonths >= 999
+      ? 'VIP999'
+      : `D${durationMonths * 30}`;
+  const salted = `${cleanKey}_BOSS_SECURE_SALT_${saltCode}_2026`;
+  for (let i = 0; i < salted.length; i++) {
+    hash = (31n * hash + BigInt(salted.charCodeAt(i))) & 0x7fffffffffffffffn;
+  }
+  const numPart = Number(hash % 900000n) + 100000;
+  const prefix =
+    durationMonths === 1
+      ? 'BOSS-M'
+      : durationMonths === 3
+      ? 'BOSS-Q'
+      : durationMonths === 6
+      ? 'BOSS-6M'
+      : durationMonths === 12
+      ? 'BOSS-1Y'
+      : durationMonths >= 999
+      ? 'BOSS-VIP'
+      : `BOSS-${durationMonths}M`;
+  return `${prefix}-${numPart}`;
+}
+
+export function validatePasscode(inputPasscode: string, clientKey: string): { isValid: boolean; durationMonths: number } {
+  const cleanInput = String(inputPasscode || '').trim().toUpperCase();
+  if (MASTER_PASSCODES.includes(cleanInput)) {
+    return { isValid: true, durationMonths: 12 };
+  }
+  const supportedDurations = [1, 3, 6, 12, 999];
+  for (const months of supportedDurations) {
+    const code = generateDeviceActivationCode(clientKey, months);
+    if (cleanInput === code || cleanInput === code.replace(/-/g, '')) {
+      return { isValid: true, durationMonths: months };
+    }
+  }
+  return { isValid: false, durationMonths: 0 };
+}

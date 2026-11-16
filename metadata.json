@@ -1,0 +1,11 @@
+{
+  "name": "Remix Boss Aluminium \u0026 Glass — Master Admin \u0026 Calculator Studio",
+  "description": "Enterprise Web \u0026 Desktop Admin Panel for Boss Aluminium \u0026 Glass with Drag-and-Drop Window/Door Builder, Dynamic Formula Engine, Industrial AI Rate List Scanner, Auto Bank Payment Verification, Supabase Cloud Sync, and Full 9-Screen Cutting \u0026 Quotation Calculator.",
+  "requestFramePermissions": [
+    "camera",
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

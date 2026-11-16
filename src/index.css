@@ -1,0 +1,451 @@
+@import "tailwindcss";
+
+:root {
+  --boss-bg: #0C0F14;
+  --boss-panel: #14181F;
+  --boss-panel2: #1C222B;
+  --boss-border: #2B3441;
+  --boss-primary: #F5B738;
+  --boss-accent: #38BDF8;
+  --boss-text: #FFFFFF;
+  --boss-text-muted: #CBD5E1;
+  --boss-btn-text: #000000;
+}
+
+@layer base {
+  html,
+  body,
+  * {
+    scrollbar-width: none !important;
+    -ms-overflow-style: none !important;
+  }
+
+  *::-webkit-scrollbar {
+    display: none !important;
+    width: 0 !important;
+    height: 0 !important;
+  }
+
+  html,
+  body {
+    overflow-x: hidden;
+    max-width: 100%;
+    -webkit-text-size-adjust: 100%;
+    touch-action: manipulation;
+  }
+
+  body {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    background-color: var(--boss-bg);
+    color: var(--boss-text);
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: 'Outfit', sans-serif;
+  }
+
+  .font-mono {
+    font-family: 'IBM Plex Mono', monospace;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Global Mobile Theme Engine & High-Contrast Guard */
+.boss-theme-root {
+  background-color: var(--boss-bg) !important;
+  color: var(--boss-text) !important;
+  overflow-x: hidden !important;
+  max-width: 100% !important;
+  transition: background-color 0.25s ease, color 0.25s ease;
+}
+
+.boss-theme-root .bg-\[\#0F172A\],
+.boss-theme-root .bg-\[\#0C0F14\] {
+  background-color: var(--boss-bg) !important;
+}
+
+.boss-theme-root .bg-\[\#14181F\],
+.boss-theme-root .bg-\[\#1E293B\] {
+  background-color: var(--boss-panel) !important;
+}
+
+.boss-theme-root .bg-\[\#1C222B\],
+.boss-theme-root .bg-\[\#18202C\] {
+  background-color: var(--boss-panel2) !important;
+}
+
+.boss-theme-root .border-\[\#2B3441\],
+.boss-theme-root .border-\[\#334155\],
+.boss-theme-root .border-slate-800,
+.boss-theme-root .border-slate-700 {
+  border-color: var(--boss-border) !important;
+}
+
+/* Primary Theme Color Propagation on Gold/Primary Buttons & Borders */
+.boss-theme-root .bg-\[\#F5B738\],
+.boss-theme-root .bg-\[\#FFD700\] {
+  background-color: var(--boss-primary) !important;
+  color: var(--boss-btn-text) !important;
+}
+
+.boss-theme-root .border-\[\#F5B738\],
+.boss-theme-root .border-\[\#FFD700\] {
+  border-color: var(--boss-primary) !important;
+}
+
+/* ========================================================================= */
+/* 1. TYPOGRAPHY ENGINE (FONT FAMILIES DYNAMICALLY SWITCHED)                 */
+/* ========================================================================= */
+.boss-theme-root[data-font-family="PLUS_JAKARTA"],
+[data-font-family="PLUS_JAKARTA"] body {
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif !important;
+}
+
+.boss-theme-root[data-font-family="IBM_PLEX_MONO"],
+[data-font-family="IBM_PLEX_MONO"] body {
+  font-family: 'IBM Plex Mono', monospace !important;
+}
+
+.boss-theme-root[data-font-family="RAJDHANI"],
+[data-font-family="RAJDHANI"] body {
+  font-family: 'Rajdhani', sans-serif !important;
+  letter-spacing: 0.025em;
+}
+
+.boss-theme-root[data-font-family="SPACE_GROTESK"],
+[data-font-family="SPACE_GROTESK"] body {
+  font-family: 'Space Grotesk', sans-serif !important;
+}
+
+.boss-theme-root[data-font-family="OUTFIT"],
+[data-font-family="OUTFIT"] body {
+  font-family: 'Outfit', sans-serif !important;
+}
+
+.boss-theme-root[data-font-family="CINZEL"],
+[data-font-family="CINZEL"] body {
+  font-family: 'Cinzel', serif !important;
+}
+
+.boss-theme-root[data-font-family="INTER"],
+[data-font-family="INTER"] body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
+}
+
+/* ========================================================================= */
+/* 2. BUTTON SHAPES & ELEVATIONS (PILL_3D, SHARP_SQUARE, CHISELED_3D, etc.) */
+/* ========================================================================= */
+/* 1. PILL_3D: Sleek compact rounded pill with subtle 3D tactile elevation */
+.boss-theme-root[data-btn-shape="PILL_3D"] button:not(.boss-flat-btn),
+.boss-theme-root[data-btn-shape="PILL_3D"] label.cursor-pointer:not(.boss-flat-btn),
+.boss-theme-root[data-btn-shape="PILL_3D"] a.cursor-pointer:not(.boss-flat-btn),
+.boss-theme-root[data-btn-style="PILL_3D"] button:not(.boss-flat-btn),
+.boss-theme-root[data-btn-style="PILL_3D"] label.cursor-pointer:not(.boss-flat-btn) {
+  border-radius: 9999px !important;
+  box-shadow: 0 1.5px 0 rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.18) !important;
+  transition: transform 0.12s ease, box-shadow 0.12s ease !important;
+}
+.boss-theme-root[data-btn-shape="PILL_3D"] button:not(.boss-flat-btn):active,
+.boss-theme-root[data-btn-style="PILL_3D"] button:not(.boss-flat-btn):active {
+  transform: translateY(1px) !important;
+}
+
+/* 2. SHARP_SQUARE: 90° CAD Engineering cut, zero radius, crisp borders */
+.boss-theme-root[data-btn-shape="SHARP_SQUARE"] button:not(.boss-flat-btn),
+.boss-theme-root[data-btn-shape="SHARP_SQUARE"] label.cursor-pointer:not(.boss-flat-btn),
+.boss-theme-root[data-btn-shape="SHARP_SQUARE"] a.cursor-pointer:not(.boss-flat-btn),
+.boss-theme-root[data-btn-shape="SHARP_SQUARE"] input,
+.boss-theme-root[data-btn-shape="SHARP_SQUARE"] select,
+.boss-theme-root[data-btn-shape="SHARP_SQUARE"] textarea,
+.boss-theme-root[data-btn-style="SHARP_CYBER"] button:not(.boss-flat-btn),
+.boss-theme-root[data-btn-style="SHARP_CYBER"] label.cursor-pointer:not(.boss-flat-btn) {
+  border-radius: 0px !important;
+  border-width: 1.5px !important;
+  letter-spacing: 0.03em;
+}
+
+/* 3. CHISELED_3D: Industrial heavy-duty machine buttons with bottom border press */
+.boss-theme-root[data-btn-shape="CHISELED_3D"] button:not(.boss-flat-btn),
+.boss-theme-root[data-btn-shape="CHISELED_3D"] label.cursor-pointer:not(.boss-flat-btn),
+.boss-theme-root[data-btn-shape="CHISELED_3D"] a.cursor-pointer:not(.boss-flat-btn) {
+  border-radius: 6px !important;
+  border-bottom-width: 3px !important;
+  border-bottom-color: rgba(0, 0, 0, 0.55) !important;
+  box-shadow: 0 3px 5px -1px rgba(0, 0, 0, 0.3) !important;
+  transition: transform 0.08s ease, border-bottom-width 0.08s ease !important;
+}
+.boss-theme-root[data-btn-shape="CHISELED_3D"] button:not(.boss-flat-btn):active {
+  transform: translateY(1px) !important;
+  border-bottom-width: 1px !important;
+}
+
+/* 4. SQUIRCLE_SMOOTH: Modern iOS / OneUI organic curve with soft glow */
+.boss-theme-root[data-btn-shape="SQUIRCLE_SMOOTH"] button:not(.boss-flat-btn),
+.boss-theme-root[data-btn-shape="SQUIRCLE_SMOOTH"] label.cursor-pointer:not(.boss-flat-btn),
+.boss-theme-root[data-btn-shape="SQUIRCLE_SMOOTH"] a.cursor-pointer:not(.boss-flat-btn),
+.boss-theme-root[data-btn-style="SOFT_MOBILE"] button:not(.boss-flat-btn),
+.boss-theme-root[data-btn-style="SOFT_MOBILE"] label.cursor-pointer:not(.boss-flat-btn) {
+  border-radius: 12px !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22) !important;
+}
+
+/* 5. CYBER_CHAMFER: Angled high-tech chamfer clip */
+.boss-theme-root[data-btn-shape="CYBER_CHAMFER"] button:not(.boss-flat-btn),
+.boss-theme-root[data-btn-shape="CYBER_CHAMFER"] label.cursor-pointer:not(.boss-flat-btn),
+.boss-theme-root[data-btn-shape="CYBER_CHAMFER"] a.cursor-pointer:not(.boss-flat-btn),
+.boss-theme-root[data-btn-style="GLASS_NEON"] button:not(.boss-flat-btn),
+.boss-theme-root[data-btn-style="GLASS_NEON"] label.cursor-pointer:not(.boss-flat-btn) {
+  border-radius: 4px !important;
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.18), inset 0 1px 1px rgba(255, 255, 255, 0.22) !important;
+}
+
+/* 6. METALLIC_BEVEL: Regal bevel with dual highlight */
+.boss-theme-root[data-btn-shape="METALLIC_BEVEL"] button:not(.boss-flat-btn),
+.boss-theme-root[data-btn-shape="METALLIC_BEVEL"] label.cursor-pointer:not(.boss-flat-btn),
+.boss-theme-root[data-btn-shape="METALLIC_BEVEL"] a.cursor-pointer:not(.boss-flat-btn),
+.boss-theme-root[data-btn-style="ROYAL_BEVEL"] button:not(.boss-flat-btn),
+.boss-theme-root[data-btn-style="ROYAL_BEVEL"] label.cursor-pointer:not(.boss-flat-btn) {
+  border-radius: 8px !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), inset 0 -1px 0 rgba(0, 0, 0, 0.38), 0 2px 4px rgba(0, 0, 0, 0.3) !important;
+}
+
+/* ========================================================================= */
+/* 3. TABLE BORDERS & PADDING ENGINE (WORKSHOP, CAD, MODERN, LUXURY, etc.)   */
+/* ========================================================================= */
+/* 1. COMPACT_WORKSHOP: Dense workshop padding, tight borders, high density data */
+.boss-theme-root[data-table-style="COMPACT_WORKSHOP"] table th,
+.boss-theme-root[data-table-style="COMPACT_WORKSHOP"] table td {
+  padding-top: 0.22rem !important;
+  padding-bottom: 0.22rem !important;
+  padding-left: 0.38rem !important;
+  padding-right: 0.38rem !important;
+  font-size: 0.69rem !important;
+  border-width: 1px !important;
+  border-color: var(--boss-border) !important;
+}
+.boss-theme-root[data-table-style="COMPACT_WORKSHOP"] table tbody tr:nth-child(even) {
+  background-color: rgba(255, 255, 255, 0.02) !important;
+}
+
+/* 2. SPACIOUS_MODERN: Generous breathing room, soft floating dividers, rounded corners */
+.boss-theme-root[data-table-style="SPACIOUS_MODERN"] table th,
+.boss-theme-root[data-table-style="SPACIOUS_MODERN"] table td {
+  padding-top: 0.75rem !important;
+  padding-bottom: 0.75rem !important;
+  padding-left: 1rem !important;
+  padding-right: 1rem !important;
+  font-size: 0.8125rem !important;
+  border-bottom-width: 1px !important;
+  border-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+/* 3. BLUEPRINT_CAD: Technical CAD grid, cyan/blue accented dividers, tabular numbers */
+.boss-theme-root[data-table-style="BLUEPRINT_CAD"] table {
+  border-collapse: collapse !important;
+  border: 2px solid var(--boss-accent, #38BDF8) !important;
+}
+.boss-theme-root[data-table-style="BLUEPRINT_CAD"] table th {
+  background-color: rgba(56, 189, 248, 0.12) !important;
+  color: var(--boss-accent, #38BDF8) !important;
+  border: 1px solid rgba(56, 189, 248, 0.35) !important;
+  padding: 0.4rem 0.65rem !important;
+  font-family: 'IBM Plex Mono', monospace !important;
+  letter-spacing: 0.04em !important;
+}
+.boss-theme-root[data-table-style="BLUEPRINT_CAD"] table td {
+  border: 1px solid rgba(56, 189, 248, 0.2) !important;
+  padding: 0.35rem 0.65rem !important;
+  font-family: 'IBM Plex Mono', monospace !important;
+}
+
+/* 4. GLASS_LUXURY: Frosted glass blur, golden border glow, gradient row highlights */
+.boss-theme-root[data-table-style="GLASS_LUXURY"] table {
+  backdrop-filter: blur(8px) !important;
+  background: rgba(15, 23, 42, 0.6) !important;
+  border: 1px solid rgba(245, 183, 56, 0.35) !important;
+  border-radius: 12px !important;
+  overflow: hidden !important;
+}
+.boss-theme-root[data-table-style="GLASS_LUXURY"] table th {
+  background: linear-gradient(180deg, rgba(245, 183, 56, 0.18), rgba(245, 183, 56, 0.06)) !important;
+  color: #F5B738 !important;
+  padding: 0.6rem 0.85rem !important;
+  border-bottom: 1px solid rgba(245, 183, 56, 0.3) !important;
+}
+.boss-theme-root[data-table-style="GLASS_LUXURY"] table td {
+  padding: 0.5rem 0.85rem !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05) !important;
+}
+
+/* 5. CHISELED_INDUSTRIAL: Heavy 2px solid industrial borders, tactile cell lines */
+.boss-theme-root[data-table-style="CHISELED_INDUSTRIAL"] table {
+  border: 2px solid #475569 !important;
+}
+.boss-theme-root[data-table-style="CHISELED_INDUSTRIAL"] table th {
+  background: #1E293B !important;
+  color: #FFFFFF !important;
+  border: 1.5px solid #475569 !important;
+  padding: 0.45rem 0.75rem !important;
+  text-transform: uppercase !important;
+}
+.boss-theme-root[data-table-style="CHISELED_INDUSTRIAL"] table td {
+  border: 1px solid #334155 !important;
+  padding: 0.4rem 0.75rem !important;
+}
+
+/* ========================================================================= */
+/* 4. ICON PACK ENGINE (OUTLINE, DUOTONE, TECHNICAL, NEON, BADGE)             */
+/* ========================================================================= */
+/* 1. MINIMAL_OUTLINE: Crisp, ultra-thin 1.5px stroke */
+.boss-theme-root[data-icon-pack="MINIMAL_OUTLINE"] svg {
+  stroke-width: 1.5 !important;
+}
+
+/* 2. BOLD_DUOTONE: Thick 2.4px punchy stroke with accent shadow */
+.boss-theme-root[data-icon-pack="BOLD_DUOTONE"] svg {
+  stroke-width: 2.3 !important;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.5));
+}
+
+/* 3. CAD_TECHNICAL: Technical boxed / geometric stroke */
+.boss-theme-root[data-icon-pack="CAD_TECHNICAL"] svg {
+  stroke-width: 1.8 !important;
+  vector-effect: non-scaling-stroke;
+}
+
+/* 4. NEON_CYBER: Radiant neon glow filter on all icons */
+.boss-theme-root[data-icon-pack="NEON_CYBER"] svg {
+  stroke-width: 2 !important;
+  filter: drop-shadow(0 0 5px var(--boss-primary, #38BDF8)) !important;
+  transition: filter 0.2s ease !important;
+}
+
+/* 5. ROUNDED_BADGE: High contrast pill badge icons */
+.boss-theme-root[data-icon-pack="ROUNDED_BADGE"] svg {
+  stroke-width: 2.1 !important;
+}
+
+/* ========================================================================= */
+/* 5. MOBILE TEMPLATE LAYOUT TRANSFORMATIONS (CARDS, HEADERS, SURFACES)      */
+/* ========================================================================= */
+.boss-theme-root[data-template="MOBILE_ONEUI"] .rounded-xl,
+.boss-theme-root[data-template="MOBILE_ONEUI"] .rounded-2xl {
+  border-radius: 22px !important;
+}
+
+.boss-theme-root[data-template="INDUSTRIAL_CAD"] .rounded-xl,
+.boss-theme-root[data-template="INDUSTRIAL_CAD"] .rounded-2xl,
+.boss-theme-root[data-template="INDUSTRIAL_CAD"] .rounded-lg {
+  border-radius: 4px !important;
+}
+
+.boss-theme-root[data-template="GLASS_LUXURY"] .rounded-xl,
+.boss-theme-root[data-template="GLASS_LUXURY"] .rounded-2xl {
+  border-radius: 18px !important;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.08) !important;
+}
+
+.boss-theme-root[data-template="ROYAL_CREST"] .rounded-xl,
+.boss-theme-root[data-template="ROYAL_CREST"] .rounded-2xl {
+  border-radius: 14px !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(245, 183, 56, 0.14) !important;
+}
+
+/* ========================================================================= */
+/* LIGHT / DAYLIGHT THEME 100% ZERO-HIDDEN-TEXT CONTRAST GUARD               */
+/* ========================================================================= */
+.boss-theme-light .text-white,
+.boss-theme-light .text-slate-100,
+.boss-theme-light .text-slate-200 {
+  color: #0F172A !important;
+}
+
+.boss-theme-light .text-slate-300,
+.boss-theme-light .text-slate-400,
+.boss-theme-light .text-slate-500 {
+  color: #334155 !important;
+}
+
+.boss-theme-light .text-\[\#F5B738\],
+.boss-theme-light .text-\[\#FFD700\],
+.boss-theme-light .text-amber-300,
+.boss-theme-light .text-amber-200,
+.boss-theme-light .text-amber-400 {
+  color: #B45309 !important;
+}
+
+.boss-theme-light .text-sky-300,
+.boss-theme-light .text-sky-400,
+.boss-theme-light .text-sky-200 {
+  color: #0369A1 !important;
+}
+
+.boss-theme-light .text-emerald-300,
+.boss-theme-light .text-emerald-400,
+.boss-theme-light .text-emerald-200 {
+  color: #047857 !important;
+}
+
+.boss-theme-light .text-rose-300,
+.boss-theme-light .text-rose-400,
+.boss-theme-light .text-rose-200 {
+  color: #BE123C !important;
+}
+
+.boss-theme-light input,
+.boss-theme-light select,
+.boss-theme-light textarea {
+  color: #0F172A !important;
+}
+
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 0;
+  }
+  html,
+  body,
+  .boss-theme-root,
+  main {
+    background: #FFFFFF !important;
+    color: #0F172A !important;
+    overflow: visible !important;
+    height: auto !important;
+    max-width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+  .no-print,
+  header {
+    display: none !important;
+  }
+  .boss-a4-scale-outer {
+    width: 210mm !important;
+    height: 297mm !important;
+    margin: 0 auto !important;
+    overflow: visible !important;
+  }
+  #boss-official-a4-quotation-sheet {
+    width: 210mm !important;
+    height: 297mm !important;
+    min-height: 297mm !important;
+    max-width: 210mm !important;
+    transform: none !important;
+    border: 1.5px solid #B45309 !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    margin: 0 auto !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+  .boss-printable-chart {
+    padding: 8mm !important;
+    background: #FFFFFF !important;
+    color: #0F172A !important;
+    border-color: #CBD5E1 !important;
+  }
+  .boss-printable-chart * {
+    color: #0F172A !important;
+    border-color: #CBD5E1 !important;
+  }
+}
