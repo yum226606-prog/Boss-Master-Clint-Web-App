@@ -30,7 +30,7 @@ import {
   WindowFormulaSettings,
   WindowItem,
 } from './types/bossModels';
-import { callSupabaseProxy } from './utils/supabaseClientConfig';
+import { callSupabaseProxy, supabase } from './utils/supabaseClientConfig';
 import {
   DEFAULT_COLORS,
   DEFAULT_SECTIONS,
@@ -69,6 +69,7 @@ import {
   evaluateClientAccessState,
   getOrCreateClientDeviceId,
   loadAuthSession,
+  requestAndSaveGpsLocation,
   saveAuthSession,
 } from './utils/adminApiConfig';
 
@@ -508,7 +509,7 @@ export default function App() {
             userName: String(m.user_name || 'Client'),
             userPhone: String(m.phone || ''),
             userEmail: String(m.email || ''),
-            requestType: String(m.subject || 'Support Message'),
+            requestType: String(m.category || m.subject || 'Support Message'),
             message: String(m.message || m.text || ''),
             createdAt: m.created_at ? new Date(m.created_at).getTime() || Date.now() : Date.now(),
             isResolved: Boolean(m.is_resolved || m.status === 'resolved'),
@@ -557,9 +558,10 @@ export default function App() {
       const messagePayload = {
         device_id: clientDeviceId,
         user_id: authSession?.userId || clientDeviceId,
+        category: payload.requestType || 'General Support',
         user_name: payload.userName || authSession?.name || 'Client',
         phone: payload.userPhone || authSession?.phone || '',
-        email: payload.userEmail || authSession?.email || null,
+        email: payload.userEmail || authSession?.email || '',
         subject: payload.requestType || 'Support Request',
         message: payload.message,
         text: payload.message,
@@ -604,7 +606,7 @@ export default function App() {
         userPhone: messagePayload.phone,
         userCnic: authSession?.cnic || '',
         userEmail: String(messagePayload.email || ''),
-        requestType: messagePayload.subject,
+        requestType: messagePayload.category || messagePayload.subject,
         message: payload.message,
         createdAt: insertedRow?.created_at
           ? new Date(insertedRow.created_at).getTime() || Date.now()
@@ -670,12 +672,14 @@ export default function App() {
     setAuthSession(session);
     setAuthNotice(null);
     setIsSubscriptionExpired(false);
+    requestAndSaveGpsLocation(session.deviceId);
     await syncFromSupabase({ forceRates: false, silent: true, sessionOverride: session });
     loadSupportRequests();
   };
 
   const handleLogout = () => {
     clearAuthSession();
+    supabase.auth.signOut().catch(() => {});
     setAuthSession(null);
     setIsSubscriptionExpired(false);
     setCloudAccessInfo({
@@ -789,8 +793,12 @@ export default function App() {
       // ignore storage errors
     }
 
+    // Request GPS permission on app startup & sync to users table if logged in
+    const existingSession = loadAuthSession();
+    requestAndSaveGpsLocation(existingSession ? existingSession.deviceId : undefined);
+
     // Sync cloud configs & access status only if verified session exists
-    if (loadAuthSession()) {
+    if (existingSession) {
       syncFromSupabase({ forceRates: false, silent: true });
       loadSupportRequests();
     }

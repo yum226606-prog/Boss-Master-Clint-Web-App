@@ -1,3 +1,5 @@
+import { createClient } from '@supabase/supabase-js';
+
 export const DEFAULT_SUPABASE_URL = (
   import.meta.env.VITE_SUPABASE_URL || 'https://sumeemoqtnveiftzjhsl.supabase.co'
 ).trim();
@@ -6,6 +8,26 @@ export const DEFAULT_PUBLISHABLE_KEY = (
   import.meta.env.VITE_SUPABASE_ANON_KEY ||
   'sb_publishable_rEQFsCRG9_kjgPvauNvocg_hhxDPjOd'
 ).trim();
+
+const resolvedSupabaseUrl = (
+  (typeof window !== 'undefined' ? localStorage.getItem('boss_custom_supabase_url') : null) ||
+  DEFAULT_SUPABASE_URL
+)
+  .replace(/\/rest\/v1\/?$/i, '')
+  .replace(/\/$/, '');
+
+const resolvedSupabaseKey =
+  (typeof window !== 'undefined' ? localStorage.getItem('boss_custom_supabase_key') : null) ||
+  DEFAULT_PUBLISHABLE_KEY;
+
+export const supabase = createClient(resolvedSupabaseUrl, resolvedSupabaseKey, {
+  auth: {
+    detectSessionInUrl: true,
+    persistSession: true,
+    autoRefreshToken: true,
+  },
+});
+
 
 export interface SmsOtpGatewayConfig {
   sendpkEnabled: boolean;

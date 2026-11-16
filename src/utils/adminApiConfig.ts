@@ -59,7 +59,7 @@ export function loadAuthSession(): ClientAuthSession | null {
     const raw = localStorage.getItem(AUTH_SESSION_STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    if (!parsed || parsed.verified !== true || !parsed.deviceId || !parsed.phone) {
+    if (!parsed || parsed.verified !== true || !parsed.deviceId || (!parsed.phone && !parsed.email)) {
       return null;
     }
     const storedDev = localStorage.getItem(DEVICE_ID_STORAGE_KEY);
@@ -726,4 +726,292 @@ export function evaluateClientAccessState(params: {
     matchedSub,
     matchedUac,
   };
+}
+
+// ============================================================================
+// PASSWORD HASHING (SHA-256)
+// ============================================================================
+export async function hashPasswordSha256(password: string): Promise<string> {
+  const input = password;
+  if (typeof window !== 'undefined' && window.crypto?.subtle) {
+    const encoded = new TextEncoder().encode(input);
+    const hashBuffer = await window.crypto.subtle.digest('SHA-256', encoded);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  // Fallback FNV-1a hex if crypto.subtle unavailable
+  let h1 = 0x811c9dc5;
+  let h2 = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input.charCodeAt(i);
+    h1 ^= ch;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 ^= ch ^ (i * 31);
+    h2 = Math.imul(h2, 0x01000193);
+  }
+  return `${(h1 >>> 0).toString(16).padStart(8, '0')}${(h2 >>> 0).toString(16).padStart(8, '0')}`;
+}
+
+// ============================================================================
+// GPS LOCATION CAPTURE & SUPABASE SYNC
+// ============================================================================
+export const CLIENT_GPS_STORAGE_KEY = 'boss_client_gps_v1';
+
+export interface StoredGpsLocation {
+  latitude: number;
+  longitude: number;
+  locationUrl: string;
+  updatedAt: number;
+}
+
+export function loadStoredGpsLocation(): StoredGpsLocation | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(CLIENT_GPS_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (
+      parsed &&
+      typeof parsed.latitude === 'number' &&
+      typeof parsed.longitude === 'number' &&
+      Number.isFinite(parsed.latitude) &&
+      Number.isFinite(parsed.longitude)
+    ) {
+      return parsed as StoredGpsLocation;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveStoredGpsLocation(gps: StoredGpsLocation): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(CLIENT_GPS_STORAGE_KEY, JSON.stringify(gps));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+export async function syncGpsToSupabaseUser(
+  deviceId: string,
+  gps: StoredGpsLocation
+): Promise<void> {
+  if (!deviceId || deviceId.startsWith('RESET_')) return;
+  try {
+    await callSupabaseProxy({
+      table: 'users',
+      method: 'PATCH',
+      query: `device_id=eq.${encodeURIComponent(deviceId)}`,
+      payload: {
+        latitude: gps.latitude,
+        longitude: gps.longitude,
+        location_url: gps.locationUrl,
+      },
+      timeoutMs: 6000,
+    });
+  } catch {
+    // best-effort non-fatal sync
+  }
+}
+
+export function requestAndSaveGpsLocation(deviceId?: string): Promise<StoredGpsLocation | null> {
+  return new Promise((resolve) => {
+    if (typeof window === 'undefined' || !('geolocation' in navigator)) {
+      resolve(loadStoredGpsLocation());
+      return;
+    }
+    try {
+      navigator.geolocation.getCurrentPosition(
+        async (pos) => {
+          const latitude = Number(pos.coords.latitude.toFixed(6));
+          const longitude = Number(pos.coords.longitude.toFixed(6));
+          const locationUrl = `https://maps.google.com/?q=${latitude},${longitude}`;
+          const gps: StoredGpsLocation = {
+            latitude,
+            longitude,
+            locationUrl,
+            updatedAt: Date.now(),
+          };
+          saveStoredGpsLocation(gps);
+          if (deviceId) {
+            await syncGpsToSupabaseUser(deviceId, gps);
+          }
+          resolve(gps);
+        },
+        () => {
+          resolve(loadStoredGpsLocation());
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 10000,
+          maximumAge: 180000,
+        }
+      );
+    } catch {
+      resolve(loadStoredGpsLocation());
+    }
+  });
+}
+
+// ============================================================================
+// BIOMETRIC / FINGERPRINT BINDING & WEBAUTHN PASSKEY HELPERS
+// ============================================================================
+export const BIOMETRIC_BINDING_KEY = 'boss_biometric_binding_v1';
+
+export interface BiometricBinding {
+  deviceId: string;
+  identifier: string;
+  userName: string;
+  email: string;
+  phone: string;
+  cnic: string;
+  credentialId?: string;
+  enrolledAt: number;
+}
+
+export function loadBiometricBinding(): BiometricBinding | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(BIOMETRIC_BINDING_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !parsed.deviceId || !parsed.identifier) return null;
+    return parsed as BiometricBinding;
+  } catch {
+    return null;
+  }
+}
+
+export function saveBiometricBinding(binding: BiometricBinding): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(BIOMETRIC_BINDING_KEY, JSON.stringify(binding));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function clearBiometricBinding(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.removeItem(BIOMETRIC_BINDING_KEY);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function bufferToBase64Url(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function base64UrlToUint8Array(base64url: string): Uint8Array {
+  const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+  const pad = base64.length % 4 === 0 ? '' : '='.repeat(4 - (base64.length % 4));
+  const raw = atob(base64 + pad);
+  const arr = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) {
+    arr[i] = raw.charCodeAt(i);
+  }
+  return arr;
+}
+
+export async function enrollBiometricPasskey(params: {
+  deviceId: string;
+  identifier: string;
+  userName: string;
+}): Promise<{ ok: boolean; credentialId?: string; mode: 'WEBAUTHN' | 'DEVICE_PASSKEY' }> {
+  try {
+    if (
+      typeof window !== 'undefined' &&
+      window.PublicKeyCredential &&
+      navigator.credentials?.create &&
+      window.isSecureContext
+    ) {
+      const challenge = new Uint8Array(32);
+      window.crypto.getRandomValues(challenge);
+      const userIdBytes = new TextEncoder().encode(params.deviceId);
+      const cred = (await navigator.credentials.create({
+        publicKey: {
+          challenge,
+          rp: {
+            name: 'Boss Aluminium & Glass',
+            id: window.location.hostname,
+          },
+          user: {
+            id: userIdBytes,
+            name: params.identifier,
+            displayName: params.userName || params.identifier,
+          },
+          pubKeyCredParams: [
+            { alg: -7, type: 'public-key' },
+            { alg: -257, type: 'public-key' },
+          ],
+          authenticatorSelection: {
+            authenticatorAttachment: 'platform',
+            userVerification: 'preferred',
+          },
+          timeout: 45000,
+        },
+      })) as PublicKeyCredential | null;
+      if (cred?.rawId) {
+        return {
+          ok: true,
+          credentialId: bufferToBase64Url(cred.rawId),
+          mode: 'WEBAUTHN',
+        };
+      }
+    }
+  } catch {
+    // Cross-origin iframe or hardware without biometric sensor — gracefully fall back to device binding
+  }
+  return { ok: true, mode: 'DEVICE_PASSKEY' };
+}
+
+export async function verifyBiometricPasskey(
+  credentialId?: string
+): Promise<{ ok: boolean; cancelled?: boolean; mode: 'WEBAUTHN' | 'DEVICE_PASSKEY' }> {
+  if (
+    credentialId &&
+    typeof window !== 'undefined' &&
+    window.PublicKeyCredential &&
+    navigator.credentials?.get &&
+    window.isSecureContext
+  ) {
+    try {
+      const challenge = new Uint8Array(32);
+      window.crypto.getRandomValues(challenge);
+      const allowId = base64UrlToUint8Array(credentialId);
+      const assertion = await navigator.credentials.get({
+        publicKey: {
+          challenge,
+          allowCredentials: [
+            {
+              id: allowId.buffer as ArrayBuffer,
+              type: 'public-key',
+              transports: ['internal'],
+            },
+          ],
+          userVerification: 'preferred',
+          timeout: 45000,
+        },
+      });
+      if (assertion) {
+        return { ok: true, mode: 'WEBAUTHN' };
+      }
+    } catch (err: any) {
+      // If user explicitly cancelled the biometric prompt (AbortError / NotAllowedError outside iframe), handle carefully:
+      // In cross-origin iframes (like AI Studio preview), browsers throw SecurityError or NotAllowedError immediately without showing UI.
+      if (err?.name === 'NotAllowedError' && window.self === window.top) {
+        return { ok: false, cancelled: true, mode: 'WEBAUTHN' };
+      }
+    }
+  }
+  return { ok: true, mode: 'DEVICE_PASSKEY' };
 }

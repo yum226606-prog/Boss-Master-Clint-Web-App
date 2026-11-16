@@ -1,11 +1,15 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeft,
   Camera,
   CheckCircle2,
   CreditCard,
+  Eye,
+  EyeOff,
+  Fingerprint,
   KeyRound,
+  Lock,
   LogIn,
   Mail,
   MapPin,
@@ -18,10 +22,12 @@ import {
   UserPlus,
 } from 'lucide-react';
 import bossLionLogoImg from '../assets/images/boss_lion_logo_1791741005749.jpg';
-import { callSupabaseProxy } from '../utils/supabaseClientConfig';
+import { callSupabaseProxy, supabase } from '../utils/supabaseClientConfig';
 import {
+  BiometricBinding,
   ClientAuthSession,
   compressImageToDataUrl,
+  enrollBiometricPasskey,
   extractAuthCallbackFromUrl,
   extractSmsGatewayConfig,
   fetchAdminServer,
@@ -29,16 +35,44 @@ import {
   formatPakCnic,
   formatPakPhone,
   getOrCreateClientDeviceId,
+  hashPasswordSha256,
+  loadBiometricBinding,
+  loadStoredGpsLocation,
   normalizeCnicDigits,
   normalizePhoneDigits,
+  requestAndSaveGpsLocation,
   saveAuthSession,
+  saveBiometricBinding,
   sendSupabaseEmailOtp,
+  syncGpsToSupabaseUser,
   syncRegisteredUserToAdminUac,
   TWO_DAYS_MS,
+  verifyBiometricPasskey,
   verifySupabaseEmailOtp,
 } from '../utils/adminApiConfig';
 
 const PENDING_REG_DRAFT_KEY = 'boss_pending_reg_draft_v1';
+
+const GoogleGIcon: React.FC<{ className?: string }> = ({ className = 'w-4 h-4' }) => (
+  <svg viewBox="0 0 24 24" className={className} aria-hidden="true">
+    <path
+      fill="#4285F4"
+      d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17Z"
+    />
+    <path
+      fill="#34A853"
+      d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.31 24 12 24Z"
+    />
+    <path
+      fill="#FBBC05"
+      d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14Z"
+    />
+    <path
+      fill="#EA4335"
+      d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96Z"
+    />
+  </svg>
+);
 
 interface ClientAuthModalProps {
   clientDeviceId: string;
@@ -59,7 +93,17 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
 
   // Login State
   const [loginIdentifier, setLoginIdentifier] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [isBiometricLoggingIn, setIsBiometricLoggingIn] = useState(false);
+  const [biometricBinding, setBiometricBinding] = useState<BiometricBinding | null>(() =>
+    loadBiometricBinding()
+  );
+
+  // Google OAuth State
+  const [isGoogleAuthenticating, setIsGoogleAuthenticating] = useState(false);
+  const processedGoogleUserIdRef = useRef<string | null>(null);
 
   // Create Account State
   const [regName, setRegName] = useState('');
@@ -67,6 +111,9 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
   const [regEmail, setRegEmail] = useState('');
   const [regCnic, setRegCnic] = useState('');
   const [regAddress, setRegAddress] = useState('');
+  const [regPassword, setRegPassword] = useState('');
+  const [regPasswordHash, setRegPasswordHash] = useState('');
+  const [showRegPassword, setShowRegPassword] = useState(false);
   const [cnicFrontPhoto, setCnicFrontPhoto] = useState('');
   const [cnicBackPhoto, setCnicBackPhoto] = useState('');
   const [isCompressingPhoto, setIsCompressingPhoto] = useState<'FRONT' | 'BACK' | null>(null);
@@ -108,6 +155,391 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     return () => window.removeEventListener('keydown', blockEscape, true);
   }, []);
 
+  // =========================================================================
+  // RULE 1: HANDLE RETURN FROM GOOGLE OAUTH (AUTO-VERIFIED ACCOUNT / LOGIN)
+  // =========================================================================
+  const finalizeGoogleOAuthUser = async (supaUser: any) => {
+    const gEmail = String(supaUser?.email || '').trim().toLowerCase();
+    if (!gEmail) return;
+    if (processedGoogleUserIdRef.current === `${supaUser.id || gEmail}`) return;
+    processedGoogleUserIdRef.current = `${supaUser.id || gEmail}`;
+
+    const gName =
+      String(
+        supaUser?.user_metadata?.full_name ||
+          supaUser?.user_metadata?.name ||
+          gEmail.split('@')[0] ||
+          'Valued Client'
+      ).trim() || 'Valued Client';
+
+    setIsGoogleAuthenticating(true);
+    setErrorMsg(null);
+    setInfoMsg(`Google Account (${gEmail}) verify ho raha hai...`);
+
+    try {
+      const [directEmailRes, allUsersRes, subsRes, masterCfg, gps] = await Promise.all([
+        callSupabaseProxy({
+          table: 'users',
+          method: 'GET',
+          query: `email=ilike.${encodeURIComponent(gEmail)}&select=*`,
+          timeoutMs: 8000,
+        }),
+        callSupabaseProxy({
+          table: 'users',
+          method: 'GET',
+          query: 'select=*&limit=350',
+          timeoutMs: 8000,
+        }),
+        callSupabaseProxy({
+          table: 'subscriptions',
+          method: 'GET',
+          query: 'select=*&limit=350',
+          timeoutMs: 8000,
+        }),
+        fetchMasterEngineConfigFromSupabase(),
+        Promise.resolve(loadStoredGpsLocation()).then((existing) =>
+          existing ? existing : requestAndSaveGpsLocation()
+        ),
+      ]);
+
+      const directList = Array.isArray(directEmailRes.data) ? directEmailRes.data : [];
+      const usersList = Array.isArray(allUsersRes.data) ? allUsersRes.data : [];
+      const subsList = Array.isArray(subsRes.data) ? subsRes.data : [];
+      const uacList = Array.isArray(masterCfg?.userAccessControl)
+        ? masterCfg.userAccessControl
+        : Object.values(masterCfg?.userAccessControl || {});
+
+      const matchesEmail = (r: any) =>
+        r && typeof r === 'object' && String(r.email || '').trim().toLowerCase() === gEmail;
+
+      const matchedUser = directList[0] || usersList.find(matchesEmail) || null;
+      const matchedSub = subsList.find(matchesEmail) || null;
+      const matchedUac: any = uacList.find(matchesEmail) || null;
+
+      const activeDeviceId = clientDeviceId || getOrCreateClientDeviceId();
+      const now = Date.now();
+
+      if (matchedUser || matchedSub || matchedUac) {
+        const isBlocked = Boolean(
+          matchedUser?.is_blocked ||
+            matchedUser?.isBlocked ||
+            matchedUser?.account_status === 'BLOCKED' ||
+            matchedSub?.is_blocked ||
+            matchedUac?.is_blocked ||
+            matchedUac?.isBlocked
+        );
+        if (isBlocked) {
+          const blockReason =
+            matchedUser?.block_reason ||
+            matchedUac?.block_reason ||
+            matchedUac?.blockReason ||
+            'Suspended by Master Admin';
+          await supabase.auth.signOut().catch(() => {});
+          setErrorMsg(`Account Blocked: ${blockReason}`);
+          setInfoMsg(null);
+          return;
+        }
+
+        const enforceLock =
+          masterCfg?.layoutConfig?.enforceDeviceHardwareLock !== undefined
+            ? Boolean(masterCfg.layoutConfig.enforceDeviceHardwareLock)
+            : true;
+
+        const devCandidates = [
+          matchedUser?.device_id,
+          matchedSub?.device_id,
+          matchedUac?.device_id,
+          matchedUac?.deviceId,
+        ]
+          .map((d) => String(d || '').trim())
+          .filter(Boolean);
+        const resetDevId = devCandidates.find((d) => d.startsWith('RESET_')) || '';
+        const cloudDevId = resetDevId || devCandidates[0] || '';
+
+        if (resetDevId) {
+          const patchFilter = `email=ilike.${encodeURIComponent(gEmail)}`;
+          await Promise.all([
+            callSupabaseProxy({
+              table: 'users',
+              method: 'PATCH',
+              query: patchFilter,
+              payload: {
+                device_id: activeDeviceId,
+                user_id: activeDeviceId,
+                is_registered: true,
+                ...(gps
+                  ? { latitude: gps.latitude, longitude: gps.longitude, location_url: gps.locationUrl }
+                  : {}),
+              },
+            }),
+            callSupabaseProxy({
+              table: 'subscriptions',
+              method: 'PATCH',
+              query: patchFilter,
+              payload: {
+                device_id: activeDeviceId,
+                updated_at: new Date().toISOString(),
+                last_updated: now,
+              },
+            }),
+          ]);
+        } else if (enforceLock && cloudDevId && cloudDevId !== activeDeviceId) {
+          await supabase.auth.signOut().catch(() => {});
+          setErrorMsg(
+            'Yeh Google account kisi aur device par registered hai. Admin se Device Reset karwayein.'
+          );
+          setInfoMsg(null);
+          return;
+        } else {
+          // Ensure Google account stays marked is_registered: true and latest GPS synced
+          const targetFilter = cloudDevId
+            ? `device_id=eq.${encodeURIComponent(cloudDevId)}`
+            : `email=ilike.${encodeURIComponent(gEmail)}`;
+          await callSupabaseProxy({
+            table: 'users',
+            method: 'PATCH',
+            query: targetFilter,
+            payload: {
+              device_id: cloudDevId || activeDeviceId,
+              is_registered: true,
+              ...(gps
+                ? { latitude: gps.latitude, longitude: gps.longitude, location_url: gps.locationUrl }
+                : {}),
+            },
+            timeoutMs: 6000,
+          }).catch(() => {});
+        }
+
+        const effectiveDevId = resetDevId || !cloudDevId ? activeDeviceId : cloudDevId;
+        const trialStart =
+          Number(
+            matchedSub?.trial_start_ms ||
+              matchedSub?.trial_start_time ||
+              matchedUser?.trial_start_time ||
+              matchedUac?.trial_start_time ||
+              now
+          ) || now;
+        const cloudExpiry = Math.max(
+          0,
+          ...[
+            matchedSub?.activated_until_ms,
+            matchedSub?.activated_until,
+            matchedSub?.subscription_expiry,
+            matchedUser?.activated_until_ms,
+            matchedUser?.activated_until,
+            matchedUser?.subscription_expiry,
+            matchedUac?.subscription_expiry,
+            matchedUac?.activated_until,
+          ].map((v) => (Number.isFinite(Number(v)) ? Number(v) : 0))
+        );
+
+        const session: ClientAuthSession = {
+          verified: true,
+          deviceId: effectiveDevId,
+          userId: String(matchedUser?.user_id || effectiveDevId),
+          name: String(matchedUser?.name || matchedUac?.name || gName),
+          phone: String(matchedUser?.phone || matchedUac?.phone || ''),
+          email: gEmail,
+          cnic: String(matchedUser?.cnic || matchedUac?.cnic || ''),
+          shopAddress: String(matchedUser?.shop_address || matchedUac?.shop_address || ''),
+          loggedInAt: now,
+          trialStartTime: trialStart,
+          trialExpiresAt: cloudExpiry > 0 ? cloudExpiry : trialStart + TWO_DAYS_MS,
+        };
+
+        const bioEnrolled = await enrollBiometricPasskey({
+          deviceId: session.deviceId,
+          identifier: gEmail,
+          userName: session.name,
+        });
+        const binding: BiometricBinding = {
+          deviceId: session.deviceId,
+          identifier: gEmail,
+          userName: session.name,
+          email: gEmail,
+          phone: session.phone,
+          cnic: session.cnic,
+          credentialId: bioEnrolled.credentialId,
+          enrolledAt: now,
+        };
+        saveBiometricBinding(binding);
+        setBiometricBinding(binding);
+
+        if (typeof window !== 'undefined' && window.history?.replaceState) {
+          window.history.replaceState({}, document.title, window.location.pathname);
+        }
+        saveAuthSession(session);
+        onAuthenticated(session);
+        return;
+      }
+
+      // Auto-create Auto-Verified (is_registered: true) Google account in users + subscriptions + Admin UAC
+      const expiry = now + TWO_DAYS_MS;
+      const newUserPayload: Record<string, any> = {
+        device_id: activeDeviceId,
+        user_id: activeDeviceId,
+        name: gName,
+        phone: '',
+        email: gEmail,
+        cnic: '',
+        shop_address: '',
+        is_registered: true,
+        account_status: 'TRIAL',
+        status: 'TRIAL',
+        is_activated: false,
+        is_lifetime: false,
+        is_blocked: false,
+        block_reason: '',
+        subscription_tier: 'TRIAL',
+        trial_start_time: now,
+        activated_until: expiry,
+        activated_until_ms: expiry,
+        subscription_expiry: expiry,
+        last_cloud_sync: now,
+        created_at: new Date(now).toISOString(),
+        ...(gps
+          ? {
+              latitude: gps.latitude,
+              longitude: gps.longitude,
+              location_url: gps.locationUrl,
+            }
+          : {}),
+      };
+
+      const newSubPayload = {
+        device_id: activeDeviceId,
+        user_name: gName,
+        email: gEmail,
+        phone: '',
+        cnic: '',
+        status: 'TRIAL',
+        is_activated: false,
+        is_lifetime: false,
+        is_blocked: false,
+        subscription_tier: 'TRIAL',
+        activated_until: expiry,
+        activated_until_ms: expiry,
+        last_updated: now,
+        updated_at: new Date(now).toISOString(),
+        created_at: new Date(now).toISOString(),
+      };
+
+      const [uRes] = await Promise.all([
+        callSupabaseProxy({
+          table: 'users',
+          method: 'POST',
+          upsert: true,
+          payload: newUserPayload,
+          timeoutMs: 12000,
+        }),
+        callSupabaseProxy({
+          table: 'subscriptions',
+          method: 'POST',
+          upsert: true,
+          payload: newSubPayload,
+          timeoutMs: 10000,
+        }),
+        syncRegisteredUserToAdminUac({
+          device_id: activeDeviceId,
+          name: gName,
+          phone: '',
+          email: gEmail,
+          cnic: '',
+          shop_address: '',
+          trial_start_time: now,
+          subscription_expiry: expiry,
+        }),
+      ]);
+
+      if (!uRes.ok) {
+        setErrorMsg(uRes.error || 'Google account Supabase par save nahi ho saka. Dobara try karein.');
+        setInfoMsg(null);
+        return;
+      }
+
+      const session: ClientAuthSession = {
+        verified: true,
+        deviceId: activeDeviceId,
+        userId: activeDeviceId,
+        name: gName,
+        phone: '',
+        email: gEmail,
+        cnic: '',
+        shopAddress: '',
+        loggedInAt: now,
+        trialStartTime: now,
+        trialExpiresAt: expiry,
+      };
+
+      const bioEnrolled = await enrollBiometricPasskey({
+        deviceId: activeDeviceId,
+        identifier: gEmail,
+        userName: gName,
+      });
+      const binding: BiometricBinding = {
+        deviceId: activeDeviceId,
+        identifier: gEmail,
+        userName: gName,
+        email: gEmail,
+        phone: '',
+        cnic: '',
+        credentialId: bioEnrolled.credentialId,
+        enrolledAt: now,
+      };
+      saveBiometricBinding(binding);
+      setBiometricBinding(binding);
+
+      if (typeof window !== 'undefined' && window.history?.replaceState) {
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }
+      saveAuthSession(session);
+      onAuthenticated(session);
+    } catch {
+      setErrorMsg('Google verification ke dauran cloud network error aaya.');
+      setInfoMsg(null);
+    } finally {
+      setIsGoogleAuthenticating(false);
+    }
+  };
+
+  useEffect(() => {
+    let mounted = true;
+    const isGoogleAuthUser = (u: any) => {
+      if (!u?.email) return false;
+      const provider = String(u?.app_metadata?.provider || '').toLowerCase();
+      const identities = Array.isArray(u?.identities) ? u.identities : [];
+      return (
+        provider === 'google' ||
+        identities.some((id: any) => String(id?.provider || '').toLowerCase() === 'google')
+      );
+    };
+
+    supabase.auth
+      .getSession()
+      .then(({ data }) => {
+        if (!mounted) return;
+        const u = data?.session?.user;
+        if (u && isGoogleAuthUser(u)) {
+          finalizeGoogleOAuthUser(u);
+        }
+      })
+      .catch(() => {});
+
+    const { data: authSub } = supabase.auth.onAuthStateChange((event, session) => {
+      if (!mounted) return;
+      if ((event === 'SIGNED_IN' || event === 'INITIAL_SESSION') && session?.user) {
+        if (isGoogleAuthUser(session.user)) {
+          finalizeGoogleOAuthUser(session.user);
+        }
+      }
+    });
+
+    return () => {
+      mounted = false;
+      authSub?.subscription?.unsubscribe();
+    };
+  }, []);
+
   // Restore pending registration draft if returning from a confirmation email link redirect
   useEffect(() => {
     try {
@@ -121,6 +553,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           setRegEmail(d.email || '');
           setRegCnic(d.cnic || '');
           setRegAddress(d.shopAddress || '');
+          setRegPasswordHash(d.passwordHash || '');
           setCnicFrontPhoto(d.cnicFrontPhoto || '');
           setCnicBackPhoto(d.cnicBackPhoto || '');
           setActiveTab('REGISTER');
@@ -141,6 +574,31 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       // ignore storage errors
     }
   }, []);
+
+  const handleGoogleSignIn = async () => {
+    setErrorMsg(null);
+    setInfoMsg(null);
+    setShowSwitchToRegisterHint(false);
+    setShowSwitchToLoginHint(false);
+    setIsGoogleAuthenticating(true);
+    try {
+      const redirectTo =
+        typeof window !== 'undefined' ? window.location.origin : undefined;
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo,
+        },
+      });
+      if (error) {
+        setErrorMsg(error.message || 'Google Sign-In start nahi ho saka.');
+        setIsGoogleAuthenticating(false);
+      }
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Google OAuth connect nahi ho saka.');
+      setIsGoogleAuthenticating(false);
+    }
+  };
 
   const handlePhotoUpload = async (
     e: React.ChangeEvent<HTMLInputElement>,
@@ -163,8 +621,352 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
   };
 
   // =========================================================================
-  // LOGIN HANDLER (Existing Account + Hardware Device Lock + RESET_ Rebind)
+  // RULE 2 & 3: UNIVERSAL LOGIN (Email / Phone / CNIC + Password / Fingerprint)
   // =========================================================================
+  const performUniversalLogin = async (opts: {
+    identifier: string;
+    password: string;
+    skipPasswordCheck?: boolean;
+    enrollBiometric?: boolean;
+  }): Promise<boolean> => {
+    const rawId = opts.identifier.trim();
+    const phoneDigits = normalizePhoneDigits(rawId);
+    const cnicDigits = normalizeCnicDigits(rawId);
+    const isEmailInput = rawId.includes('@');
+
+    if (!rawId || (!isEmailInput && phoneDigits.length < 7 && cnicDigits.length < 10)) {
+      setErrorMsg('Apna registered Mobile Number, Email ya CNIC darj karein.');
+      return false;
+    }
+
+    const formattedPhone = formatPakPhone(rawId);
+    const formattedCnic = cnicDigits.length === 13 ? formatPakCnic(rawId) : rawId;
+
+    // Targeted OR search across email, phone, and cnic in users & subscriptions + full list fallback
+    const orFilters: string[] = [];
+    if (isEmailInput) {
+      orFilters.push(`email.ilike.${encodeURIComponent(rawId.toLowerCase())}`);
+    }
+    if (formattedPhone) {
+      orFilters.push(`phone.eq.${encodeURIComponent(formattedPhone)}`);
+    }
+    if (rawId !== formattedPhone) {
+      orFilters.push(`phone.eq.${encodeURIComponent(rawId)}`);
+    }
+    if (cnicDigits.length >= 10) {
+      orFilters.push(`cnic.eq.${encodeURIComponent(formattedCnic)}`);
+      orFilters.push(`cnic.eq.${encodeURIComponent(cnicDigits)}`);
+    }
+    const orQuery = orFilters.length > 0 ? `or=(${orFilters.join(',')})&select=*` : 'select=*&limit=250';
+
+    const [directUserRes, directSubRes, allUsersRes, subsRes, masterCfg] = await Promise.all([
+      callSupabaseProxy({
+        table: 'users',
+        method: 'GET',
+        query: orQuery,
+        timeoutMs: 8000,
+      }),
+      callSupabaseProxy({
+        table: 'subscriptions',
+        method: 'GET',
+        query: orQuery,
+        timeoutMs: 8000,
+      }),
+      callSupabaseProxy({
+        table: 'users',
+        method: 'GET',
+        query: 'select=*&limit=350',
+        timeoutMs: 8000,
+      }),
+      callSupabaseProxy({
+        table: 'subscriptions',
+        method: 'GET',
+        query: 'select=*&limit=350',
+        timeoutMs: 8000,
+      }),
+      fetchMasterEngineConfigFromSupabase(),
+    ]);
+
+    const matchesIdentity = (rec: any) => {
+      if (!rec || typeof rec !== 'object') return false;
+      const rPhone = normalizePhoneDigits(rec.phone || '');
+      const rEmail = String(rec.email || '').trim().toLowerCase();
+      const rCnic = normalizeCnicDigits(rec.cnic || '');
+      if (isEmailInput && rEmail && rEmail === rawId.toLowerCase()) return true;
+      if (phoneDigits.length >= 10 && rPhone && rPhone === phoneDigits) return true;
+      if (cnicDigits.length >= 13 && rCnic && rCnic === cnicDigits) return true;
+      if (
+        formattedPhone &&
+        String(rec.phone || '').trim().toLowerCase() === formattedPhone.toLowerCase()
+      ) {
+        return true;
+      }
+      return false;
+    };
+
+    const directUsers = Array.isArray(directUserRes.data) ? directUserRes.data : [];
+    const directSubs = Array.isArray(directSubRes.data) ? directSubRes.data : [];
+    const usersList = Array.isArray(allUsersRes.data) ? allUsersRes.data : [];
+    const subsList = Array.isArray(subsRes.data) ? subsRes.data : [];
+    const uacList = Array.isArray(masterCfg?.userAccessControl)
+      ? masterCfg.userAccessControl
+      : Object.values(masterCfg?.userAccessControl || {});
+
+    const matchedUser =
+      directUsers[0] ||
+      usersList.find(matchesIdentity) ||
+      null;
+    const matchedSub =
+      directSubs[0] ||
+      subsList.find(matchesIdentity) ||
+      null;
+    const matchedUac: any = uacList.find(matchesIdentity) || null;
+
+    if (!matchedUser && !matchedUac && !matchedSub) {
+      setErrorMsg('Account nahi mila, pehle Create Account karein.');
+      setShowSwitchToRegisterHint(true);
+      return false;
+    }
+
+    const isBlocked = Boolean(
+      matchedUser?.is_blocked ||
+        matchedUser?.isBlocked ||
+        matchedUser?.account_status === 'BLOCKED' ||
+        matchedSub?.is_blocked ||
+        matchedUac?.is_blocked ||
+        matchedUac?.isBlocked
+    );
+    if (isBlocked) {
+      const blockReason =
+        matchedUser?.block_reason ||
+        matchedUac?.block_reason ||
+        matchedUac?.blockReason ||
+        'Suspended by Master Admin';
+      setErrorMsg(`Account Blocked: ${blockReason}`);
+      return false;
+    }
+
+    // Password verification (when account has a password_hash stored)
+    const storedHash = String(matchedUser?.password_hash || '').trim();
+    if (!opts.skipPasswordCheck) {
+      if (storedHash) {
+        if (!opts.password.trim()) {
+          setErrorMsg('Apna Account Password darj karein.');
+          return false;
+        }
+        const enteredHash = await hashPasswordSha256(opts.password);
+        if (enteredHash !== storedHash) {
+          setErrorMsg('Password ghalat hai. Apna sahih Password darj karein.');
+          return false;
+        }
+      }
+    }
+
+    const enforceLock =
+      masterCfg?.layoutConfig?.enforceDeviceHardwareLock !== undefined
+        ? Boolean(masterCfg.layoutConfig.enforceDeviceHardwareLock)
+        : true;
+
+    const loginDevCandidates = [
+      matchedUser?.device_id,
+      matchedSub?.device_id,
+      matchedUac?.device_id,
+      matchedUac?.deviceId,
+    ]
+      .map((d) => String(d || '').trim())
+      .filter(Boolean);
+
+    const resetDeviceId = loginDevCandidates.find((d) => d.startsWith('RESET_')) || '';
+    const cloudDeviceId = resetDeviceId || loginDevCandidates[0] || '';
+    const activeDeviceId = clientDeviceId || getOrCreateClientDeviceId();
+    const gps = loadStoredGpsLocation();
+    const now = Date.now();
+
+    // Optional new password save if legacy account had none
+    const newPasswordHashToSave =
+      !storedHash && opts.password.trim().length >= 6
+        ? await hashPasswordSha256(opts.password)
+        : undefined;
+
+    if (resetDeviceId) {
+      const targetPhone = matchedUser?.phone || matchedUac?.phone || matchedSub?.phone || formattedPhone;
+      const targetEmail = matchedUser?.email || matchedUac?.email || matchedSub?.email || (isEmailInput ? rawId.toLowerCase() : '');
+      const patchFilter =
+        matchedUser?.device_id && String(matchedUser.device_id).startsWith('RESET_')
+          ? `device_id=eq.${encodeURIComponent(resetDeviceId)}`
+          : targetPhone
+          ? `phone=eq.${encodeURIComponent(targetPhone)}`
+          : targetEmail
+          ? `email=ilike.${encodeURIComponent(targetEmail)}`
+          : `device_id=eq.${encodeURIComponent(resetDeviceId)}`;
+
+      await Promise.all([
+        callSupabaseProxy({
+          table: 'users',
+          method: 'PATCH',
+          query: patchFilter,
+          payload: {
+            device_id: activeDeviceId,
+            user_id: activeDeviceId,
+            is_registered: true,
+            last_cloud_sync: now,
+            ...(newPasswordHashToSave ? { password_hash: newPasswordHashToSave } : {}),
+            ...(gps
+              ? { latitude: gps.latitude, longitude: gps.longitude, location_url: gps.locationUrl }
+              : {}),
+          },
+        }),
+        callSupabaseProxy({
+          table: 'subscriptions',
+          method: 'PATCH',
+          query: patchFilter,
+          payload: {
+            device_id: activeDeviceId,
+            last_updated: now,
+            updated_at: new Date().toISOString(),
+          },
+        }),
+        syncRegisteredUserToAdminUac({
+          device_id: activeDeviceId,
+          name: String(matchedUser?.name || matchedUac?.name || matchedSub?.user_name || 'Valued Client'),
+          phone: String(targetPhone || ''),
+          email: String(targetEmail || ''),
+          cnic: String(matchedUser?.cnic || matchedUac?.cnic || matchedSub?.cnic || ''),
+          shop_address: String(
+            matchedUser?.shop_address || matchedUac?.shop_address || matchedUac?.shopAddress || ''
+          ),
+          trial_start_time: Number(
+            matchedSub?.trial_start_ms ||
+              matchedUser?.trial_start_time ||
+              matchedUac?.trial_start_time ||
+              now
+          ),
+          subscription_expiry: Number(
+            matchedSub?.activated_until_ms ||
+              matchedSub?.activated_until ||
+              matchedUac?.subscription_expiry ||
+              now + TWO_DAYS_MS
+          ),
+        }),
+      ]);
+    } else if (enforceLock && cloudDeviceId && cloudDeviceId !== activeDeviceId) {
+      setErrorMsg(
+        'Yeh account kisi aur device par registered hai. Admin se Device Reset karwayein.'
+      );
+      return false;
+    } else {
+      // Update GPS / device_id / password_hash if missing
+      const targetFilter = cloudDeviceId
+        ? `device_id=eq.${encodeURIComponent(cloudDeviceId)}`
+        : matchedUser?.phone
+        ? `phone=eq.${encodeURIComponent(matchedUser.phone)}`
+        : matchedUser?.email
+        ? `email=ilike.${encodeURIComponent(matchedUser.email)}`
+        : '';
+
+      if (targetFilter && (!cloudDeviceId || gps || newPasswordHashToSave)) {
+        callSupabaseProxy({
+          table: 'users',
+          method: 'PATCH',
+          query: targetFilter,
+          payload: {
+            ...(!cloudDeviceId ? { device_id: activeDeviceId, user_id: activeDeviceId } : {}),
+            ...(newPasswordHashToSave ? { password_hash: newPasswordHashToSave } : {}),
+            ...(gps
+              ? { latitude: gps.latitude, longitude: gps.longitude, location_url: gps.locationUrl }
+              : {}),
+          },
+          timeoutMs: 6000,
+        }).catch(() => {});
+      }
+    }
+
+    const trialStart =
+      Number(
+        matchedSub?.trial_start_ms ||
+          matchedSub?.trial_start_time ||
+          matchedUser?.trial_start_time ||
+          matchedUser?.registered_at_epoch_ms ||
+          matchedUac?.trial_start_time ||
+          matchedUac?.trialStartTime ||
+          now
+      ) || now;
+
+    const cloudExpiry = Math.max(
+      0,
+      ...[
+        matchedSub?.activated_until_ms,
+        matchedSub?.activated_until,
+        matchedSub?.subscription_expiry,
+        matchedUser?.activated_until_ms,
+        matchedUser?.activated_until,
+        matchedUser?.subscription_expiry,
+        matchedUac?.subscription_expiry,
+        matchedUac?.subscriptionExpiresAt,
+        matchedUac?.activatedUntil,
+        matchedUac?.activated_until,
+      ].map((v) => (Number.isFinite(Number(v)) ? Number(v) : 0))
+    );
+
+    const sessionDeviceId = resetDeviceId || !cloudDeviceId ? activeDeviceId : cloudDeviceId;
+    const session: ClientAuthSession = {
+      verified: true,
+      deviceId: sessionDeviceId,
+      userId: String(matchedUser?.user_id || sessionDeviceId),
+      name: String(
+        matchedUser?.name || matchedUac?.name || matchedSub?.user_name || 'Valued Client'
+      ),
+      phone: String(
+        matchedUser?.phone ||
+          matchedUac?.phone ||
+          matchedSub?.phone ||
+          (!isEmailInput && phoneDigits.length >= 10 ? formattedPhone : '')
+      ),
+      email: String(
+        matchedUser?.email ||
+          matchedUac?.email ||
+          matchedSub?.email ||
+          (isEmailInput ? rawId.toLowerCase() : '')
+      ),
+      cnic: String(
+        matchedUser?.cnic ||
+          matchedUac?.cnic ||
+          matchedSub?.cnic ||
+          (cnicDigits.length === 13 ? formattedCnic : '')
+      ),
+      shopAddress: String(matchedUser?.shop_address || matchedUac?.shopAddress || ''),
+      loggedInAt: now,
+      trialStartTime: trialStart,
+      trialExpiresAt: cloudExpiry > 0 ? cloudExpiry : trialStart + TWO_DAYS_MS,
+    };
+
+    // Save biometric binding for 1-tap Fingerprint Login
+    const bioRes = await enrollBiometricPasskey({
+      deviceId: session.deviceId,
+      identifier: session.email || session.phone || session.cnic || rawId,
+      userName: session.name,
+    });
+    const nextBinding: BiometricBinding = {
+      deviceId: session.deviceId,
+      identifier: session.email || session.phone || session.cnic || rawId,
+      userName: session.name,
+      email: session.email,
+      phone: session.phone,
+      cnic: session.cnic,
+      credentialId: bioRes.credentialId || biometricBinding?.credentialId,
+      enrolledAt: now,
+    };
+    saveBiometricBinding(nextBinding);
+    setBiometricBinding(nextBinding);
+
+    saveAuthSession(session);
+    if (gps) {
+      syncGpsToSupabaseUser(session.deviceId, gps);
+    }
+    onAuthenticated(session);
+    return true;
+  };
+
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
@@ -172,252 +974,62 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     setShowSwitchToRegisterHint(false);
     setShowSwitchToLoginHint(false);
 
-    const rawId = loginIdentifier.trim();
-    const phoneDigits = normalizePhoneDigits(rawId);
-    const cnicDigits = normalizeCnicDigits(rawId);
-    const isEmailInput = rawId.includes('@');
-
-    if (!rawId || (!isEmailInput && phoneDigits.length < 7 && cnicDigits.length < 10)) {
-      setErrorMsg('Apna registered Mobile Number, Email ya CNIC darj karein.');
-      return;
-    }
-
     setIsLoggingIn(true);
     try {
-      const formattedPhone = formatPakPhone(rawId);
-
-      const [directUserRes, allUsersRes, clientUsersRes, subsRes, masterCfg] = await Promise.all([
-        !isEmailInput && formattedPhone
-          ? callSupabaseProxy({
-              table: 'users',
-              method: 'GET',
-              query: `phone=eq.${encodeURIComponent(formattedPhone)}&select=*`,
-              timeoutMs: 8000,
-            })
-          : Promise.resolve({ ok: true, data: [] }),
-        callSupabaseProxy({
-          table: 'users',
-          method: 'GET',
-          query: 'select=*&limit=250',
-          timeoutMs: 8000,
-        }),
-        callSupabaseProxy({
-          table: 'client_users',
-          method: 'GET',
-          query: 'select=*&limit=250',
-          timeoutMs: 8000,
-        }),
-        callSupabaseProxy({
-          table: 'subscriptions',
-          method: 'GET',
-          query: 'select=*&limit=250',
-          timeoutMs: 8000,
-        }),
-        fetchMasterEngineConfigFromSupabase(),
-      ]);
-
-      const matchesIdentity = (rec: any) => {
-        if (!rec || typeof rec !== 'object') return false;
-        const rPhone = normalizePhoneDigits(rec.phone || '');
-        const rEmail = String(rec.email || '').trim().toLowerCase();
-        const rCnic = normalizeCnicDigits(rec.cnic || '');
-        if (isEmailInput && rEmail && rEmail === rawId.toLowerCase()) return true;
-        if (phoneDigits.length >= 10 && rPhone && rPhone === phoneDigits) return true;
-        if (cnicDigits.length >= 13 && rCnic && rCnic === cnicDigits) return true;
-        if (
-          formattedPhone &&
-          String(rec.phone || '').trim().toLowerCase() === formattedPhone.toLowerCase()
-        ) {
-          return true;
-        }
-        return false;
-      };
-
-      const directList = Array.isArray(directUserRes.data) ? directUserRes.data : [];
-      const usersList = Array.isArray(allUsersRes.data) ? allUsersRes.data : [];
-      const clientList = Array.isArray(clientUsersRes.data) ? clientUsersRes.data : [];
-      const subsList = Array.isArray(subsRes.data) ? subsRes.data : [];
-      const uacList = Array.isArray(masterCfg?.userAccessControl)
-        ? masterCfg.userAccessControl
-        : Object.values(masterCfg?.userAccessControl || {});
-
-      const matchedUser =
-        directList[0] ||
-        usersList.find(matchesIdentity) ||
-        clientList.find(matchesIdentity) ||
-        null;
-      const matchedUac: any = uacList.find(matchesIdentity) || null;
-      const matchedSub = subsList.find(matchesIdentity) || null;
-
-      if (!matchedUser && !matchedUac && !matchedSub) {
-        setErrorMsg('Account nahi mila, pehle Create Account karein.');
-        setShowSwitchToRegisterHint(true);
-        return;
-      }
-
-      const isBlocked = Boolean(
-        matchedUser?.is_blocked ||
-          matchedUser?.isBlocked ||
-          matchedUser?.account_status === 'BLOCKED' ||
-          matchedSub?.is_blocked ||
-          matchedUac?.is_blocked ||
-          matchedUac?.isBlocked
-      );
-      if (isBlocked) {
-        const blockReason =
-          matchedUser?.block_reason ||
-          matchedUac?.block_reason ||
-          matchedUac?.blockReason ||
-          'Suspended by Master Admin';
-        setErrorMsg(`Account Blocked: ${blockReason}`);
-        return;
-      }
-
-      const enforceLock =
-        masterCfg?.layoutConfig?.enforceDeviceHardwareLock !== undefined
-          ? Boolean(masterCfg.layoutConfig.enforceDeviceHardwareLock)
-          : true;
-
-      const loginDevCandidates = [
-        matchedUser?.device_id,
-        matchedSub?.device_id,
-        matchedUac?.device_id,
-        matchedUac?.deviceId,
-      ]
-        .map((d) => String(d || '').trim())
-        .filter(Boolean);
-
-      const resetDeviceId = loginDevCandidates.find((d) => d.startsWith('RESET_')) || '';
-      const cloudDeviceId = resetDeviceId || loginDevCandidates[0] || '';
-
-      const activeDeviceId = clientDeviceId || getOrCreateClientDeviceId();
-
-      if (resetDeviceId) {
-        const now = Date.now();
-        const targetPhone = matchedUser?.phone || matchedUac?.phone || matchedSub?.phone || formattedPhone;
-        const patchFilter =
-          matchedUser?.device_id && String(matchedUser.device_id).startsWith('RESET_')
-            ? `device_id=eq.${encodeURIComponent(resetDeviceId)}`
-            : targetPhone
-            ? `phone=eq.${encodeURIComponent(targetPhone)}`
-            : `device_id=eq.${encodeURIComponent(resetDeviceId)}`;
-        await Promise.all([
-          callSupabaseProxy({
-            table: 'users',
-            method: 'PATCH',
-            query: patchFilter,
-            payload: {
-              device_id: activeDeviceId,
-              user_id: activeDeviceId,
-              updated_at_epoch_ms: now,
-            },
-          }),
-          callSupabaseProxy({
-            table: 'client_users',
-            method: 'PATCH',
-            query: patchFilter,
-            payload: {
-              device_id: activeDeviceId,
-              user_id: activeDeviceId,
-              updated_at_epoch_ms: now,
-            },
-          }),
-          callSupabaseProxy({
-            table: 'subscriptions',
-            method: 'PATCH',
-            query: patchFilter,
-            payload: {
-              device_id: activeDeviceId,
-              user_id: activeDeviceId,
-              updated_at: new Date().toISOString(),
-            },
-          }),
-          syncRegisteredUserToAdminUac({
-            device_id: activeDeviceId,
-            name: String(matchedUser?.name || matchedUac?.name || 'Valued Client'),
-            phone: String(matchedUser?.phone || matchedUac?.phone || formattedPhone || rawId),
-            email: String(matchedUser?.email || matchedUac?.email || (isEmailInput ? rawId : '')),
-            cnic: String(matchedUser?.cnic || matchedUac?.cnic || ''),
-            shop_address: String(
-              matchedUser?.shop_address || matchedUac?.shop_address || matchedUac?.shopAddress || ''
-            ),
-            trial_start_time: Number(
-              matchedSub?.trial_start_ms ||
-                matchedUser?.registered_at_epoch_ms ||
-                matchedUac?.trial_start_time ||
-                now
-            ),
-            subscription_expiry: Number(
-              matchedSub?.activated_until_ms ||
-                matchedUac?.subscription_expiry ||
-                now + TWO_DAYS_MS
-            ),
-          }),
-        ]);
-      } else if (enforceLock && cloudDeviceId && cloudDeviceId !== activeDeviceId) {
-        setErrorMsg(
-          'Yeh account kisi aur device par registered hai. Admin se Device Reset karwayein.'
-        );
-        return;
-      } else if (!cloudDeviceId) {
-        const targetPhone = matchedUser?.phone || matchedUac?.phone || formattedPhone;
-        if (targetPhone) {
-          await callSupabaseProxy({
-            table: 'users',
-            method: 'PATCH',
-            query: `phone=eq.${encodeURIComponent(targetPhone)}`,
-            payload: { device_id: activeDeviceId, user_id: activeDeviceId },
-          });
-        }
-      }
-
-      const trialStart =
-        Number(
-          matchedSub?.trial_start_ms ||
-            matchedSub?.trial_start_time ||
-            matchedUser?.trial_start_time ||
-            matchedUser?.registered_at_epoch_ms ||
-            matchedUac?.trial_start_time ||
-            matchedUac?.trialStartTime ||
-            Date.now()
-        ) || Date.now();
-
-      const cloudExpiry = Math.max(
-        0,
-        ...[
-          matchedSub?.activated_until_ms,
-          matchedSub?.activated_until,
-          matchedSub?.subscription_expiry,
-          matchedUser?.activated_until_ms,
-          matchedUser?.activated_until,
-          matchedUser?.subscription_expiry,
-          matchedUac?.subscription_expiry,
-          matchedUac?.subscriptionExpiresAt,
-          matchedUac?.activatedUntil,
-          matchedUac?.activated_until,
-        ].map((v) => (Number.isFinite(Number(v)) ? Number(v) : 0))
-      );
-
-      const session: ClientAuthSession = {
-        verified: true,
-        deviceId: activeDeviceId,
-        userId: String(matchedUser?.user_id || activeDeviceId),
-        name: String(matchedUser?.name || matchedUac?.name || 'Valued Client'),
-        phone: String(matchedUser?.phone || matchedUac?.phone || formattedPhone || rawId),
-        email: String(matchedUser?.email || matchedUac?.email || (isEmailInput ? rawId : '')),
-        cnic: String(matchedUser?.cnic || matchedUac?.cnic || ''),
-        shopAddress: String(matchedUser?.shop_address || matchedUac?.shopAddress || ''),
-        loggedInAt: Date.now(),
-        trialStartTime: trialStart,
-        trialExpiresAt: cloudExpiry > 0 ? cloudExpiry : trialStart + TWO_DAYS_MS,
-      };
-
-      saveAuthSession(session);
-      onAuthenticated(session);
+      await performUniversalLogin({
+        identifier: loginIdentifier,
+        password: loginPassword,
+        skipPasswordCheck: false,
+      });
     } catch {
       setErrorMsg('Cloud server se rabta nahi ho saka. Internet connection check karein.');
     } finally {
       setIsLoggingIn(false);
+    }
+  };
+
+  const handleFingerprintLogin = async () => {
+    setErrorMsg(null);
+    setInfoMsg(null);
+    setShowSwitchToRegisterHint(false);
+    setShowSwitchToLoginHint(false);
+
+    const saved = loadBiometricBinding();
+    const enteredId = loginIdentifier.trim();
+
+    if (!saved && !enteredId) {
+      setErrorMsg(
+        'Fingerprint Login ke liye pehle aik baar apna Email, Mobile Number ya CNIC daal kar Login karein, phir Fingerprint khud link ho jaye ga.'
+      );
+      return;
+    }
+
+    setIsBiometricLoggingIn(true);
+    try {
+      if (saved) {
+        const bioVerify = await verifyBiometricPasskey(saved.credentialId);
+        if (!bioVerify.ok && bioVerify.cancelled) {
+          setErrorMsg('Fingerprint / Biometric verification cancel ho gayi.');
+          return;
+        }
+        await performUniversalLogin({
+          identifier: enteredId || saved.identifier,
+          password: loginPassword,
+          skipPasswordCheck: !enteredId || enteredId.toLowerCase() === saved.identifier.toLowerCase(),
+          enrollBiometric: true,
+        });
+      } else {
+        await performUniversalLogin({
+          identifier: enteredId,
+          password: loginPassword,
+          skipPasswordCheck: false,
+          enrollBiometric: true,
+        });
+      }
+    } catch {
+      setErrorMsg('Fingerprint login verify karte waqt network error aaya.');
+    } finally {
+      setIsBiometricLoggingIn(false);
     }
   };
 
@@ -433,7 +1045,6 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     const { cleanName, cleanPhone, cleanEmail, smsCfg } = params;
     const code = String(Math.floor(100000 + Math.random() * 900000));
 
-    // Try server /api/send-email-otp (uses Resend API if Admin or env configured)
     let sentViaResend = false;
     try {
       const emailResp = await fetch('/api/send-email-otp', {
@@ -467,14 +1078,13 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           created_at: new Date().toISOString(),
         },
         timeoutMs: 8000,
-      });
+      }).catch(() => ({ ok: false, data: null }));
       if (otpRes.ok && Array.isArray(otpRes.data) && otpRes.data[0]?.id) {
         setOtpRowId(otpRes.data[0].id);
       } else if (otpRes.ok && otpRes.data?.id) {
         setOtpRowId(otpRes.data.id);
       }
     } else {
-      // Dispatch real Email OTP via Supabase Built-in Auth Mailer
       const sbOtp = await sendSupabaseEmailOtp(cleanEmail, {
         name: cleanName,
         phone: cleanPhone,
@@ -493,25 +1103,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       }
 
       setOtpProviderMode('SUPABASE_EMAIL');
-      const otpRes = await callSupabaseProxy({
-        table: 'otp_verifications',
-        method: 'POST',
-        upsert: true,
-        payload: {
-          phone: cleanPhone,
-          email: cleanEmail,
-          otp_code: 'EMAIL_SENT',
-          is_verified: false,
-          created_at: new Date().toISOString(),
-        },
-        timeoutMs: 8000,
-      });
-      if (otpRes.ok && Array.isArray(otpRes.data) && otpRes.data[0]?.id) {
-        setOtpRowId(otpRes.data[0].id);
-      }
     }
 
-    // Optional SendPK SMS relay if Admin enabled SendPK
     if (smsCfg.sendpkEnabled) {
       try {
         await fetchAdminServer('/api/send-otp', {
@@ -534,7 +1127,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
   };
 
   // =========================================================================
-  // REGISTER STEP 1: VALIDATE, DUPLICATE CHECK & SEND OTP TO EMAIL
+  // REGISTER STEP 1: VALIDATE, PASSWORD HASH, DUPLICATE CHECK & SEND OTP
   // =========================================================================
   const handleSendOtpStep = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -546,10 +1139,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     const cleanName = regName.trim();
     const cleanPhone = formatPakPhone(regPhone);
     const phoneDigits = normalizePhoneDigits(cleanPhone);
-    const cleanEmail = regEmail.trim();
+    const cleanEmail = regEmail.trim().toLowerCase();
     const cleanCnic = formatPakCnic(regCnic);
     const cnicDigits = normalizeCnicDigits(cleanCnic);
     const cleanAddress = regAddress.trim();
+    const cleanPassword = regPassword;
 
     if (cleanName.length < 3) {
       setErrorMsg('Poora naam (Full Name) darj karein.');
@@ -571,6 +1165,10 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       setErrorMsg('Shop / Factory Address darj karein.');
       return;
     }
+    if (cleanPassword.trim().length < 6) {
+      setErrorMsg('Kam az kam 6 characters ka Account Password darj karein.');
+      return;
+    }
     if (!cnicFrontPhoto || !cnicBackPhoto) {
       setErrorMsg('CNIC Front aur Back dono photos upload karein.');
       return;
@@ -578,29 +1176,29 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
 
     setIsSendingOtp(true);
     try {
-      const [usersRes, clientUsersRes, masterCfg] = await Promise.all([
+      const [usersRes, subsRes, masterCfg] = await Promise.all([
         callSupabaseProxy({
           table: 'users',
           method: 'GET',
-          query: 'select=device_id,phone,cnic,email&limit=300',
+          query: 'select=device_id,phone,cnic,email&limit=350',
           timeoutMs: 8000,
         }),
         callSupabaseProxy({
-          table: 'client_users',
+          table: 'subscriptions',
           method: 'GET',
-          query: 'select=device_id,phone,cnic,email&limit=300',
+          query: 'select=device_id,phone,cnic,email&limit=350',
           timeoutMs: 8000,
         }),
         fetchMasterEngineConfigFromSupabase(),
       ]);
 
       const usersList = Array.isArray(usersRes.data) ? usersRes.data : [];
-      const clientList = Array.isArray(clientUsersRes.data) ? clientUsersRes.data : [];
+      const subsList = Array.isArray(subsRes.data) ? subsRes.data : [];
       const uacList = Array.isArray(masterCfg?.userAccessControl)
         ? masterCfg.userAccessControl
         : Object.values(masterCfg?.userAccessControl || {});
 
-      const allExisting = [...usersList, ...clientList, ...uacList];
+      const allExisting = [...usersList, ...subsList, ...uacList];
       const allowSecondCnic = Boolean(
         masterCfg?.allowSecondCnic ?? masterCfg?.layoutConfig?.allowSecondCnic
       );
@@ -608,15 +1206,21 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       const phoneDuplicate = allExisting.some(
         (r: any) => normalizePhoneDigits(r?.phone || '') === phoneDigits
       );
+      const emailDuplicate = allExisting.some(
+        (r: any) => String(r?.email || '').trim().toLowerCase() === cleanEmail
+      );
       const cnicDuplicate =
         !allowSecondCnic &&
         allExisting.some((r: any) => normalizeCnicDigits(r?.cnic || '') === cnicDigits);
 
-      if (phoneDuplicate || cnicDuplicate) {
+      if (phoneDuplicate || emailDuplicate || cnicDuplicate) {
         setErrorMsg('Account already exists, please Login');
         setShowSwitchToLoginHint(true);
         return;
       }
+
+      const passwordHash = await hashPasswordSha256(cleanPassword);
+      setRegPasswordHash(passwordHash);
 
       const smsCfg = extractSmsGatewayConfig(masterCfg);
       setOtpInput('');
@@ -637,6 +1241,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
             email: cleanEmail,
             cnic: cleanCnic,
             shopAddress: cleanAddress,
+            passwordHash,
             cnicFrontPhoto,
             cnicBackPhoto,
           })
@@ -667,10 +1272,10 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       await dispatchEmailOtp({
         cleanName: regName.trim(),
         cleanPhone: formatPakPhone(regPhone),
-        cleanEmail: regEmail.trim(),
+        cleanEmail: regEmail.trim().toLowerCase(),
         smsCfg,
       });
-      setInfoMsg(`Naya OTP code (${regEmail.trim()}) par bhej diya gaya hai!`);
+      setInfoMsg(`Naya OTP code (${regEmail.trim().toLowerCase()}) par bhej diya gaya hai!`);
     } catch (err: any) {
       setErrorMsg(err?.message || 'OTP resend nahi ho saka. Thori der baad try karein.');
     } finally {
@@ -679,7 +1284,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
   };
 
   // =========================================================================
-  // REGISTER STEP 2: VERIFY EMAIL OTP & SYNC TO USERS + CLIENT_USERS + SUBS + ADMIN UAC
+  // REGISTER STEP 2: VERIFY EMAIL OTP & SYNC TO USERS + SUBS + ADMIN UAC
   // =========================================================================
   const handleVerifyOtpAndRegister = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -699,7 +1304,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
 
     const cleanName = regName.trim();
     const cleanPhone = formatPakPhone(regPhone);
-    const cleanEmail = regEmail.trim();
+    const cleanEmail = regEmail.trim().toLowerCase();
     const cleanCnic = formatPakCnic(regCnic);
     const cleanAddress = regAddress.trim();
 
@@ -729,6 +1334,9 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
 
       const trialStart = Date.now();
       const expiry = trialStart + TWO_DAYS_MS;
+      const effectivePasswordHash =
+        regPasswordHash || (regPassword.trim() ? await hashPasswordSha256(regPassword) : '');
+      const gps = loadStoredGpsLocation();
 
       if (otpRowId !== null) {
         await callSupabaseProxy({
@@ -737,61 +1345,67 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           query: `id=eq.${encodeURIComponent(String(otpRowId))}`,
           payload: { is_verified: true },
           timeoutMs: 5000,
-        });
+        }).catch(() => {});
       }
 
-      // Exact column payloads matching live Supabase tables
-      const userPayload = {
+      // Exact column payloads matching live sumeemoqtnveiftzjhsl Supabase schema
+      const userPayload: Record<string, any> = {
         device_id: clientDeviceId,
         user_id: clientDeviceId,
         name: cleanName,
         phone: cleanPhone,
         email: cleanEmail,
-        whatsapp: cleanPhone,
         cnic: cleanCnic,
         shop_address: cleanAddress,
-        is_phone_verified: true,
-        is_email_verified: true,
-        is_profile_completed: true,
         cnic_front_url: cnicFrontPhoto,
         cnic_back_url: cnicBackPhoto,
+        password_hash: effectivePasswordHash,
+        is_registered: true,
         account_status: 'TRIAL',
-        isBlocked: false,
+        status: 'TRIAL',
+        is_activated: false,
+        is_lifetime: false,
         is_blocked: false,
         block_reason: '',
-        registered_at_epoch_ms: trialStart,
-        updated_at_epoch_ms: trialStart,
+        subscription_tier: 'TRIAL',
+        activated_until: expiry,
+        activated_until_ms: expiry,
+        subscription_expiry: expiry,
+        last_cloud_sync: trialStart,
+        created_at: new Date(trialStart).toISOString(),
+        ...(gps
+          ? {
+              latitude: gps.latitude,
+              longitude: gps.longitude,
+              location_url: gps.locationUrl,
+            }
+          : {}),
       };
-
-      const clientUserPayload = { ...userPayload };
-      delete (clientUserPayload as any).block_reason;
 
       const subscriptionPayload = {
         device_id: clientDeviceId,
-        user_id: clientDeviceId,
+        user_name: cleanName,
+        email: cleanEmail,
         phone: cleanPhone,
         cnic: cleanCnic,
+        status: 'TRIAL',
         is_activated: false,
         is_lifetime: false,
+        is_blocked: false,
         subscription_tier: 'TRIAL',
-        trial_start_ms: trialStart,
+        activated_until: expiry,
         activated_until_ms: expiry,
+        last_updated: trialStart,
         updated_at: new Date().toISOString(),
+        created_at: new Date(trialStart).toISOString(),
       };
 
-      const [uRes, cuRes, subRes] = await Promise.all([
+      const [uRes, subRes] = await Promise.all([
         callSupabaseProxy({
           table: 'users',
           method: 'POST',
           upsert: true,
           payload: userPayload,
-          timeoutMs: 14000,
-        }),
-        callSupabaseProxy({
-          table: 'client_users',
-          method: 'POST',
-          upsert: true,
-          payload: clientUserPayload,
           timeoutMs: 14000,
         }),
         callSupabaseProxy({
@@ -803,7 +1417,6 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         }),
       ]);
 
-      // Also sync into Admin Panel's master_engine_config.userAccessControl immediately
       await syncRegisteredUserToAdminUac({
         device_id: clientDeviceId,
         name: cleanName,
@@ -815,26 +1428,25 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         subscription_expiry: expiry,
       });
 
-      if (!uRes.ok && !cuRes.ok) {
+      if (!uRes.ok) {
         setErrorMsg(
-          uRes.error ||
-            cuRes.error ||
-            'Admin cloud par account details save nahi ho sakin. Dobara try karein.'
+          uRes.error || 'Admin cloud par account details save nahi ho sakin. Dobara try karein.'
         );
         return;
       }
 
       if (!subRes.ok) {
-        // Retry minimal subscription row silently if needed
         await callSupabaseProxy({
           table: 'subscriptions',
           method: 'POST',
           upsert: true,
           payload: {
             device_id: clientDeviceId,
-            user_id: clientDeviceId,
+            user_name: cleanName,
+            email: cleanEmail,
             phone: cleanPhone,
             cnic: cleanCnic,
+            status: 'TRIAL',
             is_activated: false,
             is_lifetime: false,
             subscription_tier: 'TRIAL',
@@ -857,6 +1469,25 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         trialStartTime: trialStart,
         trialExpiresAt: expiry,
       };
+
+      // Enroll Fingerprint / Biometric passkey for instant next login
+      const bioRes = await enrollBiometricPasskey({
+        deviceId: clientDeviceId,
+        identifier: cleanEmail || cleanPhone,
+        userName: cleanName,
+      });
+      const binding: BiometricBinding = {
+        deviceId: clientDeviceId,
+        identifier: cleanEmail || cleanPhone,
+        userName: cleanName,
+        email: cleanEmail,
+        phone: cleanPhone,
+        cnic: cleanCnic,
+        credentialId: bioRes.credentialId,
+        enrolledAt: trialStart,
+      };
+      saveBiometricBinding(binding);
+      setBiometricBinding(binding);
 
       try {
         localStorage.removeItem(PENDING_REG_DRAFT_KEY);
@@ -975,7 +1606,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                   type="button"
                   onClick={() => {
                     setActiveTab('LOGIN');
-                    setLoginIdentifier(formatPakPhone(regPhone));
+                    setLoginIdentifier(formatPakPhone(regPhone) || regEmail.trim());
                     setErrorMsg(null);
                     setShowSwitchToLoginHint(false);
                   }}
@@ -988,23 +1619,39 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           )}
 
           {/* =============================================================== */}
-          {/* TAB A: LOGIN (REGISTERED USER)                                  */}
+          {/* TAB A: LOGIN (UNIVERSAL EMAIL/PHONE/CNIC + PASSWORD + BIOMETRIC) */}
           {/* =============================================================== */}
           {activeTab === 'LOGIN' && (
-            <form onSubmit={handleLoginSubmit} className="space-y-3.5">
-              <div className="p-3 rounded-xl bg-[#14181F] border border-slate-800 space-y-1 text-[11px] text-slate-300">
-                <div className="font-bold text-[#F5B738] flex items-center gap-1.5">
-                  <ShieldCheck className="w-4 h-4" />
-                  <span>Registered Client Login</span>
-                </div>
-                <p className="text-slate-400 leading-snug">
-                  Apna registered Mobile Number, Email ya CNIC darj karein. Account Admin Cloud aur Device Hardware Lock se verify hoga.
-                </p>
+            <form onSubmit={handleLoginSubmit} className="space-y-3">
+              {/* Continue with Google Button */}
+              <button
+                type="button"
+                onClick={handleGoogleSignIn}
+                disabled={isGoogleAuthenticating || isLoggingIn || isBiometricLoggingIn}
+                className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-white hover:bg-slate-100 text-slate-900 font-bold text-xs flex items-center justify-center gap-2.5 shadow-sm cursor-pointer disabled:opacity-60"
+              >
+                {isGoogleAuthenticating ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin text-slate-700" />
+                    <span>Connecting Google Account...</span>
+                  </>
+                ) : (
+                  <>
+                    <GoogleGIcon className="w-4 h-4 shrink-0" />
+                    <span>Continue with Google (Direct Auto-Verified Login)</span>
+                  </>
+                )}
+              </button>
+
+              <div className="flex items-center gap-2 text-[10px] text-slate-500">
+                <div className="flex-1 h-px bg-slate-800" />
+                <span>YA EMAIL / MOBILE / CNIC SE LOGIN KAREIN</span>
+                <div className="flex-1 h-px bg-slate-800" />
               </div>
 
               <div>
                 <label className="block text-[11px] font-bold text-slate-300 mb-1">
-                  Mobile Number / Email / CNIC <span className="text-[#F5B738]">*</span>
+                  Email / Mobile Number / CNIC <span className="text-[#F5B738]">*</span>
                 </label>
                 <div className="relative">
                   <Phone className="w-4 h-4 text-[#F5B738] absolute left-3 top-1/2 -translate-y-1/2" />
@@ -1012,33 +1659,95 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                     type="text"
                     value={loginIdentifier}
                     onChange={(e) => setLoginIdentifier(e.target.value)}
-                    placeholder="0300-1234567 / email@domain.com / 37405-..."
+                    placeholder="email@gmail.com / 0300-1234567 / 37405-..."
                     className="w-full pl-9 pr-3 py-2.5 rounded-xl bg-[#14181F] border border-slate-700 text-white text-xs font-mono focus:border-[#F5B738] outline-none"
                     required
                   />
                 </div>
               </div>
 
-              <button
-                type="submit"
-                disabled={isLoggingIn}
-                className="boss-flat-btn w-full py-2.5 rounded-xl bg-[#F5B738] hover:bg-amber-400 text-black font-black text-xs flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
-              >
-                {isLoggingIn ? (
-                  <>
-                    <RefreshCw className="w-4 h-4 animate-spin" />
-                    <span>Verifying Cloud Account...</span>
-                  </>
-                ) : (
-                  <>
-                    <LogIn className="w-4 h-4" />
-                    <span>Login &amp; Open Calculator</span>
-                  </>
-                )}
-              </button>
+              <div>
+                <label className="block text-[11px] font-bold text-slate-300 mb-1">
+                  Account Password
+                </label>
+                <div className="relative">
+                  <Lock className="w-4 h-4 text-[#F5B738] absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type={showLoginPassword ? 'text' : 'password'}
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    placeholder="Apna password darj karein"
+                    className="w-full pl-9 pr-10 py-2.5 rounded-xl bg-[#14181F] border border-slate-700 text-white text-xs focus:border-[#F5B738] outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowLoginPassword((prev) => !prev)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white p-1 cursor-pointer"
+                    aria-label="Toggle password visibility"
+                  >
+                    {showLoginPassword ? (
+                      <EyeOff className="w-4 h-4" />
+                    ) : (
+                      <Eye className="w-4 h-4" />
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <button
+                  type="submit"
+                  disabled={isLoggingIn || isBiometricLoggingIn || isGoogleAuthenticating}
+                  className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-[#F5B738] hover:bg-amber-400 text-black font-black text-xs flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+                >
+                  {isLoggingIn ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>Verifying...</span>
+                    </>
+                  ) : (
+                    <>
+                      <LogIn className="w-4 h-4" />
+                      <span>Login &amp; Restore</span>
+                    </>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleFingerprintLogin}
+                  disabled={isLoggingIn || isBiometricLoggingIn || isGoogleAuthenticating}
+                  className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-[#14181F] border border-[#F5B738]/70 hover:bg-[#F5B738]/15 text-[#F5B738] font-black text-xs flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+                >
+                  {isBiometricLoggingIn ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>Scanning...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Fingerprint className="w-4 h-4 shrink-0" />
+                      <span>Fingerprint Login</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {biometricBinding && (
+                <div className="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-[10.5px] text-emerald-300 flex items-center justify-between gap-2">
+                  <span className="flex items-center gap-1.5 truncate">
+                    <Fingerprint className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
+                    <span className="truncate">
+                      Linked Biometric: <strong>{biometricBinding.userName}</strong> ({biometricBinding.identifier})
+                    </span>
+                  </span>
+                </div>
+              )}
 
               <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between gap-2 text-[10.5px] text-slate-400">
-                <span>Device ID: <strong className="text-slate-200 font-mono">{clientDeviceId}</strong></span>
+                <span>
+                  Device ID: <strong className="text-slate-200 font-mono">{clientDeviceId}</strong>
+                </span>
                 <a
                   href={`https://wa.me/923105524225?text=${encodeURIComponent(
                     `Assalam-o-Alaikum Boss Admin, mera Device ID ${clientDeviceId} hai. Mujhe account login / device reset mein help chahiye.`
@@ -1054,10 +1763,36 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           )}
 
           {/* =============================================================== */}
-          {/* TAB B: CREATE ACCOUNT (REGISTRATION + CNIC + EMAIL OTP)         */}
+          {/* TAB B: CREATE ACCOUNT (GOOGLE + PASSWORD + CNIC + EMAIL OTP)    */}
           {/* =============================================================== */}
           {activeTab === 'REGISTER' && regStep === 'FORM' && (
             <form onSubmit={handleSendOtpStep} className="space-y-3">
+              {/* Continue with Google Button */}
+              <button
+                type="button"
+                onClick={handleGoogleSignIn}
+                disabled={isGoogleAuthenticating || isSendingOtp}
+                className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-white hover:bg-slate-100 text-slate-900 font-bold text-xs flex items-center justify-center gap-2.5 shadow-sm cursor-pointer disabled:opacity-60"
+              >
+                {isGoogleAuthenticating ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin text-slate-700" />
+                    <span>Creating Auto-Verified Account...</span>
+                  </>
+                ) : (
+                  <>
+                    <GoogleGIcon className="w-4 h-4 shrink-0" />
+                    <span>Continue with Google (Instant Verified ID)</span>
+                  </>
+                )}
+              </button>
+
+              <div className="flex items-center gap-2 text-[10px] text-slate-500">
+                <div className="flex-1 h-px bg-slate-800" />
+                <span>YA FORM BHAR KAR ACCOUNT BANAYEIN</span>
+                <div className="flex-1 h-px bg-slate-800" />
+              </div>
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
                 <div>
                   <label className="block text-[10.5px] font-bold text-slate-300 mb-1">
@@ -1129,20 +1864,52 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                 </div>
               </div>
 
-              <div>
-                <label className="block text-[10.5px] font-bold text-slate-300 mb-1">
-                  Shop / Factory Address <span className="text-[#F5B738]">*</span>
-                </label>
-                <div className="relative">
-                  <MapPin className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
-                  <input
-                    type="text"
-                    value={regAddress}
-                    onChange={(e) => setRegAddress(e.target.value)}
-                    placeholder="Main Aluminium Market, City"
-                    className="w-full pl-8 pr-2.5 py-2 rounded-lg bg-[#14181F] border border-slate-700 text-white text-xs focus:border-[#F5B738] outline-none"
-                    required
-                  />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-[10.5px] font-bold text-slate-300 mb-1">
+                    Shop / Factory Address <span className="text-[#F5B738]">*</span>
+                  </label>
+                  <div className="relative">
+                    <MapPin className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+                    <input
+                      type="text"
+                      value={regAddress}
+                      onChange={(e) => setRegAddress(e.target.value)}
+                      placeholder="Main Aluminium Market, City"
+                      className="w-full pl-8 pr-2.5 py-2 rounded-lg bg-[#14181F] border border-slate-700 text-white text-xs focus:border-[#F5B738] outline-none"
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[10.5px] font-bold text-slate-300 mb-1">
+                    Set Account Password <span className="text-[#F5B738]">*</span>
+                  </label>
+                  <div className="relative">
+                    <Lock className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      type={showRegPassword ? 'text' : 'password'}
+                      value={regPassword}
+                      onChange={(e) => setRegPassword(e.target.value)}
+                      placeholder="Min 6 characters"
+                      minLength={6}
+                      className="w-full pl-8 pr-9 py-2 rounded-lg bg-[#14181F] border border-slate-700 text-white text-xs focus:border-[#F5B738] outline-none"
+                      required
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowRegPassword((prev) => !prev)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white p-0.5 cursor-pointer"
+                      aria-label="Toggle registration password"
+                    >
+                      {showRegPassword ? (
+                        <EyeOff className="w-3.5 h-3.5" />
+                      ) : (
+                        <Eye className="w-3.5 h-3.5" />
+                      )}
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -1219,7 +1986,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
 
               <button
                 type="submit"
-                disabled={isSendingOtp || isCompressingPhoto !== null}
+                disabled={isSendingOtp || isCompressingPhoto !== null || isGoogleAuthenticating}
                 className="boss-flat-btn w-full py-2.5 rounded-xl bg-[#F5B738] hover:bg-amber-400 text-black font-black text-xs flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
               >
                 {isSendingOtp ? (
