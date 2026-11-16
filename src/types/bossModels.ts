@@ -482,16 +482,17 @@ export interface SubAdminUser {
 
 export interface ClientSupportRequest {
   id: string;
+  deviceId?: string;
   userName: string;
   userPhone: string;
-  userCnic: string;
+  userCnic?: string;
   userEmail: string;
   requestType: string;
   message: string;
   createdAt: number;
   isResolved: boolean;
-  resolvedBy: string;
-  resolvedAt: number;
+  resolvedBy?: string;
+  resolvedAt?: number;
 }
 
 export interface AppOfferBanner {

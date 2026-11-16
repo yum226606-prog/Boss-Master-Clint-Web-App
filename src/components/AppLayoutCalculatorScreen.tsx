@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
+  AlertCircle,
   ArrowLeftRight,
   Bookmark,
   CheckCircle2,
@@ -246,7 +247,7 @@ interface AppLayoutCalculatorScreenProps {
     userEmail: string;
     requestType: string;
     message: string;
-  }) => Promise<boolean>;
+  }) => Promise<boolean | { ok: boolean; error?: string }>;
 }
 
 export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps> = (props) => {
@@ -382,6 +383,8 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   const [reqUserEmail, setReqUserEmail] = useState(authSession?.email || '');
   const [reqType, setReqType] = useState('Rate List / Section Request');
   const [reqMessage, setReqMessage] = useState('');
+  const [supportSubmitError, setSupportSubmitError] = useState<string | null>(null);
+  const [supportSubmitSuccess, setSupportSubmitSuccess] = useState<string | null>(null);
   const [copiedBankId, setCopiedBankId] = useState<string | null>(null);
   const [dismissedBannerId, setDismissedBannerId] = useState<string | null>(null);
   const [showBackgroundAdjustments, setShowBackgroundAdjustments] = useState(false);
@@ -8348,19 +8351,47 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               onSubmit={async (e) => {
                 e.preventDefault();
                 if (!reqMessage.trim() || !onSubmitSupportRequest) return;
-                const ok = await onSubmitSupportRequest({
+                setSupportSubmitError(null);
+                setSupportSubmitSuccess(null);
+                const result = await onSubmitSupportRequest({
                   userName: reqUserName.trim() || customerName || 'Client',
                   userPhone: reqUserPhone.trim() || customerPhone || '',
                   userEmail: reqUserEmail.trim(),
                   requestType: reqType,
                   message: reqMessage.trim(),
                 });
-                if (ok) {
+                const isOk = typeof result === 'boolean' ? result : Boolean(result?.ok);
+                if (isOk) {
                   setReqMessage('');
+                  setSupportSubmitSuccess('Message Support Team ko send aur Supabase mein save ho gaya hai!');
+                } else {
+                  const errMsg =
+                    typeof result === 'object' && result?.error
+                      ? result.error
+                      : 'Request sending error: Message send nahi ho saka.';
+                  setSupportSubmitError(errMsg);
                 }
               }}
               className="space-y-2.5 text-xs"
             >
+              {supportSubmitError && (
+                <div
+                  role="alert"
+                  className="p-2.5 rounded-xl bg-rose-950/80 border border-rose-500 text-rose-200 text-[11px] flex items-start gap-2"
+                >
+                  <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                  <div className="min-w-0 break-words">
+                    <div className="font-black text-rose-300">Request Sending Error</div>
+                    <div>{supportSubmitError}</div>
+                  </div>
+                </div>
+              )}
+              {supportSubmitSuccess && (
+                <div className="p-2.5 rounded-xl bg-emerald-950/70 border border-emerald-500/80 text-emerald-200 text-[11px] flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>{supportSubmitSuccess}</span>
+                </div>
+              )}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <div>
                   <label className="block text-[10px] text-slate-400 mb-0.5 font-semibold">

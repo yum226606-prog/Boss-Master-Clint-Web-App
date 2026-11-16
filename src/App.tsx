@@ -492,16 +492,55 @@ export default function App() {
   };
 
   const loadSupportRequests = async () => {
+    const mergedMap = new Map<string, ClientSupportRequest>();
+    try {
+      const sbRes = await callSupabaseProxy({
+        table: 'messages',
+        method: 'GET',
+        query: `device_id=eq.${encodeURIComponent(clientDeviceId)}&order=created_at.desc&limit=50`,
+        timeoutMs: 8000,
+      });
+      if (sbRes.ok && Array.isArray(sbRes.data)) {
+        sbRes.data.forEach((m: any) => {
+          const item: ClientSupportRequest = {
+            id: String(m.id || `msg-${Date.now()}`),
+            deviceId: String(m.device_id || clientDeviceId),
+            userName: String(m.user_name || 'Client'),
+            userPhone: String(m.phone || ''),
+            userEmail: String(m.email || ''),
+            requestType: String(m.subject || 'Support Message'),
+            message: String(m.message || m.text || ''),
+            createdAt: m.created_at ? new Date(m.created_at).getTime() || Date.now() : Date.now(),
+            isResolved: Boolean(m.is_resolved || m.status === 'resolved'),
+          };
+          mergedMap.set(item.id, item);
+        });
+      }
+    } catch (err) {
+      console.error('[SupportRequest] Supabase messages load error:', err);
+    }
+
     try {
       const resp = await fetch(
         `/api/support-requests?deviceId=${encodeURIComponent(clientDeviceId)}`
       );
       const data = await resp.json();
       if (data?.ok && Array.isArray(data.requests)) {
-        setSupportRequests(data.requests);
+        data.requests.forEach((r: ClientSupportRequest) => {
+          if (r?.id && !mergedMap.has(r.id)) {
+            mergedMap.set(r.id, r);
+          }
+        });
       }
     } catch {
-      // ignore offline load error
+      // ignore local backup load error
+    }
+
+    if (mergedMap.size > 0) {
+      const sorted = Array.from(mergedMap.values()).sort(
+        (a, b) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0)
+      );
+      setSupportRequests(sorted);
     }
   };
 
@@ -511,68 +550,115 @@ export default function App() {
     userEmail: string;
     requestType: string;
     message: string;
-  }) => {
+  }): Promise<{ ok: boolean; error?: string }> => {
     setIsSubmittingSupportRequest(true);
     try {
-      const resp = await fetch('/api/support-requests', {
+      const nowIso = new Date().toISOString();
+      const messagePayload = {
+        device_id: clientDeviceId,
+        user_id: authSession?.userId || clientDeviceId,
+        user_name: payload.userName || authSession?.name || 'Client',
+        phone: payload.userPhone || authSession?.phone || '',
+        email: payload.userEmail || authSession?.email || null,
+        subject: payload.requestType || 'Support Request',
+        message: payload.message,
+        text: payload.message,
+        status: 'pending',
+        is_read: false,
+        is_resolved: false,
+        created_at: nowIso,
+      };
+
+      // 1. Insert directly into Supabase "messages" table
+      const sbMsgRes = await callSupabaseProxy({
+        table: 'messages',
+        method: 'POST',
+        upsert: false,
+        payload: messagePayload,
+        timeoutMs: 10000,
+      });
+
+      if (!sbMsgRes.ok) {
+        const detailParts = [
+          sbMsgRes.error || `Supabase Error (${sbMsgRes.status})`,
+          typeof sbMsgRes.data === 'object' && sbMsgRes.data?.details ? sbMsgRes.data.details : '',
+          typeof sbMsgRes.data === 'object' && sbMsgRes.data?.hint ? sbMsgRes.data.hint : '',
+          typeof sbMsgRes.data === 'object' && sbMsgRes.data?.code ? `[${sbMsgRes.data.code}]` : '',
+        ].filter(Boolean);
+        const exactErr = detailParts.join(' — ');
+        console.error('[SupportRequest] Supabase messages insert error:', {
+          status: sbMsgRes.status,
+          error: sbMsgRes.error,
+          data: sbMsgRes.data,
+          payload: messagePayload,
+        });
+        triggerGlobalToast(`❌ Supabase Error: ${exactErr}`);
+        return { ok: false, error: exactErr };
+      }
+
+      const insertedRow = Array.isArray(sbMsgRes.data) ? sbMsgRes.data[0] : sbMsgRes.data;
+      const createdReq: ClientSupportRequest = {
+        id: String(insertedRow?.id || `msg-${Date.now()}`),
+        deviceId: clientDeviceId,
+        userName: messagePayload.user_name,
+        userPhone: messagePayload.phone,
+        userCnic: authSession?.cnic || '',
+        userEmail: String(messagePayload.email || ''),
+        requestType: messagePayload.subject,
+        message: payload.message,
+        createdAt: insertedRow?.created_at
+          ? new Date(insertedRow.created_at).getTime() || Date.now()
+          : Date.now(),
+        isResolved: Boolean(insertedRow?.is_resolved),
+        resolvedBy: '',
+        resolvedAt: 0,
+      };
+
+      // 2. Best-effort backup to local /api/support-requests & app_configs
+      fetch('/api/support-requests', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           deviceId: clientDeviceId,
           ...payload,
         }),
-      });
-      const data = await resp.json();
-      const createdReq: ClientSupportRequest =
-        resp.ok && data?.ok && data.request
-          ? data.request
-          : {
-              id: `req-${Date.now()}`,
-              deviceId: clientDeviceId,
-              userName: payload.userName,
-              userPhone: payload.userPhone,
-              userEmail: payload.userEmail,
-              requestType: payload.requestType,
-              message: payload.message,
-              createdAt: Date.now(),
-              isResolved: false,
-            };
+      }).catch(() => {});
 
-      // Also sync request to Supabase app_configs.client_support_requests_v1 for Admin visibility
-      try {
-        const existingCfg = await callSupabaseProxy({
-          table: 'app_configs',
-          method: 'GET',
-          query: 'id=eq.client_support_requests_v1&select=value',
-          timeoutMs: 6000,
-        });
-        const curRequests =
-          Array.isArray(existingCfg.data) && Array.isArray(existingCfg.data[0]?.value?.requests)
-            ? existingCfg.data[0].value.requests
-            : [];
-        await callSupabaseProxy({
-          table: 'app_configs',
-          method: 'POST',
-          upsert: true,
-          payload: {
-            id: 'client_support_requests_v1',
-            value: {
-              requests: [createdReq, ...curRequests].slice(0, 200),
-              updatedAt: Date.now(),
+      callSupabaseProxy({
+        table: 'app_configs',
+        method: 'GET',
+        query: 'id=eq.client_support_requests_v1&select=value',
+        timeoutMs: 6000,
+      })
+        .then((existingCfg) => {
+          const curRequests =
+            Array.isArray(existingCfg.data) && Array.isArray(existingCfg.data[0]?.value?.requests)
+              ? existingCfg.data[0].value.requests
+              : [];
+          return callSupabaseProxy({
+            table: 'app_configs',
+            method: 'POST',
+            upsert: true,
+            payload: {
+              id: 'client_support_requests_v1',
+              value: {
+                requests: [createdReq, ...curRequests].slice(0, 200),
+                updatedAt: Date.now(),
+              },
             },
-          },
-          timeoutMs: 6000,
-        });
-      } catch {
-        // ignore cloud support mirror failure
-      }
+            timeoutMs: 6000,
+          });
+        })
+        .catch(() => {});
 
       setSupportRequests((prev) => [createdReq, ...prev]);
-      triggerGlobalToast('✅ Request sent to Support Team!');
-      return true;
-    } catch {
-      triggerGlobalToast('Network error sending request. Try WhatsApp support.');
-      return false;
+      triggerGlobalToast('✅ Message sent to Support Team (Supabase)!');
+      return { ok: true };
+    } catch (err: any) {
+      const exactErr = err?.message || 'Unexpected network error sending request';
+      console.error('[SupportRequest] Exception:', err);
+      triggerGlobalToast(`❌ Request sending error: ${exactErr}`);
+      return { ok: false, error: exactErr };
     } finally {
       setIsSubmittingSupportRequest(false);
     }
