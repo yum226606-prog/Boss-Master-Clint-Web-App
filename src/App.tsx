@@ -22,6 +22,7 @@ import {
   FSectionFormula,
   GlassFormula,
   MeasurementUnit,
+  MobileDownloadConfig,
   OpenableWindowItem,
   SavedQuotation,
   SlidingDoorFormulaSettings,
@@ -30,7 +31,15 @@ import {
   WindowFormulaSettings,
   WindowItem,
 } from './types/bossModels';
-import { callSupabaseProxy, supabase } from './utils/supabaseClientConfig';
+import {
+  callSupabaseProxy,
+  fetchSupabaseServerTimeMs,
+  getActiveSupabaseCredentials,
+  getEffectiveServerNowMs,
+  isLocalClockRolledBack,
+  reinitializeSupabaseClient,
+  supabase,
+} from './utils/supabaseClientConfig';
 import {
   DEFAULT_COLORS,
   DEFAULT_SECTIONS,
@@ -66,11 +75,18 @@ import {
 import {
   clearAuthSession,
   ClientAuthSession,
+  collectAndSyncUserTelemetryToSupabase,
   evaluateClientAccessState,
+  getClientPublicIpAddress,
   getOrCreateClientDeviceId,
+  getOrCreateDeviceMacFingerprint,
+  isOwnerIdentity,
   loadAuthSession,
+  loadCachedMasterEngineConfig,
+  markUserOfflineInSupabase,
   requestAndSaveGpsLocation,
   saveAuthSession,
+  saveCachedMasterEngineConfig,
 } from './utils/adminApiConfig';
 
 const STORAGE_KEY = 'boss_aluminium_master_web_state_v1';
@@ -201,12 +217,16 @@ export default function App() {
     getStarterBankAccounts()
   );
   const [activeOffer, setActiveOffer] = useState<AppOfferBanner | null>(null);
+  const [broadcasts, setBroadcasts] = useState<AppOfferBanner[]>([]);
+  const [mobileDownloadConfig, setMobileDownloadConfig] = useState<MobileDownloadConfig | null>(null);
   const [packages, setPackages] = useState<SubscriptionPackage[]>(() => getStarterPackages());
   const [layoutConfig, setLayoutConfig] = useState<ClientAppLayoutControlConfig>(() =>
     getDefaultLayoutControlConfig()
   );
-  const mainLogoUrl = bossLionLogoImg;
+  const [mainLogoUrl, setMainLogoUrl] = useState<string>(bossLionLogoImg);
   const [letterheadBgUrl, setLetterheadBgUrl] = useState<string>(bossLetterheadCleanImg);
+  const lastAppliedAdminThemeHashRef = useRef<string>('');
+  const hasMigratedDbInSessionRef = useRef<boolean>(false);
   const [rateListSavedAt, setRateListSavedAt] = useState<number | null>(() => {
     try {
       const raw = localStorage.getItem(DEVICE_RATES_KEY);
@@ -223,20 +243,44 @@ export default function App() {
     getOrCreateClientDeviceId()
   );
 
-  // Live Supabase Cloud Sync & Access State
+  // Live Supabase Cloud Sync & Access State (Owner auto-recognized synchronously as LIFETIME_VIP)
   const [isSyncingCloud, setIsSyncingCloud] = useState(false);
   const [cloudAccessInfo, setCloudAccessInfo] = useState<{
     status: 'ACTIVE' | 'TRIAL' | 'BLOCKED' | 'FREE';
     tier: string;
     expiresAt: number | null;
+    serverNowMs?: number;
     reason: string;
     lastSyncedAt: number | null;
-  }>({
-    status: 'TRIAL',
-    tier: 'CLIENT',
-    expiresAt: null,
-    reason: '',
-    lastSyncedAt: null,
+  }>(() => {
+    const initialSession = loadAuthSession();
+    const cachedMaster = loadCachedMasterEngineConfig();
+    if (
+      initialSession &&
+      isOwnerIdentity({
+        email: initialSession.email,
+        phone: initialSession.phone,
+        cnic: initialSession.cnic,
+        masterCfg: cachedMaster,
+      })
+    ) {
+      return {
+        status: 'FREE',
+        tier: 'LIFETIME_VIP',
+        expiresAt: null,
+        serverNowMs: 0,
+        reason: '',
+        lastSyncedAt: null,
+      };
+    }
+    return {
+      status: 'TRIAL',
+      tier: 'CLIENT',
+      expiresAt: null,
+      serverNowMs: 0,
+      reason: '',
+      lastSyncedAt: null,
+    };
   });
 
   // Client Support Team Requests State
@@ -288,12 +332,12 @@ export default function App() {
       options?.sessionOverride !== undefined ? options.sessionOverride : authSession;
     setIsSyncingCloud(true);
     try {
-      const [cfgRes, usersRes, clientUsersRes, subsRes] = await Promise.all([
+      const [cfgRes, usersRes, clientUsersRes, subsRes, clientIpAddress, serverNowMs] = await Promise.all([
         callSupabaseProxy({
           table: 'app_configs',
           method: 'GET',
           query:
-            'id=in.(global_config,master_engine_config,aluminium_rates_v1,custom_sections_v1,formulas_v1,blueprints_v1,layout_config_v1,company_branding_v1)&select=id,value',
+            'id=in.(global_config,master_engine_config,aluminium_rates_v1,custom_sections_v1,formulas_v1,blueprints_v1,layout_config_v1,company_branding_v1,supabase_config_v1)&select=id,value',
         }),
         callSupabaseProxy({
           table: 'users',
@@ -310,6 +354,8 @@ export default function App() {
           method: 'GET',
           query: 'select=*&limit=250',
         }),
+        getClientPublicIpAddress(),
+        fetchSupabaseServerTimeMs(),
       ]);
 
       const cfgMap: Record<string, any> = {};
@@ -325,21 +371,139 @@ export default function App() {
         ...(cfgMap.global_config || {}),
         ...(cfgMap.master_engine_config || {}),
       };
+      if (Object.keys(globalCfg).length > 0) {
+        saveCachedMasterEngineConfig(globalCfg);
+      }
       const ratesCfg = cfgMap.aluminium_rates_v1 || {};
       const sectionsCfg = cfgMap.custom_sections_v1 || {};
       const formulasCfg = cfgMap.formulas_v1 || {};
       const blueprintsCfg = cfgMap.blueprints_v1 || {};
       const layoutCfg = cfgMap.layout_config_v1 || {};
+      const brandingCfg = cfgMap.company_branding_v1 || {};
+      const sbMigrationCfg =
+        cfgMap.supabase_config_v1 ||
+        globalCfg.supabaseMigration ||
+        globalCfg.supabaseConfig ||
+        {};
 
-      // 1. Packages, Bank Accounts & Active Offer/Banner
+      // 0. Auto-Migrate Supabase Database if Admin publishes a new Supabase URL + Key
+      const candidateNewUrl = String(
+        sbMigrationCfg.url ||
+          sbMigrationCfg.supabaseUrl ||
+          globalCfg.newSupabaseUrl ||
+          ''
+      ).trim();
+      const candidateNewKey = String(
+        sbMigrationCfg.publishableKey ||
+          sbMigrationCfg.anonKey ||
+          sbMigrationCfg.key ||
+          globalCfg.newSupabaseKey ||
+          globalCfg.newSupabasePublishableKey ||
+          ''
+      ).trim();
+      if (
+        !hasMigratedDbInSessionRef.current &&
+        candidateNewUrl.startsWith('https://') &&
+        candidateNewKey.length > 16
+      ) {
+        const switched = reinitializeSupabaseClient(candidateNewUrl, candidateNewKey);
+        if (switched) {
+          hasMigratedDbInSessionRef.current = true;
+          triggerGlobalToast('🔄 Switched to updated Admin Supabase Cloud!');
+          setIsSyncingCloud(false);
+          return syncFromSupabase({ ...options, silent: true });
+        }
+      }
+
+      // 1. Packages, Bank Accounts, Broadcasts, Offers, Main Logo, Mobile APK/iOS & Themes
       if (Array.isArray(globalCfg.packages) && globalCfg.packages.length > 0) {
         setPackages(globalCfg.packages);
       }
       if (Array.isArray(globalCfg.bankAccounts) && globalCfg.bankAccounts.length > 0) {
         setBankAccounts(globalCfg.bankAccounts);
       }
-      if (globalCfg.activeOffer || globalCfg.activeBanner) {
-        setActiveOffer(globalCfg.activeOffer || globalCfg.activeBanner);
+      if (globalCfg.activeOffer !== undefined || globalCfg.activeBanner !== undefined || globalCfg.bannerConfig !== undefined) {
+        setActiveOffer(globalCfg.activeOffer || globalCfg.activeBanner || globalCfg.bannerConfig || null);
+      }
+      if (Array.isArray(globalCfg.broadcasts)) {
+        setBroadcasts(globalCfg.broadcasts);
+      } else if (Array.isArray(globalCfg.banners)) {
+        setBroadcasts(globalCfg.banners);
+      } else if (Array.isArray(globalCfg.announcements)) {
+        setBroadcasts(globalCfg.announcements);
+      } else if (Array.isArray(globalCfg.broadcastBanners)) {
+        setBroadcasts(globalCfg.broadcastBanners);
+      }
+
+      const incomingLogo = String(
+        globalCfg.mainLogoUrl ||
+          globalCfg.appLogoUrl ||
+          globalCfg.branding?.mainLogoUrl ||
+          globalCfg.layoutConfig?.mainLogoUrl ||
+          brandingCfg.mainLogoUrl ||
+          ''
+      ).trim();
+      if (incomingLogo) {
+        setMainLogoUrl(incomingLogo);
+      }
+
+      const rawMob =
+        globalCfg.mobileAppConfig ||
+        globalCfg.appDownloads ||
+        globalCfg.mobileDownloadConfig ||
+        {};
+      const androidApkUrl = String(
+        rawMob.androidApkUrl || rawMob.apkUrl || globalCfg.androidApkUrl || globalCfg.apkUrl || ''
+      ).trim();
+      const iosAppUrl = String(
+        rawMob.iosAppUrl || rawMob.iosUrl || rawMob.ipaUrl || globalCfg.iosAppUrl || globalCfg.iosUrl || ''
+      ).trim();
+      if (androidApkUrl || iosAppUrl) {
+        setMobileDownloadConfig({
+          androidApkUrl,
+          iosAppUrl,
+          androidVersion: String(rawMob.androidVersion || globalCfg.androidVersion || '').trim(),
+          iosVersion: String(rawMob.iosVersion || globalCfg.iosVersion || '').trim(),
+          releaseNotes: String(rawMob.releaseNotes || globalCfg.releaseNotes || '').trim(),
+        });
+      } else if (
+        globalCfg.mobileAppConfig !== undefined ||
+        globalCfg.appDownloads !== undefined ||
+        globalCfg.mobileDownloadConfig !== undefined
+      ) {
+        setMobileDownloadConfig(null);
+      }
+
+      const adminThemeObj =
+        globalCfg.activeTheme || globalCfg.appTheme || globalCfg.themeConfig;
+      if (
+        adminThemeObj &&
+        typeof adminThemeObj === 'object' &&
+        adminThemeObj.bg &&
+        adminThemeObj.primary
+      ) {
+        const themeSig = JSON.stringify({
+          id: adminThemeObj.id,
+          name: adminThemeObj.name,
+          bg: adminThemeObj.bg,
+          primary: adminThemeObj.primary,
+          accent: adminThemeObj.accent,
+        });
+        if (themeSig !== lastAppliedAdminThemeHashRef.current) {
+          lastAppliedAdminThemeHashRef.current = themeSig;
+          setCurrentTheme(enforceReadableContrast(adminThemeObj));
+        }
+      }
+      if (Array.isArray(globalCfg.cloudThemes) && globalCfg.cloudThemes.length > 0) {
+        setDownloadedThemes((prev) => {
+          const map = new Map<string, AppThemeConfig>();
+          [...globalCfg.cloudThemes, ...prev].forEach((t: any) => {
+            if (t?.id && t?.bg && t?.primary) {
+              map.set(t.id, enforceReadableContrast(t));
+            }
+          });
+          return Array.from(map.values());
+        });
       }
 
       // 2. Complete Formulas Sync (Admin master_engine_config + formulas_v1 aliases)
@@ -443,36 +607,68 @@ export default function App() {
         setGlassRates((prev) => ({ ...prev, ...cloudGlassRates }));
       }
 
-      // 6. Live Admin Access Control (Block, RESET_ Device Logout, VIP, Trial Extension, Expiry Lock)
+      // 6. Live Admin Access Control (Block Account/Device/IP/MAC/CNIC/Email, Remote force_logout_at & RESET_, VIP, Trial/Subscription Expiry)
       const usersList = Array.isArray(usersRes.data) ? usersRes.data : [];
       const clientUsersList = Array.isArray(clientUsersRes.data) ? clientUsersRes.data : [];
       const subsList = Array.isArray(subsRes.data) ? subsRes.data : [];
+      const clientMacAddress = getOrCreateDeviceMacFingerprint();
 
       const evaluated = evaluateClientAccessState({
         session: activeSession,
         clientDeviceId,
+        clientIpAddress,
+        clientMacAddress,
         usersList,
         clientUsersList,
         subsList,
         masterCfg: globalCfg,
+        serverNowMs,
       });
 
-      if (evaluated.forceResetLogout) {
+      const isOwnerAccount = Boolean(
+        activeSession &&
+          isOwnerIdentity({
+            email: activeSession.email,
+            phone: activeSession.phone,
+            cnic: activeSession.cnic,
+            masterCfg: globalCfg,
+          })
+      );
+
+      if (evaluated.forceResetLogout && !isOwnerAccount) {
         clearAuthSession();
+        supabase.auth.signOut().catch(() => {});
+        markUserOfflineInSupabase(clientDeviceId);
         setAuthSession(null);
         setIsSubscriptionExpired(false);
-        setAuthNotice('Admin ne aapka Device Reset kiya hai — dobara Login karein.');
+        setAuthNotice(
+          evaluated.forceLogoutReason ||
+            'Admin ne aapka Device Reset / Remote Logout kiya hai — dobara Login karein.'
+        );
         return true;
       }
 
-      setCloudAccessInfo({
-        status: evaluated.status,
-        tier: evaluated.tier,
-        expiresAt: evaluated.expiresAt,
-        reason: evaluated.reason,
-        lastSyncedAt: Date.now(),
-      });
-      setIsSubscriptionExpired(evaluated.isExpired);
+      const syncStamp = evaluated.serverNowMs > 0 ? evaluated.serverNowMs : Date.now();
+      setCloudAccessInfo(
+        isOwnerAccount
+          ? {
+              status: 'FREE',
+              tier: 'LIFETIME_VIP',
+              expiresAt: null,
+              serverNowMs: syncStamp,
+              reason: '',
+              lastSyncedAt: syncStamp,
+            }
+          : {
+              status: evaluated.status,
+              tier: evaluated.tier,
+              expiresAt: evaluated.expiresAt,
+              serverNowMs: evaluated.serverNowMs,
+              reason: evaluated.reason,
+              lastSyncedAt: syncStamp,
+            }
+      );
+      setIsSubscriptionExpired(isOwnerAccount ? false : evaluated.isExpired);
 
       if (!silent) {
         triggerGlobalToast(
@@ -493,7 +689,6 @@ export default function App() {
   };
 
   const loadSupportRequests = async () => {
-    const mergedMap = new Map<string, ClientSupportRequest>();
     try {
       const sbRes = await callSupabaseProxy({
         table: 'messages',
@@ -502,46 +697,21 @@ export default function App() {
         timeoutMs: 8000,
       });
       if (sbRes.ok && Array.isArray(sbRes.data)) {
-        sbRes.data.forEach((m: any) => {
-          const item: ClientSupportRequest = {
-            id: String(m.id || `msg-${Date.now()}`),
-            deviceId: String(m.device_id || clientDeviceId),
-            userName: String(m.user_name || 'Client'),
-            userPhone: String(m.phone || ''),
-            userEmail: String(m.email || ''),
-            requestType: String(m.category || m.subject || 'Support Message'),
-            message: String(m.message || m.text || ''),
-            createdAt: m.created_at ? new Date(m.created_at).getTime() || Date.now() : Date.now(),
-            isResolved: Boolean(m.is_resolved || m.status === 'resolved'),
-          };
-          mergedMap.set(item.id, item);
-        });
+        const loaded: ClientSupportRequest[] = sbRes.data.map((m: any) => ({
+          id: String(m.id || `msg-${Date.now()}`),
+          deviceId: String(m.device_id || clientDeviceId),
+          userName: String(m.user_name || 'Client'),
+          userPhone: String(m.phone || ''),
+          userEmail: String(m.email || ''),
+          requestType: String(m.category || m.subject || 'Support Message'),
+          message: String(m.message || m.text || ''),
+          createdAt: m.created_at ? new Date(m.created_at).getTime() || Date.now() : Date.now(),
+          isResolved: Boolean(m.is_resolved || m.status === 'resolved'),
+        }));
+        setSupportRequests(loaded);
       }
     } catch (err) {
       console.error('[SupportRequest] Supabase messages load error:', err);
-    }
-
-    try {
-      const resp = await fetch(
-        `/api/support-requests?deviceId=${encodeURIComponent(clientDeviceId)}`
-      );
-      const data = await resp.json();
-      if (data?.ok && Array.isArray(data.requests)) {
-        data.requests.forEach((r: ClientSupportRequest) => {
-          if (r?.id && !mergedMap.has(r.id)) {
-            mergedMap.set(r.id, r);
-          }
-        });
-      }
-    } catch {
-      // ignore local backup load error
-    }
-
-    if (mergedMap.size > 0) {
-      const sorted = Array.from(mergedMap.values()).sort(
-        (a, b) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0)
-      );
-      setSupportRequests(sorted);
     }
   };
 
@@ -571,7 +741,7 @@ export default function App() {
         created_at: nowIso,
       };
 
-      // 1. Insert directly into Supabase "messages" table
+      // Insert directly into Supabase "messages" table (no /api/ dependency)
       const sbMsgRes = await callSupabaseProxy({
         table: 'messages',
         method: 'POST',
@@ -616,43 +786,6 @@ export default function App() {
         resolvedAt: 0,
       };
 
-      // 2. Best-effort backup to local /api/support-requests & app_configs
-      fetch('/api/support-requests', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          deviceId: clientDeviceId,
-          ...payload,
-        }),
-      }).catch(() => {});
-
-      callSupabaseProxy({
-        table: 'app_configs',
-        method: 'GET',
-        query: 'id=eq.client_support_requests_v1&select=value',
-        timeoutMs: 6000,
-      })
-        .then((existingCfg) => {
-          const curRequests =
-            Array.isArray(existingCfg.data) && Array.isArray(existingCfg.data[0]?.value?.requests)
-              ? existingCfg.data[0].value.requests
-              : [];
-          return callSupabaseProxy({
-            table: 'app_configs',
-            method: 'POST',
-            upsert: true,
-            payload: {
-              id: 'client_support_requests_v1',
-              value: {
-                requests: [createdReq, ...curRequests].slice(0, 200),
-                updatedAt: Date.now(),
-              },
-            },
-            timeoutMs: 6000,
-          });
-        })
-        .catch(() => {});
-
       setSupportRequests((prev) => [createdReq, ...prev]);
       triggerGlobalToast('✅ Message sent to Support Team (Supabase)!');
       return { ok: true };
@@ -666,18 +799,74 @@ export default function App() {
     }
   };
 
+  const handleSyncUserProfileToCloud = async (profilePatch: {
+    companyName?: string;
+    selfieUrl?: string;
+    shopPhotoUrl?: string;
+  }) => {
+    if (!authSession?.verified) return;
+    const updatedSession: ClientAuthSession = {
+      ...authSession,
+      ...(profilePatch.companyName !== undefined
+        ? { companyName: profilePatch.companyName }
+        : {}),
+      ...(profilePatch.selfieUrl !== undefined ? { selfieUrl: profilePatch.selfieUrl } : {}),
+      ...(profilePatch.shopPhotoUrl !== undefined
+        ? { shopPhotoUrl: profilePatch.shopPhotoUrl }
+        : {}),
+    };
+    saveAuthSession(updatedSession);
+    setAuthSession(updatedSession);
+    await collectAndSyncUserTelemetryToSupabase({
+      deviceId: updatedSession.deviceId,
+      session: updatedSession,
+      companyName: updatedSession.companyName || companyName,
+      selfieUrl: updatedSession.selfieUrl,
+      shopPhotoUrl: updatedSession.shopPhotoUrl,
+      isOnline: true,
+    });
+  };
+
   const handleAuthenticated = async (session: ClientAuthSession) => {
     setClientDeviceId(session.deviceId);
     saveAuthSession(session);
     setAuthSession(session);
     setAuthNotice(null);
     setIsSubscriptionExpired(false);
+    if (
+      isOwnerIdentity({
+        email: session.email,
+        phone: session.phone,
+        cnic: session.cnic,
+        masterCfg: loadCachedMasterEngineConfig(),
+      })
+    ) {
+      setCloudAccessInfo({
+        status: 'FREE',
+        tier: 'LIFETIME_VIP',
+        expiresAt: null,
+        reason: '',
+        lastSyncedAt: Date.now(),
+      });
+    }
+    if (session.companyName && session.companyName.trim()) {
+      setCompanyName(session.companyName.trim());
+    }
     requestAndSaveGpsLocation(session.deviceId);
+    collectAndSyncUserTelemetryToSupabase({
+      deviceId: session.deviceId,
+      session,
+      companyName: session.companyName || companyName,
+      selfieUrl: session.selfieUrl,
+      shopPhotoUrl: session.shopPhotoUrl,
+      isOnline: true,
+    });
     await syncFromSupabase({ forceRates: false, silent: true, sessionOverride: session });
     loadSupportRequests();
   };
 
   const handleLogout = () => {
+    markUserOfflineInSupabase(clientDeviceId);
     clearAuthSession();
     supabase.auth.signOut().catch(() => {});
     setAuthSession(null);
@@ -763,6 +952,14 @@ export default function App() {
           setRates(getInitialRates());
         }
         if (parsed.packages?.length) setPackages(parsed.packages);
+        if (parsed.bankAccounts?.length) setBankAccounts(parsed.bankAccounts);
+        if (parsed.activeOffer !== undefined) setActiveOffer(parsed.activeOffer);
+        if (Array.isArray(parsed.broadcasts)) setBroadcasts(parsed.broadcasts);
+        if (parsed.mainLogoUrl) setMainLogoUrl(parsed.mainLogoUrl);
+        if (parsed.mobileDownloadConfig !== undefined) {
+          setMobileDownloadConfig(parsed.mobileDownloadConfig);
+        }
+        if (Array.isArray(parsed.supportRequests)) setSupportRequests(parsed.supportRequests);
         if (parsed.layoutConfig) setLayoutConfig(parsed.layoutConfig);
         if (parsed.letterheadBgUrl) setLetterheadBgUrl(parsed.letterheadBgUrl);
         if (parsed.currentTheme) setCurrentTheme(enforceReadableContrast(parsed.currentTheme));
@@ -776,6 +973,43 @@ export default function App() {
         if (typeof parsed.markupPct === 'number') setMarkupPct(parsed.markupPct);
         if (typeof parsed.transportRent === 'number') setTransportRent(parsed.transportRent);
         if (typeof parsed.labourCost === 'number') setLabourCost(parsed.labourCost);
+
+        const initialSess = loadAuthSession();
+        const cachedM = loadCachedMasterEngineConfig();
+        const isOwner = Boolean(
+          initialSess &&
+            isOwnerIdentity({
+              email: initialSess.email,
+              phone: initialSess.phone,
+              cnic: initialSess.cnic,
+              masterCfg: cachedM,
+            })
+        );
+        if (isOwner) {
+          setCloudAccessInfo({
+            status: 'FREE',
+            tier: 'LIFETIME_VIP',
+            expiresAt: null,
+            serverNowMs: getEffectiveServerNowMs(),
+            reason: '',
+            lastSyncedAt: null,
+          });
+          setIsSubscriptionExpired(false);
+        } else if (parsed.cloudAccessInfo && initialSess) {
+          setCloudAccessInfo(parsed.cloudAccessInfo);
+          const knownServerNow = getEffectiveServerNowMs() || Number(parsed.cloudAccessInfo.serverNowMs || 0);
+          const cachedExp = Number(parsed.cloudAccessInfo.expiresAt || 0);
+          const isCachedNonFree =
+            parsed.cloudAccessInfo.status !== 'FREE' &&
+            parsed.cloudAccessInfo.status !== 'BLOCKED';
+          if (
+            isCachedNonFree &&
+            (isLocalClockRolledBack() ||
+              (cachedExp > 0 && knownServerNow > 0 && knownServerNow > cachedExp))
+          ) {
+            setIsSubscriptionExpired(true);
+          }
+        }
       }
 
       // Also check dedicated device rate list snapshot if main storage lacked rates
@@ -793,25 +1027,116 @@ export default function App() {
       // ignore storage errors
     }
 
-    // Request GPS permission on app startup & sync to users table if logged in
+    // Request GPS permission on app startup & sync ONCE on load (zero background polling)
     const existingSession = loadAuthSession();
     requestAndSaveGpsLocation(existingSession ? existingSession.deviceId : undefined);
 
-    // Sync cloud configs & access status only if verified session exists
     if (existingSession) {
+      collectAndSyncUserTelemetryToSupabase({
+        deviceId: existingSession.deviceId,
+        session: existingSession,
+        companyName: existingSession.companyName || companyName,
+        selfieUrl: existingSession.selfieUrl,
+        shopPhotoUrl: existingSession.shopPhotoUrl,
+        isOnline: true,
+      });
       syncFromSupabase({ forceRates: false, silent: true });
       loadSupportRequests();
     }
   }, []);
 
-  // Live 45-second background polling of Admin Panel Cloud Status (Block, RESET_ Logout, VIP, Expiry Lock, Formulas)
+  // Anti-Theft, Anti-Inspect & Formula/Rate Copy Protection (Right-click, DevTools shortcuts & Protected Copy Guard)
+  useEffect(() => {
+    const handleContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const keyLower = String(e.key || '').toLowerCase();
+      const isCtrlOrMeta = Boolean(e.ctrlKey || e.metaKey);
+
+      // Block F12
+      if (e.key === 'F12' || e.keyCode === 123) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+
+      // Block Ctrl+Shift+I / Ctrl+Shift+J / Ctrl+Shift+C (and Cmd+Option+I/J/C on macOS)
+      if (
+        (isCtrlOrMeta && e.shiftKey && (keyLower === 'i' || keyLower === 'j' || keyLower === 'c')) ||
+        (e.metaKey && e.altKey && (keyLower === 'i' || keyLower === 'j' || keyLower === 'c'))
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+
+      // Block Ctrl+U (View Source) & Ctrl+S (Save Page)
+      if (isCtrlOrMeta && (keyLower === 'u' || keyLower === 's')) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+
+    const handleCopyOrCut = (e: ClipboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.closest('.boss-protected-content') ||
+          target.closest('table') ||
+          target.tagName === 'TABLE') &&
+        !target.closest('input, textarea, select')
+      ) {
+        e.preventDefault();
+      }
+    };
+
+    document.addEventListener('contextmenu', handleContextMenu, true);
+    window.addEventListener('keydown', handleKeyDown, true);
+    document.addEventListener('copy', handleCopyOrCut, true);
+    document.addEventListener('cut', handleCopyOrCut, true);
+
+    return () => {
+      document.removeEventListener('contextmenu', handleContextMenu, true);
+      window.removeEventListener('keydown', handleKeyDown, true);
+      document.removeEventListener('copy', handleCopyOrCut, true);
+      document.removeEventListener('cut', handleCopyOrCut, true);
+    };
+  }, []);
+
+  // Mark user offline on browser/tab close (no background polling or focus/visibility loops)
   useEffect(() => {
     if (!authSession?.verified) return;
-    const pollId = setInterval(() => {
-      syncFromSupabase({ forceRates: false, silent: true });
-    }, 45000);
-    return () => clearInterval(pollId);
-  }, [authSession?.verified, authSession?.phone, clientDeviceId]);
+    const handlePageHide = () => {
+      try {
+        const { url, key } = getActiveSupabaseCredentials();
+        fetch(
+          `${url}/rest/v1/users?device_id=eq.${encodeURIComponent(clientDeviceId)}`,
+          {
+            method: 'PATCH',
+            keepalive: true,
+            headers: {
+              apikey: key,
+              Authorization: `Bearer ${key}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              is_online: false,
+              last_seen: new Date().toISOString(),
+            }),
+          }
+        ).catch(() => {});
+      } catch {
+        // ignore keepalive failure
+      }
+    };
+
+    window.addEventListener('pagehide', handlePageHide);
+    return () => {
+      window.removeEventListener('pagehide', handlePageHide);
+    };
+  }, [authSession?.verified, clientDeviceId]);
 
   // Sync Main Logo to Browser Favicon (keep PNG apple-touch-icon intact for iOS Safari)
   useEffect(() => {
@@ -931,7 +1256,7 @@ export default function App() {
     };
   }, []);
 
-  // Persist key state changes to localStorage
+  // Persist key state & master_engine_config outputs to localStorage so app runs offline without hitting Supabase
   useEffect(() => {
     try {
       localStorage.setItem(
@@ -948,6 +1273,13 @@ export default function App() {
           savedQuotations,
           rates,
           packages,
+          bankAccounts,
+          activeOffer,
+          broadcasts,
+          mainLogoUrl,
+          mobileDownloadConfig,
+          cloudAccessInfo,
+          supportRequests,
           layoutConfig,
           letterheadBgUrl,
           currentTheme,
@@ -978,6 +1310,13 @@ export default function App() {
     savedQuotations,
     rates,
     packages,
+    bankAccounts,
+    activeOffer,
+    broadcasts,
+    mainLogoUrl,
+    mobileDownloadConfig,
+    cloudAccessInfo,
+    supportRequests,
     layoutConfig,
     letterheadBgUrl,
     currentTheme,
@@ -1460,33 +1799,54 @@ export default function App() {
       {/* =================================================================== */}
       {/* STRICT STARTUP & CLOUD ACCESS GATES (NO DIRECT DASHBOARD WHEN LOCKED)*/}
       {/* =================================================================== */}
-      {!authSession?.verified ? (
-        <ClientAuthModal
-          clientDeviceId={clientDeviceId}
-          onAuthenticated={handleAuthenticated}
-          externalNotice={authNotice}
-        />
-      ) : cloudAccessInfo.status === 'BLOCKED' ? (
-        <AccountBlockedLockModal
-          authSession={authSession}
-          clientDeviceId={clientDeviceId}
-          blockReason={cloudAccessInfo.reason}
-          isSyncing={isSyncingCloud}
-          onRefreshStatus={() => syncFromSupabase({ forceRates: false, silent: false })}
-          onLogout={handleLogout}
-        />
-      ) : isSubscriptionExpired ? (
-        <SubscriptionExpiredLockModal
-          authSession={authSession}
-          clientDeviceId={clientDeviceId}
-          packages={packages}
-          bankAccounts={bankAccounts}
-          expiresAt={cloudAccessInfo.expiresAt}
-          isSyncing={isSyncingCloud}
-          onRefreshCloudStatus={() => syncFromSupabase({ forceRates: false, silent: false })}
-          onLogout={handleLogout}
-        />
-      ) : (
+      {(() => {
+        const isOwnerBypass = Boolean(
+          authSession &&
+            isOwnerIdentity({
+              email: authSession.email,
+              phone: authSession.phone,
+              cnic: authSession.cnic,
+              masterCfg: loadCachedMasterEngineConfig(),
+            })
+        );
+        if (!authSession?.verified) {
+          return (
+            <ClientAuthModal
+              clientDeviceId={clientDeviceId}
+              onAuthenticated={handleAuthenticated}
+              externalNotice={authNotice}
+              mainLogoUrl={mainLogoUrl}
+            />
+          );
+        }
+        if (!isOwnerBypass && cloudAccessInfo.status === 'BLOCKED') {
+          return (
+            <AccountBlockedLockModal
+              authSession={authSession}
+              clientDeviceId={clientDeviceId}
+              blockReason={cloudAccessInfo.reason}
+              isSyncing={isSyncingCloud}
+              onRefreshStatus={() => syncFromSupabase({ forceRates: false, silent: false })}
+              onLogout={handleLogout}
+            />
+          );
+        }
+        if (!isOwnerBypass && isSubscriptionExpired) {
+          return (
+            <SubscriptionExpiredLockModal
+              authSession={authSession}
+              clientDeviceId={clientDeviceId}
+              packages={packages}
+              bankAccounts={bankAccounts}
+              expiresAt={cloudAccessInfo.expiresAt}
+              isSyncing={isSyncingCloud}
+              onRefreshCloudStatus={() => syncFromSupabase({ forceRates: false, silent: false })}
+              onLogout={handleLogout}
+              mainLogoUrl={mainLogoUrl}
+            />
+          );
+        }
+        return (
         <main className="flex-1 max-w-[1440px] w-full mx-auto px-2 pb-4 pt-1.5 md:p-4 overflow-x-hidden">
           <AppLayoutCalculatorScreen
           isInstalled={isInstalled}
@@ -1758,6 +2118,8 @@ export default function App() {
             }
           }}
           activeOffer={activeOffer}
+          broadcasts={broadcasts}
+          mobileDownloadConfig={mobileDownloadConfig}
           onSaveOffer={setActiveOffer}
           packages={packages}
           onUpdatePackages={setPackages}
@@ -1768,12 +2130,14 @@ export default function App() {
           authSession={authSession}
           onLogout={handleLogout}
           onSyncFromSupabase={syncFromSupabase}
+          onSyncUserProfileToCloud={handleSyncUserProfileToCloud}
           supportRequests={supportRequests}
           isSubmittingSupportRequest={isSubmittingSupportRequest}
           onSubmitSupportRequest={handleSubmitSupportRequest}
         />
         </main>
-      )}
+        );
+      })()}
 
       {/* Mobile Theme Studio & Online Cloud Theme Store Modal */}
       {showThemeStudio && (
@@ -1829,8 +2193,49 @@ export default function App() {
               </button>
             </div>
 
-            {/* Action Buttons: Native Install / Open Full-Screen Browser Tab / Download Quick Shortcut */}
+            {/* Action Buttons: Admin Android APK / iOS Links + Native Install + Open Browser + Quick Launcher */}
             <div className="space-y-2">
+              {mobileDownloadConfig?.androidApkUrl && (
+                <a
+                  href={mobileDownloadConfig.androidApkUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-black font-black text-xs flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Smartphone className="w-4 h-4" />
+                  <span>
+                    Download Android App (APK)
+                    {mobileDownloadConfig.androidVersion
+                      ? ` · v${mobileDownloadConfig.androidVersion}`
+                      : ''}
+                  </span>
+                </a>
+              )}
+
+              {mobileDownloadConfig?.iosAppUrl && (
+                <a
+                  href={mobileDownloadConfig.iosAppUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-sky-500 hover:bg-sky-400 text-black font-black text-xs flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Smartphone className="w-4 h-4" />
+                  <span>
+                    Install iPhone / iOS App
+                    {mobileDownloadConfig.iosVersion
+                      ? ` · v${mobileDownloadConfig.iosVersion}`
+                      : ''}
+                  </span>
+                </a>
+              )}
+
+              {mobileDownloadConfig?.releaseNotes && (
+                <div className="p-2 rounded-lg bg-[#14181F] border border-slate-800 text-[10.5px] text-slate-300">
+                  <strong className="text-[#F5B738]">Update Notes:</strong>{' '}
+                  {mobileDownloadConfig.releaseNotes}
+                </div>
+              )}
+
               {isInstallable && (
                 <button
                   type="button"
@@ -1853,7 +2258,7 @@ export default function App() {
                   href={window.location.href}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-black font-black text-xs flex items-center justify-center gap-2 cursor-pointer"
+                  className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-emerald-500/20 border border-emerald-500/60 hover:bg-emerald-500 hover:text-black text-emerald-300 font-black text-xs flex items-center justify-center gap-2 cursor-pointer"
                 >
                   <ExternalLink className="w-4 h-4" />
                   <span>Open Full Screen in Browser to Install</span>

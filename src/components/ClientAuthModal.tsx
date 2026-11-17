@@ -22,30 +22,43 @@ import {
   UserPlus,
 } from 'lucide-react';
 import bossLionLogoImg from '../assets/images/boss_lion_logo_1791741005749.jpg';
-import { callSupabaseProxy, supabase } from '../utils/supabaseClientConfig';
+import {
+  callSupabaseProxy,
+  fetchSupabaseServerTimeMs,
+  getEffectiveServerNowMs,
+  supabase,
+  uploadImageToUserUploadsBucket,
+} from '../utils/supabaseClientConfig';
 import {
   BiometricBinding,
   ClientAuthSession,
   compressImageToDataUrl,
   enrollBiometricPasskey,
+  evaluateClientAccessState,
   extractAuthCallbackFromUrl,
   extractSmsGatewayConfig,
   fetchAdminServer,
   fetchMasterEngineConfigFromSupabase,
+  findExistingAccountComboMatch,
   formatPakCnic,
   formatPakPhone,
+  getClientPublicIpAddress,
+  getDeviceModelName,
   getOrCreateClientDeviceId,
+  getOrCreateDeviceMacFingerprint,
   hashPasswordSha256,
+  isOwnerIdentity,
   loadBiometricBinding,
+  loadCachedMasterEngineConfig,
   loadStoredGpsLocation,
   normalizeCnicDigits,
   normalizePhoneDigits,
+  parseTimestampMs,
   requestAndSaveGpsLocation,
   saveAuthSession,
   saveBiometricBinding,
   sendSupabaseEmailOtp,
   syncGpsToSupabaseUser,
-  syncRegisteredUserToAdminUac,
   TWO_DAYS_MS,
   verifyBiometricPasskey,
   verifySupabaseEmailOtp,
@@ -78,12 +91,14 @@ interface ClientAuthModalProps {
   clientDeviceId: string;
   onAuthenticated: (session: ClientAuthSession) => void;
   externalNotice?: string | null;
+  mainLogoUrl?: string;
 }
 
 export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
   clientDeviceId,
   onAuthenticated,
   externalNotice,
+  mainLogoUrl,
 }) => {
   const [activeTab, setActiveTab] = useState<'LOGIN' | 'REGISTER'>('LOGIN');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -107,6 +122,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
 
   // Create Account State
   const [regName, setRegName] = useState('');
+  const [regCompany, setRegCompany] = useState('');
   const [regPhone, setRegPhone] = useState('');
   const [regEmail, setRegEmail] = useState('');
   const [regCnic, setRegCnic] = useState('');
@@ -116,7 +132,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
   const [showRegPassword, setShowRegPassword] = useState(false);
   const [cnicFrontPhoto, setCnicFrontPhoto] = useState('');
   const [cnicBackPhoto, setCnicBackPhoto] = useState('');
-  const [isCompressingPhoto, setIsCompressingPhoto] = useState<'FRONT' | 'BACK' | null>(null);
+  const [selfiePhoto, setSelfiePhoto] = useState('');
+  const [shopPhoto, setShopPhoto] = useState('');
+  const [isCompressingPhoto, setIsCompressingPhoto] = useState<
+    'FRONT' | 'BACK' | 'SELFIE' | 'SHOP' | null
+  >(null);
 
   // Email OTP Step State (NEVER render/display OTP code on screen)
   const [regStep, setRegStep] = useState<'FORM' | 'OTP'>('FORM');
@@ -155,6 +175,277 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     return () => window.removeEventListener('keydown', blockEscape, true);
   }, []);
 
+  // Shared helper: Log user directly into an existing matched record (NO new account, NO new free trial, trial_used = true)
+  const loginIntoMatchedExistingRecord = async (params: {
+    matchedUser: any | null;
+    matchedSub: any | null;
+    matchedUac: any | null;
+    usersList: any[];
+    subsList: any[];
+    masterCfg: Record<string, any>;
+    publicIp: string;
+    macAddress: string;
+    deviceModel: string;
+    gps: ReturnType<typeof loadStoredGpsLocation>;
+    serverNowMs: number;
+    fallbackName?: string;
+    fallbackEmail?: string;
+    fallbackPhone?: string;
+    fallbackCnic?: string;
+    fallbackAddress?: string;
+  }): Promise<boolean> => {
+    const {
+      matchedUser,
+      matchedSub,
+      matchedUac,
+      usersList,
+      subsList,
+      masterCfg,
+      publicIp,
+      macAddress,
+      deviceModel,
+      gps,
+      serverNowMs,
+      fallbackName = 'Valued Client',
+      fallbackEmail = '',
+      fallbackPhone = '',
+      fallbackCnic = '',
+      fallbackAddress = '',
+    } = params;
+
+    const now = serverNowMs > 0 ? serverNowMs : getEffectiveServerNowMs() || Date.now();
+    const nowIso = new Date(now).toISOString();
+    const activeDeviceId = clientDeviceId || getOrCreateClientDeviceId();
+
+    const resolvedEmail = String(
+      matchedUser?.email || matchedSub?.email || matchedUac?.email || fallbackEmail
+    )
+      .trim()
+      .toLowerCase();
+    const resolvedPhone = String(
+      matchedUser?.phone || matchedSub?.phone || matchedUac?.phone || fallbackPhone
+    ).trim();
+    const resolvedCnic = String(
+      matchedUser?.cnic || matchedSub?.cnic || matchedUac?.cnic || fallbackCnic
+    ).trim();
+    const resolvedName = String(
+      matchedUser?.name || matchedSub?.user_name || matchedUac?.name || fallbackName
+    ).trim();
+
+    const isOwner = isOwnerIdentity({
+      email: resolvedEmail,
+      phone: resolvedPhone,
+      cnic: resolvedCnic,
+      masterCfg,
+    });
+
+    const devCandidates = [
+      matchedUser?.device_id,
+      matchedSub?.device_id,
+      matchedUac?.device_id,
+      matchedUac?.deviceId,
+    ]
+      .map((d) => String(d || '').trim())
+      .filter(Boolean);
+    const resetDevId = devCandidates.find((d) => d.startsWith('RESET_')) || '';
+    const cloudDevId = resetDevId || devCandidates[0] || '';
+    const effectiveDeviceId = isOwner
+      ? cloudDevId && !cloudDevId.startsWith('RESET_')
+        ? cloudDevId
+        : activeDeviceId
+      : resetDevId || !cloudDevId
+      ? activeDeviceId
+      : cloudDevId;
+
+    const preEval = evaluateClientAccessState({
+      session: {
+        verified: true,
+        deviceId: effectiveDeviceId,
+        name: resolvedName,
+        phone: resolvedPhone,
+        email: resolvedEmail,
+        cnic: resolvedCnic,
+        shopAddress: String(matchedUser?.shop_address || matchedUac?.shop_address || fallbackAddress),
+        loggedInAt: now,
+      },
+      clientDeviceId: effectiveDeviceId,
+      clientIpAddress: publicIp,
+      clientMacAddress: macAddress,
+      usersList,
+      subsList,
+      masterCfg,
+      serverNowMs: now,
+    });
+
+    if (!isOwner && preEval.status === 'BLOCKED') {
+      await supabase.auth.signOut().catch(() => {});
+      setErrorMsg(`Account Blocked: ${preEval.reason || 'Suspended by Master Admin'}`);
+      setInfoMsg(null);
+      return false;
+    }
+
+    const ownerVipFields = isOwner
+      ? {
+          is_activated: true,
+          is_lifetime: true,
+          is_blocked: false,
+          block_reason: '',
+          account_status: 'ACTIVE',
+          status: 'ACTIVE',
+          subscription_tier: 'LIFETIME_VIP',
+          package_name: 'Lifetime Free VIP Package',
+        }
+      : {};
+
+    const userFilter =
+      matchedUser?.device_id
+        ? `device_id=eq.${encodeURIComponent(String(matchedUser.device_id))}`
+        : matchedUser?.email
+        ? `email=ilike.${encodeURIComponent(String(matchedUser.email))}`
+        : matchedUser?.phone
+        ? `phone=eq.${encodeURIComponent(String(matchedUser.phone))}`
+        : '';
+
+    const subFilter =
+      matchedSub?.device_id
+        ? `device_id=eq.${encodeURIComponent(String(matchedSub.device_id))}`
+        : matchedSub?.email
+        ? `email=ilike.${encodeURIComponent(String(matchedSub.email))}`
+        : matchedSub?.phone
+        ? `phone=eq.${encodeURIComponent(String(matchedSub.phone))}`
+        : userFilter;
+
+    // Mark trial_used = true and refresh telemetry WITHOUT resetting original trial/subscription dates
+    const telemetryPatch: Record<string, any> = {
+      trial_used: true,
+      is_registered: true,
+      is_online: true,
+      last_seen: nowIso,
+      last_cloud_sync: now,
+      mac_address: macAddress,
+      device_model: deviceModel,
+      fingerprint_enabled: true,
+      ...ownerVipFields,
+      ...(resetDevId ? { device_id: activeDeviceId, user_id: activeDeviceId } : {}),
+      ...(publicIp ? { ip_address: publicIp } : {}),
+      ...(gps
+        ? { latitude: gps.latitude, longitude: gps.longitude, location_url: gps.locationUrl }
+        : {}),
+    };
+
+    const subPatch: Record<string, any> = {
+      trial_used: true,
+      ...ownerVipFields,
+      ...(resetDevId ? { device_id: activeDeviceId } : {}),
+      updated_at: nowIso,
+      last_updated: now,
+    };
+
+    await Promise.all([
+      userFilter
+        ? callSupabaseProxy({
+            table: 'users',
+            method: 'PATCH',
+            query: userFilter,
+            payload: telemetryPatch,
+            timeoutMs: 7000,
+          })
+        : Promise.resolve(null),
+      subFilter
+        ? callSupabaseProxy({
+            table: 'subscriptions',
+            method: 'PATCH',
+            query: subFilter,
+            payload: subPatch,
+            timeoutMs: 7000,
+          })
+        : Promise.resolve(null),
+    ]).catch(() => {});
+
+    const trialStart =
+      [
+        matchedSub?.trial_start_ms,
+        matchedSub?.trial_start_time,
+        matchedUser?.trial_start,
+        matchedUser?.trial_start_time,
+        matchedUser?.registered_at_epoch_ms,
+        matchedUser?.created_at,
+        matchedSub?.created_at,
+        matchedUac?.trial_start_time,
+      ]
+        .map(parseTimestampMs)
+        .find((t) => t > 0) || now;
+
+    const cloudExpiry = isOwner
+      ? 0
+      : Math.max(
+          0,
+          ...[
+            matchedSub?.activated_until_ms,
+            matchedSub?.activated_until,
+            matchedSub?.subscription_expiry,
+            matchedSub?.trial_expires_at,
+            matchedUser?.activated_until_ms,
+            matchedUser?.activated_until,
+            matchedUser?.subscription_expiry,
+            matchedUser?.trial_end,
+            matchedUac?.subscription_expiry,
+            matchedUac?.subscriptionExpiresAt,
+            matchedUac?.activatedUntil,
+            matchedUac?.activated_until,
+          ].map(parseTimestampMs)
+        );
+
+    const session: ClientAuthSession = {
+      verified: true,
+      deviceId: effectiveDeviceId,
+      userId: String(matchedUser?.user_id || effectiveDeviceId),
+      name: resolvedName,
+      phone: resolvedPhone,
+      email: resolvedEmail,
+      cnic: resolvedCnic,
+      shopAddress: String(matchedUser?.shop_address || matchedUac?.shop_address || fallbackAddress),
+      companyName: String(
+        matchedUser?.company_name || (isOwner ? 'BOSS ALUMINIUM & GLASS' : '')
+      ),
+      selfieUrl: String(matchedUser?.selfie_url || ''),
+      shopPhotoUrl: String(matchedUser?.shop_photo_url || ''),
+      loggedInAt: now,
+      trialStartTime: trialStart,
+      trialExpiresAt: isOwner ? 0 : cloudExpiry > 0 ? cloudExpiry : trialStart + TWO_DAYS_MS,
+    };
+
+    const bioEnrolled = await enrollBiometricPasskey({
+      deviceId: session.deviceId,
+      identifier: resolvedEmail || resolvedPhone || resolvedCnic || effectiveDeviceId,
+      userName: session.name,
+    });
+    const binding: BiometricBinding = {
+      deviceId: session.deviceId,
+      identifier: resolvedEmail || resolvedPhone || resolvedCnic || effectiveDeviceId,
+      userName: session.name,
+      email: session.email,
+      phone: session.phone,
+      cnic: session.cnic,
+      credentialId: bioEnrolled.credentialId || biometricBinding?.credentialId,
+      enrolledAt: now,
+    };
+    saveBiometricBinding(binding);
+    setBiometricBinding(binding);
+
+    try {
+      localStorage.removeItem(PENDING_REG_DRAFT_KEY);
+    } catch {
+      // ignore
+    }
+    if (typeof window !== 'undefined' && window.history?.replaceState) {
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+    saveAuthSession(session);
+    onAuthenticated(session);
+    return true;
+  };
+
   // =========================================================================
   // RULE 1: HANDLE RETURN FROM GOOGLE OAUTH (AUTO-VERIFIED ACCOUNT / LOGIN)
   // =========================================================================
@@ -177,226 +468,108 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     setInfoMsg(`Google Account (${gEmail}) verify ho raha hai...`);
 
     try {
-      const [directEmailRes, allUsersRes, subsRes, masterCfg, gps] = await Promise.all([
+      const activeDeviceId = clientDeviceId || getOrCreateClientDeviceId();
+      const macAddress = getOrCreateDeviceMacFingerprint();
+      const deviceModel = getDeviceModelName();
+
+      const [allUsersRes, subsRes, masterCfg, gps, publicIp, serverNowMs] = await Promise.all([
         callSupabaseProxy({
           table: 'users',
           method: 'GET',
-          query: `email=ilike.${encodeURIComponent(gEmail)}&select=*`,
-          timeoutMs: 8000,
-        }),
-        callSupabaseProxy({
-          table: 'users',
-          method: 'GET',
-          query: 'select=*&limit=350',
+          query: 'select=*&limit=400',
           timeoutMs: 8000,
         }),
         callSupabaseProxy({
           table: 'subscriptions',
           method: 'GET',
-          query: 'select=*&limit=350',
+          query: 'select=*&limit=400',
           timeoutMs: 8000,
         }),
         fetchMasterEngineConfigFromSupabase(),
         Promise.resolve(loadStoredGpsLocation()).then((existing) =>
           existing ? existing : requestAndSaveGpsLocation()
         ),
+        getClientPublicIpAddress(),
+        fetchSupabaseServerTimeMs(),
       ]);
 
-      const directList = Array.isArray(directEmailRes.data) ? directEmailRes.data : [];
       const usersList = Array.isArray(allUsersRes.data) ? allUsersRes.data : [];
       const subsList = Array.isArray(subsRes.data) ? subsRes.data : [];
       const uacList = Array.isArray(masterCfg?.userAccessControl)
         ? masterCfg.userAccessControl
         : Object.values(masterCfg?.userAccessControl || {});
 
-      const matchesEmail = (r: any) =>
-        r && typeof r === 'object' && String(r.email || '').trim().toLowerCase() === gEmail;
+      const isOwner = isOwnerIdentity({ email: gEmail, masterCfg });
 
-      const matchedUser = directList[0] || usersList.find(matchesEmail) || null;
-      const matchedSub = subsList.find(matchesEmail) || null;
-      const matchedUac: any = uacList.find(matchesEmail) || null;
+      // 6-Field Combo Check: CNIC, Email, Phone, Device ID, Public IP, MAC/Fingerprint
+      const comboMatch = findExistingAccountComboMatch({
+        email: gEmail,
+        deviceId: activeDeviceId,
+        ipAddress: publicIp,
+        macAddress,
+        usersList,
+        subsList,
+        uacList,
+        identityOnly: isOwner,
+      });
 
-      const activeDeviceId = clientDeviceId || getOrCreateClientDeviceId();
-      const now = Date.now();
-
-      if (matchedUser || matchedSub || matchedUac) {
-        const isBlocked = Boolean(
-          matchedUser?.is_blocked ||
-            matchedUser?.isBlocked ||
-            matchedUser?.account_status === 'BLOCKED' ||
-            matchedSub?.is_blocked ||
-            matchedUac?.is_blocked ||
-            matchedUac?.isBlocked
-        );
-        if (isBlocked) {
-          const blockReason =
-            matchedUser?.block_reason ||
-            matchedUac?.block_reason ||
-            matchedUac?.blockReason ||
-            'Suspended by Master Admin';
-          await supabase.auth.signOut().catch(() => {});
-          setErrorMsg(`Account Blocked: ${blockReason}`);
-          setInfoMsg(null);
-          return;
-        }
-
-        const enforceLock =
-          masterCfg?.layoutConfig?.enforceDeviceHardwareLock !== undefined
-            ? Boolean(masterCfg.layoutConfig.enforceDeviceHardwareLock)
-            : true;
-
-        const devCandidates = [
-          matchedUser?.device_id,
-          matchedSub?.device_id,
-          matchedUac?.device_id,
-          matchedUac?.deviceId,
-        ]
-          .map((d) => String(d || '').trim())
-          .filter(Boolean);
-        const resetDevId = devCandidates.find((d) => d.startsWith('RESET_')) || '';
-        const cloudDevId = resetDevId || devCandidates[0] || '';
-
-        if (resetDevId) {
-          const patchFilter = `email=ilike.${encodeURIComponent(gEmail)}`;
-          await Promise.all([
-            callSupabaseProxy({
-              table: 'users',
-              method: 'PATCH',
-              query: patchFilter,
-              payload: {
-                device_id: activeDeviceId,
-                user_id: activeDeviceId,
-                is_registered: true,
-                ...(gps
-                  ? { latitude: gps.latitude, longitude: gps.longitude, location_url: gps.locationUrl }
-                  : {}),
-              },
-            }),
-            callSupabaseProxy({
-              table: 'subscriptions',
-              method: 'PATCH',
-              query: patchFilter,
-              payload: {
-                device_id: activeDeviceId,
-                updated_at: new Date().toISOString(),
-                last_updated: now,
-              },
-            }),
-          ]);
-        } else if (enforceLock && cloudDevId && cloudDevId !== activeDeviceId) {
-          await supabase.auth.signOut().catch(() => {});
-          setErrorMsg(
-            'Yeh Google account kisi aur device par registered hai. Admin se Device Reset karwayein.'
-          );
-          setInfoMsg(null);
-          return;
-        } else {
-          // Ensure Google account stays marked is_registered: true and latest GPS synced
-          const targetFilter = cloudDevId
-            ? `device_id=eq.${encodeURIComponent(cloudDevId)}`
-            : `email=ilike.${encodeURIComponent(gEmail)}`;
-          await callSupabaseProxy({
-            table: 'users',
-            method: 'PATCH',
-            query: targetFilter,
-            payload: {
-              device_id: cloudDevId || activeDeviceId,
-              is_registered: true,
-              ...(gps
-                ? { latitude: gps.latitude, longitude: gps.longitude, location_url: gps.locationUrl }
-                : {}),
-            },
-            timeoutMs: 6000,
-          }).catch(() => {});
-        }
-
-        const effectiveDevId = resetDevId || !cloudDevId ? activeDeviceId : cloudDevId;
-        const trialStart =
-          Number(
-            matchedSub?.trial_start_ms ||
-              matchedSub?.trial_start_time ||
-              matchedUser?.trial_start_time ||
-              matchedUac?.trial_start_time ||
-              now
-          ) || now;
-        const cloudExpiry = Math.max(
-          0,
-          ...[
-            matchedSub?.activated_until_ms,
-            matchedSub?.activated_until,
-            matchedSub?.subscription_expiry,
-            matchedUser?.activated_until_ms,
-            matchedUser?.activated_until,
-            matchedUser?.subscription_expiry,
-            matchedUac?.subscription_expiry,
-            matchedUac?.activated_until,
-          ].map((v) => (Number.isFinite(Number(v)) ? Number(v) : 0))
-        );
-
-        const session: ClientAuthSession = {
-          verified: true,
-          deviceId: effectiveDevId,
-          userId: String(matchedUser?.user_id || effectiveDevId),
-          name: String(matchedUser?.name || matchedUac?.name || gName),
-          phone: String(matchedUser?.phone || matchedUac?.phone || ''),
-          email: gEmail,
-          cnic: String(matchedUser?.cnic || matchedUac?.cnic || ''),
-          shopAddress: String(matchedUser?.shop_address || matchedUac?.shop_address || ''),
-          loggedInAt: now,
-          trialStartTime: trialStart,
-          trialExpiresAt: cloudExpiry > 0 ? cloudExpiry : trialStart + TWO_DAYS_MS,
-        };
-
-        const bioEnrolled = await enrollBiometricPasskey({
-          deviceId: session.deviceId,
-          identifier: gEmail,
-          userName: session.name,
+      if (comboMatch.matchedUser || comboMatch.matchedSub || comboMatch.matchedUac) {
+        await loginIntoMatchedExistingRecord({
+          matchedUser: comboMatch.matchedUser,
+          matchedSub: comboMatch.matchedSub,
+          matchedUac: comboMatch.matchedUac,
+          usersList,
+          subsList,
+          masterCfg,
+          publicIp,
+          macAddress,
+          deviceModel,
+          gps,
+          serverNowMs,
+          fallbackName: gName,
+          fallbackEmail: gEmail,
         });
-        const binding: BiometricBinding = {
-          deviceId: session.deviceId,
-          identifier: gEmail,
-          userName: session.name,
-          email: gEmail,
-          phone: session.phone,
-          cnic: session.cnic,
-          credentialId: bioEnrolled.credentialId,
-          enrolledAt: now,
-        };
-        saveBiometricBinding(binding);
-        setBiometricBinding(binding);
-
-        if (typeof window !== 'undefined' && window.history?.replaceState) {
-          window.history.replaceState({}, document.title, window.location.pathname);
-        }
-        saveAuthSession(session);
-        onAuthenticated(session);
         return;
       }
 
-      // Auto-create Auto-Verified (is_registered: true) Google account in users + subscriptions + Admin UAC
-      const expiry = now + TWO_DAYS_MS;
+      const now = serverNowMs > 0 ? serverNowMs : getEffectiveServerNowMs() || Date.now();
+      const nowIso = new Date(now).toISOString();
+
+      // Brand-new Google user: Auto-create Verified account with trial_used = true
+      const expiry = isOwner ? 0 : now + TWO_DAYS_MS;
       const newUserPayload: Record<string, any> = {
         device_id: activeDeviceId,
         user_id: activeDeviceId,
         name: gName,
+        company_name: `${gName} Aluminium & Glass`,
         phone: '',
         email: gEmail,
         cnic: '',
         shop_address: '',
+        ip_address: publicIp || '',
+        mac_address: macAddress,
+        device_model: deviceModel,
+        fingerprint_enabled: true,
+        is_online: true,
+        last_seen: nowIso,
         is_registered: true,
-        account_status: 'TRIAL',
-        status: 'TRIAL',
-        is_activated: false,
-        is_lifetime: false,
+        trial_used: true,
+        account_status: isOwner ? 'ACTIVE' : 'TRIAL',
+        status: isOwner ? 'ACTIVE' : 'TRIAL',
+        is_activated: isOwner,
+        is_lifetime: isOwner,
         is_blocked: false,
         block_reason: '',
-        subscription_tier: 'TRIAL',
+        subscription_tier: isOwner ? 'LIFETIME_VIP' : 'TRIAL',
+        ...(isOwner ? { package_name: 'Lifetime Free VIP Package' } : {}),
+        trial_start: nowIso,
+        ...(isOwner ? {} : { trial_end: new Date(expiry).toISOString() }),
         trial_start_time: now,
         activated_until: expiry,
         activated_until_ms: expiry,
         subscription_expiry: expiry,
         last_cloud_sync: now,
-        created_at: new Date(now).toISOString(),
+        created_at: nowIso,
         ...(gps
           ? {
               latitude: gps.latitude,
@@ -412,16 +585,18 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         email: gEmail,
         phone: '',
         cnic: '',
-        status: 'TRIAL',
-        is_activated: false,
-        is_lifetime: false,
+        trial_used: true,
+        status: isOwner ? 'ACTIVE' : 'TRIAL',
+        is_activated: isOwner,
+        is_lifetime: isOwner,
         is_blocked: false,
-        subscription_tier: 'TRIAL',
+        subscription_tier: isOwner ? 'LIFETIME_VIP' : 'TRIAL',
+        ...(isOwner ? { package_name: 'Lifetime Free VIP Package' } : {}),
         activated_until: expiry,
         activated_until_ms: expiry,
         last_updated: now,
-        updated_at: new Date(now).toISOString(),
-        created_at: new Date(now).toISOString(),
+        updated_at: nowIso,
+        created_at: nowIso,
       };
 
       const [uRes] = await Promise.all([
@@ -438,16 +613,6 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           upsert: true,
           payload: newSubPayload,
           timeoutMs: 10000,
-        }),
-        syncRegisteredUserToAdminUac({
-          device_id: activeDeviceId,
-          name: gName,
-          phone: '',
-          email: gEmail,
-          cnic: '',
-          shop_address: '',
-          trial_start_time: now,
-          subscription_expiry: expiry,
         }),
       ]);
 
@@ -466,6 +631,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         email: gEmail,
         cnic: '',
         shopAddress: '',
+        companyName: `${gName} Aluminium & Glass`,
         loggedInAt: now,
         trialStartTime: now,
         trialExpiresAt: expiry,
@@ -549,6 +715,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         const d = JSON.parse(rawDraft);
         if (d && d.email) {
           setRegName(d.name || '');
+          setRegCompany(d.companyName || '');
           setRegPhone(d.phone || '');
           setRegEmail(d.email || '');
           setRegCnic(d.cnic || '');
@@ -556,6 +723,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           setRegPasswordHash(d.passwordHash || '');
           setCnicFrontPhoto(d.cnicFrontPhoto || '');
           setCnicBackPhoto(d.cnicBackPhoto || '');
+          setSelfiePhoto(d.selfiePhoto || '');
+          setShopPhoto(d.shopPhoto || '');
           setActiveTab('REGISTER');
           setRegStep('OTP');
           if (callback) {
@@ -602,7 +771,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
 
   const handlePhotoUpload = async (
     e: React.ChangeEvent<HTMLInputElement>,
-    side: 'FRONT' | 'BACK'
+    side: 'FRONT' | 'BACK' | 'SELFIE' | 'SHOP'
   ) => {
     const file = e.target.files?.[0];
     e.target.value = '';
@@ -610,9 +779,19 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     setErrorMsg(null);
     setIsCompressingPhoto(side);
     try {
-      const compressed = await compressImageToDataUrl(file, 900, 0.72);
-      if (side === 'FRONT') setCnicFrontPhoto(compressed);
-      else setCnicBackPhoto(compressed);
+      const folder =
+        side === 'SELFIE' ? 'selfies' : side === 'SHOP' ? 'shops' : 'cnic';
+      const uploaded = await uploadImageToUserUploadsBucket({
+        fileOrDataUrl: file,
+        folder,
+        deviceId: clientDeviceId,
+        tag: side.toLowerCase(),
+      });
+      const finalVal = uploaded.url || (await compressImageToDataUrl(file, 900, 0.72));
+      if (side === 'FRONT') setCnicFrontPhoto(finalVal);
+      else if (side === 'BACK') setCnicBackPhoto(finalVal);
+      else if (side === 'SELFIE') setSelfiePhoto(finalVal);
+      else setShopPhoto(finalVal);
     } catch {
       setErrorMsg('Image load nahi ho saki, dobara try karein.');
     } finally {
@@ -659,7 +838,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     }
     const orQuery = orFilters.length > 0 ? `or=(${orFilters.join(',')})&select=*` : 'select=*&limit=250';
 
-    const [directUserRes, directSubRes, allUsersRes, subsRes, masterCfg] = await Promise.all([
+    const [directUserRes, directSubRes, allUsersRes, subsRes, masterCfg, publicIp, serverNowMs] = await Promise.all([
       callSupabaseProxy({
         table: 'users',
         method: 'GET',
@@ -675,16 +854,18 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       callSupabaseProxy({
         table: 'users',
         method: 'GET',
-        query: 'select=*&limit=350',
+        query: 'select=*&limit=400',
         timeoutMs: 8000,
       }),
       callSupabaseProxy({
         table: 'subscriptions',
         method: 'GET',
-        query: 'select=*&limit=350',
+        query: 'select=*&limit=400',
         timeoutMs: 8000,
       }),
       fetchMasterEngineConfigFromSupabase(),
+      getClientPublicIpAddress(),
+      fetchSupabaseServerTimeMs(),
     ]);
 
     const matchesIdentity = (rec: any) => {
@@ -722,27 +903,79 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       null;
     const matchedUac: any = uacList.find(matchesIdentity) || null;
 
-    if (!matchedUser && !matchedUac && !matchedSub) {
+    const isOwner = isOwnerIdentity({
+      email:
+        matchedUser?.email ||
+        matchedUac?.email ||
+        matchedSub?.email ||
+        (isEmailInput ? rawId.toLowerCase() : ''),
+      phone:
+        matchedUser?.phone ||
+        matchedUac?.phone ||
+        matchedSub?.phone ||
+        (!isEmailInput && phoneDigits.length >= 10 ? formattedPhone : ''),
+      cnic:
+        matchedUser?.cnic ||
+        matchedUac?.cnic ||
+        matchedSub?.cnic ||
+        (cnicDigits.length >= 13 ? formattedCnic : ''),
+      masterCfg,
+    });
+
+    if (!matchedUser && !matchedUac && !matchedSub && !isOwner) {
       setErrorMsg('Account nahi mila, pehle Create Account karein.');
       setShowSwitchToRegisterHint(true);
       return false;
     }
 
-    const isBlocked = Boolean(
-      matchedUser?.is_blocked ||
-        matchedUser?.isBlocked ||
-        matchedUser?.account_status === 'BLOCKED' ||
-        matchedSub?.is_blocked ||
-        matchedUac?.is_blocked ||
-        matchedUac?.isBlocked
+    const activeDeviceId = clientDeviceId || getOrCreateClientDeviceId();
+    const macAddress = getOrCreateDeviceMacFingerprint();
+    const deviceModel = getDeviceModelName();
+    const gps = loadStoredGpsLocation();
+    const now = serverNowMs > 0 ? serverNowMs : getEffectiveServerNowMs() || Date.now();
+    const nowIso = new Date(now).toISOString();
+
+    const targetEmailCheck = String(
+      matchedUser?.email ||
+        matchedUac?.email ||
+        matchedSub?.email ||
+        (isEmailInput ? rawId.toLowerCase() : isOwner ? 'ssaboor2t@gmail.com' : '')
     );
-    if (isBlocked) {
-      const blockReason =
-        matchedUser?.block_reason ||
-        matchedUac?.block_reason ||
-        matchedUac?.blockReason ||
-        'Suspended by Master Admin';
-      setErrorMsg(`Account Blocked: ${blockReason}`);
+    const targetPhoneCheck = String(
+      matchedUser?.phone ||
+        matchedUac?.phone ||
+        matchedSub?.phone ||
+        (!isEmailInput && phoneDigits.length >= 10 ? formattedPhone : '')
+    );
+    const targetCnicCheck = String(
+      matchedUser?.cnic ||
+        matchedUac?.cnic ||
+        matchedSub?.cnic ||
+        (cnicDigits.length >= 10 ? formattedCnic : '')
+    );
+
+    const preBlockCheck = evaluateClientAccessState({
+      session: {
+        verified: true,
+        deviceId: matchedUser?.device_id || activeDeviceId,
+        name: String(matchedUser?.name || matchedUac?.name || (isOwner ? 'Syed Saboor Nawab (Owner)' : 'Client')),
+        phone: targetPhoneCheck,
+        email: targetEmailCheck,
+        cnic: targetCnicCheck,
+        shopAddress: String(matchedUser?.shop_address || ''),
+        loggedInAt: now,
+      },
+      clientDeviceId: matchedUser?.device_id || activeDeviceId,
+      clientIpAddress: publicIp,
+      clientMacAddress: macAddress,
+      usersList,
+      subsList,
+      masterCfg,
+      serverNowMs: now,
+    });
+
+    if (!isOwner && preBlockCheck.status === 'BLOCKED') {
+      setErrorMsg(`Account Blocked: ${preBlockCheck.reason || 'Suspended by Master Admin'}`);
       return false;
     }
 
@@ -763,9 +996,10 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     }
 
     const enforceLock =
-      masterCfg?.layoutConfig?.enforceDeviceHardwareLock !== undefined
+      !isOwner &&
+      (masterCfg?.layoutConfig?.enforceDeviceHardwareLock !== undefined
         ? Boolean(masterCfg.layoutConfig.enforceDeviceHardwareLock)
-        : true;
+        : true);
 
     const loginDevCandidates = [
       matchedUser?.device_id,
@@ -778,9 +1012,6 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
 
     const resetDeviceId = loginDevCandidates.find((d) => d.startsWith('RESET_')) || '';
     const cloudDeviceId = resetDeviceId || loginDevCandidates[0] || '';
-    const activeDeviceId = clientDeviceId || getOrCreateClientDeviceId();
-    const gps = loadStoredGpsLocation();
-    const now = Date.now();
 
     // Optional new password save if legacy account had none
     const newPasswordHashToSave =
@@ -788,7 +1019,78 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         ? await hashPasswordSha256(opts.password)
         : undefined;
 
-    if (resetDeviceId) {
+    const ownerVipFields = isOwner
+      ? {
+          is_activated: true,
+          is_lifetime: true,
+          is_blocked: false,
+          block_reason: '',
+          account_status: 'ACTIVE',
+          status: 'ACTIVE',
+          subscription_tier: 'LIFETIME_VIP',
+          package_name: 'Lifetime Free VIP Package',
+        }
+      : {};
+
+    const commonTelemetryPayload: Record<string, any> = {
+      trial_used: true,
+      is_registered: true,
+      is_online: true,
+      last_seen: nowIso,
+      last_cloud_sync: now,
+      mac_address: macAddress,
+      device_model: deviceModel,
+      fingerprint_enabled: true,
+      ...ownerVipFields,
+      ...(publicIp ? { ip_address: publicIp } : {}),
+      ...(newPasswordHashToSave ? { password_hash: newPasswordHashToSave } : {}),
+      ...(gps
+        ? { latitude: gps.latitude, longitude: gps.longitude, location_url: gps.locationUrl }
+        : {}),
+    };
+
+    if (!matchedUser && isOwner) {
+      const ownerName = String(
+        matchedUac?.name || matchedSub?.user_name || 'Syed Saboor Nawab (Owner)'
+      );
+      await Promise.all([
+        callSupabaseProxy({
+          table: 'users',
+          method: 'POST',
+          upsert: true,
+          payload: {
+            device_id: activeDeviceId,
+            user_id: activeDeviceId,
+            name: ownerName,
+            company_name: 'BOSS ALUMINIUM & GLASS',
+            email: targetEmailCheck,
+            phone: targetPhoneCheck,
+            cnic: targetCnicCheck,
+            shop_address: String(matchedUac?.shop_address || 'Boss Aluminium & Glass HQ'),
+            ...commonTelemetryPayload,
+            created_at: nowIso,
+          },
+          timeoutMs: 10000,
+        }),
+        callSupabaseProxy({
+          table: 'subscriptions',
+          method: 'POST',
+          upsert: true,
+          payload: {
+            device_id: activeDeviceId,
+            user_name: ownerName,
+            email: targetEmailCheck,
+            phone: targetPhoneCheck,
+            cnic: targetCnicCheck,
+            ...ownerVipFields,
+            last_updated: now,
+            updated_at: nowIso,
+            created_at: nowIso,
+          },
+          timeoutMs: 8000,
+        }),
+      ]).catch(() => {});
+    } else if (resetDeviceId) {
       const targetPhone = matchedUser?.phone || matchedUac?.phone || matchedSub?.phone || formattedPhone;
       const targetEmail = matchedUser?.email || matchedUac?.email || matchedSub?.email || (isEmailInput ? rawId.toLowerCase() : '');
       const patchFilter =
@@ -808,12 +1110,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           payload: {
             device_id: activeDeviceId,
             user_id: activeDeviceId,
-            is_registered: true,
-            last_cloud_sync: now,
-            ...(newPasswordHashToSave ? { password_hash: newPasswordHashToSave } : {}),
-            ...(gps
-              ? { latitude: gps.latitude, longitude: gps.longitude, location_url: gps.locationUrl }
-              : {}),
+            ...commonTelemetryPayload,
           },
         }),
         callSupabaseProxy({
@@ -822,31 +1119,10 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           query: patchFilter,
           payload: {
             device_id: activeDeviceId,
+            ...ownerVipFields,
             last_updated: now,
-            updated_at: new Date().toISOString(),
+            updated_at: nowIso,
           },
-        }),
-        syncRegisteredUserToAdminUac({
-          device_id: activeDeviceId,
-          name: String(matchedUser?.name || matchedUac?.name || matchedSub?.user_name || 'Valued Client'),
-          phone: String(targetPhone || ''),
-          email: String(targetEmail || ''),
-          cnic: String(matchedUser?.cnic || matchedUac?.cnic || matchedSub?.cnic || ''),
-          shop_address: String(
-            matchedUser?.shop_address || matchedUac?.shop_address || matchedUac?.shopAddress || ''
-          ),
-          trial_start_time: Number(
-            matchedSub?.trial_start_ms ||
-              matchedUser?.trial_start_time ||
-              matchedUac?.trial_start_time ||
-              now
-          ),
-          subscription_expiry: Number(
-            matchedSub?.activated_until_ms ||
-              matchedSub?.activated_until ||
-              matchedUac?.subscription_expiry ||
-              now + TWO_DAYS_MS
-          ),
         }),
       ]);
     } else if (enforceLock && cloudDeviceId && cloudDeviceId !== activeDeviceId) {
@@ -855,7 +1131,6 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       );
       return false;
     } else {
-      // Update GPS / device_id / password_hash if missing
       const targetFilter = cloudDeviceId
         ? `device_id=eq.${encodeURIComponent(cloudDeviceId)}`
         : matchedUser?.phone
@@ -864,17 +1139,14 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         ? `email=ilike.${encodeURIComponent(matchedUser.email)}`
         : '';
 
-      if (targetFilter && (!cloudDeviceId || gps || newPasswordHashToSave)) {
+      if (targetFilter) {
         callSupabaseProxy({
           table: 'users',
           method: 'PATCH',
           query: targetFilter,
           payload: {
             ...(!cloudDeviceId ? { device_id: activeDeviceId, user_id: activeDeviceId } : {}),
-            ...(newPasswordHashToSave ? { password_hash: newPasswordHashToSave } : {}),
-            ...(gps
-              ? { latitude: gps.latitude, longitude: gps.longitude, location_url: gps.locationUrl }
-              : {}),
+            ...commonTelemetryPayload,
           },
           timeoutMs: 6000,
         }).catch(() => {});
@@ -886,58 +1158,55 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         matchedSub?.trial_start_ms ||
           matchedSub?.trial_start_time ||
           matchedUser?.trial_start_time ||
-          matchedUser?.registered_at_epoch_ms ||
           matchedUac?.trial_start_time ||
-          matchedUac?.trialStartTime ||
           now
       ) || now;
 
-    const cloudExpiry = Math.max(
-      0,
-      ...[
-        matchedSub?.activated_until_ms,
-        matchedSub?.activated_until,
-        matchedSub?.subscription_expiry,
-        matchedUser?.activated_until_ms,
-        matchedUser?.activated_until,
-        matchedUser?.subscription_expiry,
-        matchedUac?.subscription_expiry,
-        matchedUac?.subscriptionExpiresAt,
-        matchedUac?.activatedUntil,
-        matchedUac?.activated_until,
-      ].map((v) => (Number.isFinite(Number(v)) ? Number(v) : 0))
-    );
+    const cloudExpiry = isOwner
+      ? 0
+      : Math.max(
+          0,
+          ...[
+            matchedSub?.activated_until_ms,
+            matchedSub?.activated_until,
+            matchedSub?.subscription_expiry,
+            matchedUser?.activated_until_ms,
+            matchedUser?.activated_until,
+            matchedUser?.subscription_expiry,
+            matchedUac?.subscription_expiry,
+            matchedUac?.subscriptionExpiresAt,
+            matchedUac?.activatedUntil,
+            matchedUac?.activated_until,
+          ].map((v) => (Number.isFinite(Number(v)) ? Number(v) : 0))
+        );
 
-    const sessionDeviceId = resetDeviceId || !cloudDeviceId ? activeDeviceId : cloudDeviceId;
+    const sessionDeviceId = isOwner
+      ? cloudDeviceId && !cloudDeviceId.startsWith('RESET_')
+        ? cloudDeviceId
+        : activeDeviceId
+      : resetDeviceId || !cloudDeviceId
+      ? activeDeviceId
+      : cloudDeviceId;
     const session: ClientAuthSession = {
       verified: true,
       deviceId: sessionDeviceId,
       userId: String(matchedUser?.user_id || sessionDeviceId),
       name: String(
-        matchedUser?.name || matchedUac?.name || matchedSub?.user_name || 'Valued Client'
+        matchedUser?.name ||
+          matchedUac?.name ||
+          matchedSub?.user_name ||
+          (isOwner ? 'Syed Saboor Nawab (Owner)' : 'Valued Client')
       ),
-      phone: String(
-        matchedUser?.phone ||
-          matchedUac?.phone ||
-          matchedSub?.phone ||
-          (!isEmailInput && phoneDigits.length >= 10 ? formattedPhone : '')
-      ),
-      email: String(
-        matchedUser?.email ||
-          matchedUac?.email ||
-          matchedSub?.email ||
-          (isEmailInput ? rawId.toLowerCase() : '')
-      ),
-      cnic: String(
-        matchedUser?.cnic ||
-          matchedUac?.cnic ||
-          matchedSub?.cnic ||
-          (cnicDigits.length === 13 ? formattedCnic : '')
-      ),
+      phone: targetPhoneCheck,
+      email: targetEmailCheck,
+      cnic: targetCnicCheck,
       shopAddress: String(matchedUser?.shop_address || matchedUac?.shopAddress || ''),
+      companyName: String(matchedUser?.company_name || (isOwner ? 'BOSS ALUMINIUM & GLASS' : '')),
+      selfieUrl: String(matchedUser?.selfie_url || ''),
+      shopPhotoUrl: String(matchedUser?.shop_photo_url || ''),
       loggedInAt: now,
       trialStartTime: trialStart,
-      trialExpiresAt: cloudExpiry > 0 ? cloudExpiry : trialStart + TWO_DAYS_MS,
+      trialExpiresAt: isOwner ? 0 : cloudExpiry > 0 ? cloudExpiry : trialStart + TWO_DAYS_MS,
     };
 
     // Save biometric binding for 1-tap Fingerprint Login
@@ -1176,20 +1445,29 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
 
     setIsSendingOtp(true);
     try {
-      const [usersRes, subsRes, masterCfg] = await Promise.all([
+      const activeDeviceId = clientDeviceId || getOrCreateClientDeviceId();
+      const macAddress = getOrCreateDeviceMacFingerprint();
+      const deviceModel = getDeviceModelName();
+
+      const [usersRes, subsRes, masterCfg, publicIp, gps, serverNowMs] = await Promise.all([
         callSupabaseProxy({
           table: 'users',
           method: 'GET',
-          query: 'select=device_id,phone,cnic,email&limit=350',
+          query: 'select=*&limit=400',
           timeoutMs: 8000,
         }),
         callSupabaseProxy({
           table: 'subscriptions',
           method: 'GET',
-          query: 'select=device_id,phone,cnic,email&limit=350',
+          query: 'select=*&limit=400',
           timeoutMs: 8000,
         }),
         fetchMasterEngineConfigFromSupabase(),
+        getClientPublicIpAddress(),
+        Promise.resolve(loadStoredGpsLocation()).then((existing) =>
+          existing ? existing : requestAndSaveGpsLocation()
+        ),
+        fetchSupabaseServerTimeMs(),
       ]);
 
       const usersList = Array.isArray(usersRes.data) ? usersRes.data : [];
@@ -1198,24 +1476,46 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         ? masterCfg.userAccessControl
         : Object.values(masterCfg?.userAccessControl || {});
 
-      const allExisting = [...usersList, ...subsList, ...uacList];
-      const allowSecondCnic = Boolean(
-        masterCfg?.allowSecondCnic ?? masterCfg?.layoutConfig?.allowSecondCnic
-      );
+      const isOwner = isOwnerIdentity({
+        email: cleanEmail,
+        phone: cleanPhone,
+        cnic: cleanCnic,
+        masterCfg,
+      });
 
-      const phoneDuplicate = allExisting.some(
-        (r: any) => normalizePhoneDigits(r?.phone || '') === phoneDigits
-      );
-      const emailDuplicate = allExisting.some(
-        (r: any) => String(r?.email || '').trim().toLowerCase() === cleanEmail
-      );
-      const cnicDuplicate =
-        !allowSecondCnic &&
-        allExisting.some((r: any) => normalizeCnicDigits(r?.cnic || '') === cnicDigits);
+      // Strict 6-Field Combo Check BEFORE sending OTP or creating account
+      const comboMatch = findExistingAccountComboMatch({
+        email: cleanEmail,
+        phone: cleanPhone,
+        cnic: cleanCnic,
+        deviceId: activeDeviceId,
+        ipAddress: publicIp,
+        macAddress,
+        usersList,
+        subsList,
+        uacList,
+        identityOnly: isOwner,
+      });
 
-      if (phoneDuplicate || emailDuplicate || cnicDuplicate) {
-        setErrorMsg('Account already exists, please Login');
-        setShowSwitchToLoginHint(true);
+      if (comboMatch.matchedUser || comboMatch.matchedSub || comboMatch.matchedUac) {
+        await loginIntoMatchedExistingRecord({
+          matchedUser: comboMatch.matchedUser,
+          matchedSub: comboMatch.matchedSub,
+          matchedUac: comboMatch.matchedUac,
+          usersList,
+          subsList,
+          masterCfg,
+          publicIp,
+          macAddress,
+          deviceModel,
+          gps,
+          serverNowMs,
+          fallbackName: cleanName,
+          fallbackEmail: cleanEmail,
+          fallbackPhone: cleanPhone,
+          fallbackCnic: cleanCnic,
+          fallbackAddress: cleanAddress,
+        });
         return;
       }
 
@@ -1237,6 +1537,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           PENDING_REG_DRAFT_KEY,
           JSON.stringify({
             name: cleanName,
+            companyName: regCompany.trim(),
             phone: cleanPhone,
             email: cleanEmail,
             cnic: cleanCnic,
@@ -1244,6 +1545,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
             passwordHash,
             cnicFrontPhoto,
             cnicBackPhoto,
+            selfiePhoto,
+            shopPhoto,
           })
         );
       } catch {
@@ -1332,11 +1635,41 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         }
       }
 
-      const trialStart = Date.now();
-      const expiry = trialStart + TWO_DAYS_MS;
-      const effectivePasswordHash =
-        regPasswordHash || (regPassword.trim() ? await hashPasswordSha256(regPassword) : '');
-      const gps = loadStoredGpsLocation();
+      const activeDeviceId = clientDeviceId || getOrCreateClientDeviceId();
+      const macAddress = getOrCreateDeviceMacFingerprint();
+      const deviceModel = getDeviceModelName();
+
+      const [usersRes, subsRes, masterCfg, gps, publicIp, serverNowMs] = await Promise.all([
+        callSupabaseProxy({
+          table: 'users',
+          method: 'GET',
+          query: 'select=*&limit=400',
+          timeoutMs: 8000,
+        }),
+        callSupabaseProxy({
+          table: 'subscriptions',
+          method: 'GET',
+          query: 'select=*&limit=400',
+          timeoutMs: 8000,
+        }),
+        fetchMasterEngineConfigFromSupabase(),
+        Promise.resolve(loadStoredGpsLocation()).then((g) => (g ? g : requestAndSaveGpsLocation())),
+        getClientPublicIpAddress(),
+        fetchSupabaseServerTimeMs(),
+      ]);
+
+      const usersList = Array.isArray(usersRes.data) ? usersRes.data : [];
+      const subsList = Array.isArray(subsRes.data) ? subsRes.data : [];
+      const uacList = Array.isArray(masterCfg?.userAccessControl)
+        ? masterCfg.userAccessControl
+        : Object.values(masterCfg?.userAccessControl || {});
+
+      const isOwner = isOwnerIdentity({
+        email: cleanEmail,
+        phone: cleanPhone,
+        cnic: cleanCnic,
+        masterCfg: Object.keys(masterCfg || {}).length ? masterCfg : loadCachedMasterEngineConfig(),
+      });
 
       if (otpRowId !== null) {
         await callSupabaseProxy({
@@ -1348,31 +1681,89 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         }).catch(() => {});
       }
 
-      // Exact column payloads matching live sumeemoqtnveiftzjhsl Supabase schema
+      // Final 6-Field Combo Check AFTER OTP verification BEFORE creating any account/trial
+      const comboMatch = findExistingAccountComboMatch({
+        email: cleanEmail,
+        phone: cleanPhone,
+        cnic: cleanCnic,
+        deviceId: activeDeviceId,
+        ipAddress: publicIp,
+        macAddress,
+        usersList,
+        subsList,
+        uacList,
+        identityOnly: isOwner,
+      });
+
+      if (comboMatch.matchedUser || comboMatch.matchedSub || comboMatch.matchedUac) {
+        await loginIntoMatchedExistingRecord({
+          matchedUser: comboMatch.matchedUser,
+          matchedSub: comboMatch.matchedSub,
+          matchedUac: comboMatch.matchedUac,
+          usersList,
+          subsList,
+          masterCfg,
+          publicIp,
+          macAddress,
+          deviceModel,
+          gps,
+          serverNowMs,
+          fallbackName: cleanName,
+          fallbackEmail: cleanEmail,
+          fallbackPhone: cleanPhone,
+          fallbackCnic: cleanCnic,
+          fallbackAddress: cleanAddress,
+        });
+        return;
+      }
+
+      const trialStart = serverNowMs > 0 ? serverNowMs : getEffectiveServerNowMs() || Date.now();
+      const trialStartIso = new Date(trialStart).toISOString();
+      const expiry = isOwner ? 0 : trialStart + TWO_DAYS_MS;
+      const expiryIso = new Date(isOwner ? trialStart : expiry).toISOString();
+      const effectivePasswordHash =
+        regPasswordHash || (regPassword.trim() ? await hashPasswordSha256(regPassword) : '');
+      const cleanCompany = regCompany.trim() || `${cleanName} Aluminium & Glass`;
+
+      // Exact column payloads matching live Supabase schema (with trial_used = true)
       const userPayload: Record<string, any> = {
-        device_id: clientDeviceId,
-        user_id: clientDeviceId,
+        device_id: activeDeviceId,
+        user_id: activeDeviceId,
         name: cleanName,
+        company_name: cleanCompany,
         phone: cleanPhone,
         email: cleanEmail,
         cnic: cleanCnic,
         shop_address: cleanAddress,
         cnic_front_url: cnicFrontPhoto,
         cnic_back_url: cnicBackPhoto,
+        ...(selfiePhoto ? { selfie_url: selfiePhoto } : {}),
+        ...(shopPhoto ? { shop_photo_url: shopPhoto } : {}),
         password_hash: effectivePasswordHash,
+        ip_address: publicIp || '',
+        mac_address: macAddress,
+        device_model: deviceModel,
+        fingerprint_enabled: true,
+        is_online: true,
+        last_seen: trialStartIso,
         is_registered: true,
-        account_status: 'TRIAL',
-        status: 'TRIAL',
-        is_activated: false,
-        is_lifetime: false,
+        trial_used: true,
+        account_status: isOwner ? 'ACTIVE' : 'TRIAL',
+        status: isOwner ? 'ACTIVE' : 'TRIAL',
+        is_activated: isOwner,
+        is_lifetime: isOwner,
         is_blocked: false,
         block_reason: '',
-        subscription_tier: 'TRIAL',
+        subscription_tier: isOwner ? 'LIFETIME_VIP' : 'TRIAL',
+        ...(isOwner ? { package_name: 'Lifetime Free VIP Package' } : {}),
+        trial_start: trialStartIso,
+        ...(isOwner ? {} : { trial_end: expiryIso }),
+        trial_start_time: trialStart,
         activated_until: expiry,
         activated_until_ms: expiry,
         subscription_expiry: expiry,
         last_cloud_sync: trialStart,
-        created_at: new Date(trialStart).toISOString(),
+        created_at: trialStartIso,
         ...(gps
           ? {
               latitude: gps.latitude,
@@ -1383,21 +1774,23 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       };
 
       const subscriptionPayload = {
-        device_id: clientDeviceId,
+        device_id: activeDeviceId,
         user_name: cleanName,
         email: cleanEmail,
         phone: cleanPhone,
         cnic: cleanCnic,
-        status: 'TRIAL',
-        is_activated: false,
-        is_lifetime: false,
+        trial_used: true,
+        status: isOwner ? 'ACTIVE' : 'TRIAL',
+        is_activated: isOwner,
+        is_lifetime: isOwner,
         is_blocked: false,
-        subscription_tier: 'TRIAL',
+        subscription_tier: isOwner ? 'LIFETIME_VIP' : 'TRIAL',
+        ...(isOwner ? { package_name: 'Lifetime Free VIP Package' } : {}),
         activated_until: expiry,
         activated_until_ms: expiry,
         last_updated: trialStart,
-        updated_at: new Date().toISOString(),
-        created_at: new Date(trialStart).toISOString(),
+        updated_at: trialStartIso,
+        created_at: trialStartIso,
       };
 
       const [uRes, subRes] = await Promise.all([
@@ -1417,17 +1810,6 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         }),
       ]);
 
-      await syncRegisteredUserToAdminUac({
-        device_id: clientDeviceId,
-        name: cleanName,
-        phone: cleanPhone,
-        email: cleanEmail,
-        cnic: cleanCnic,
-        shop_address: cleanAddress,
-        trial_start_time: trialStart,
-        subscription_expiry: expiry,
-      });
-
       if (!uRes.ok) {
         setErrorMsg(
           uRes.error || 'Admin cloud par account details save nahi ho sakin. Dobara try karein.'
@@ -1441,16 +1823,17 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           method: 'POST',
           upsert: true,
           payload: {
-            device_id: clientDeviceId,
+            device_id: activeDeviceId,
             user_name: cleanName,
             email: cleanEmail,
             phone: cleanPhone,
             cnic: cleanCnic,
-            status: 'TRIAL',
-            is_activated: false,
-            is_lifetime: false,
-            subscription_tier: 'TRIAL',
-            updated_at: new Date().toISOString(),
+            trial_used: true,
+            status: isOwner ? 'ACTIVE' : 'TRIAL',
+            is_activated: isOwner,
+            is_lifetime: isOwner,
+            subscription_tier: isOwner ? 'LIFETIME_VIP' : 'TRIAL',
+            updated_at: trialStartIso,
           },
           timeoutMs: 8000,
         });
@@ -1465,6 +1848,9 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         email: cleanEmail,
         cnic: cleanCnic,
         shopAddress: cleanAddress,
+        companyName: cleanCompany,
+        selfieUrl: selfiePhoto || '',
+        shopPhotoUrl: shopPhoto || '',
         loggedInAt: trialStart,
         trialStartTime: trialStart,
         trialExpiresAt: expiry,
@@ -1516,7 +1902,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         <div className="px-4 py-3.5 bg-gradient-to-r from-[#121822] via-[#171E2B] to-[#121822] border-b border-[#F5B738]/40 flex items-center justify-between gap-2.5">
           <div className="flex items-center gap-2.5 min-w-0">
             <img
-              src={bossLionLogoImg}
+              src={mainLogoUrl || bossLionLogoImg}
               alt="Boss Aluminium & Glass"
               className="w-10 h-10 rounded-full object-cover border-2 border-[#F5B738] shrink-0"
             />
@@ -1913,9 +2299,22 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                 </div>
               </div>
 
-              {/* CNIC Front & Back Photo Uploads */}
+              <div>
+                <label className="block text-[10.5px] font-bold text-slate-300 mb-1">
+                  Company / Shop Name
+                </label>
+                <input
+                  type="text"
+                  value={regCompany}
+                  onChange={(e) => setRegCompany(e.target.value)}
+                  placeholder="e.g. Bismillah Aluminium & Glass"
+                  className="w-full px-3 py-2 rounded-lg bg-[#14181F] border border-slate-700 text-white text-xs focus:border-[#F5B738] outline-none"
+                />
+              </div>
+
+              {/* CNIC Front & Back + Selfie & Shop Photo Uploads */}
               <div className="grid grid-cols-2 gap-2.5">
-                <label className="cursor-pointer rounded-xl bg-[#14181F] border border-dashed border-slate-700 hover:border-[#F5B738] p-2.5 flex flex-col items-center justify-center text-center gap-1.5 min-h-[96px] overflow-hidden">
+                <label className="cursor-pointer rounded-xl bg-[#14181F] border border-dashed border-slate-700 hover:border-[#F5B738] p-2.5 flex flex-col items-center justify-center text-center gap-1.5 min-h-[92px] overflow-hidden">
                   <input
                     type="file"
                     accept="image/*"
@@ -1928,7 +2327,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                       <img
                         src={cnicFrontPhoto}
                         alt="CNIC Front"
-                        className="w-full h-16 object-cover rounded-lg border border-emerald-500/60"
+                        className="w-full h-14 object-cover rounded-lg border border-emerald-500/60"
                       />
                       <span className="text-[10px] font-bold text-emerald-400 flex items-center gap-1">
                         <CheckCircle2 className="w-3 h-3" /> CNIC Front Ready
@@ -1949,7 +2348,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                   )}
                 </label>
 
-                <label className="cursor-pointer rounded-xl bg-[#14181F] border border-dashed border-slate-700 hover:border-[#F5B738] p-2.5 flex flex-col items-center justify-center text-center gap-1.5 min-h-[96px] overflow-hidden">
+                <label className="cursor-pointer rounded-xl bg-[#14181F] border border-dashed border-slate-700 hover:border-[#F5B738] p-2.5 flex flex-col items-center justify-center text-center gap-1.5 min-h-[92px] overflow-hidden">
                   <input
                     type="file"
                     accept="image/*"
@@ -1962,7 +2361,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                       <img
                         src={cnicBackPhoto}
                         alt="CNIC Back"
-                        className="w-full h-16 object-cover rounded-lg border border-emerald-500/60"
+                        className="w-full h-14 object-cover rounded-lg border border-emerald-500/60"
                       />
                       <span className="text-[10px] font-bold text-emerald-400 flex items-center gap-1">
                         <CheckCircle2 className="w-3 h-3" /> CNIC Back Ready
@@ -1979,6 +2378,68 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                       <span className="text-[9.5px] text-slate-400 flex items-center gap-1">
                         <Upload className="w-3 h-3" /> Camera / Gallery
                       </span>
+                    </>
+                  )}
+                </label>
+
+                <label className="cursor-pointer rounded-xl bg-[#14181F] border border-dashed border-slate-700 hover:border-[#F5B738] p-2.5 flex flex-col items-center justify-center text-center gap-1.5 min-h-[84px] overflow-hidden">
+                  <input
+                    type="file"
+                    accept="image/*"
+                    capture="user"
+                    onChange={(e) => handlePhotoUpload(e, 'SELFIE')}
+                    className="hidden"
+                  />
+                  {selfiePhoto ? (
+                    <>
+                      <img
+                        src={selfiePhoto}
+                        alt="Selfie Photo"
+                        className="w-full h-14 object-cover rounded-lg border border-emerald-500/60"
+                      />
+                      <span className="text-[10px] font-bold text-emerald-400 flex items-center gap-1">
+                        <CheckCircle2 className="w-3 h-3" /> Selfie Ready
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      {isCompressingPhoto === 'SELFIE' ? (
+                        <RefreshCw className="w-4 h-4 text-sky-400 animate-spin" />
+                      ) : (
+                        <Camera className="w-4 h-4 text-sky-400" />
+                      )}
+                      <span className="text-[10px] font-bold text-slate-200">Selfie Photo (Optional)</span>
+                    </>
+                  )}
+                </label>
+
+                <label className="cursor-pointer rounded-xl bg-[#14181F] border border-dashed border-slate-700 hover:border-[#F5B738] p-2.5 flex flex-col items-center justify-center text-center gap-1.5 min-h-[84px] overflow-hidden">
+                  <input
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    onChange={(e) => handlePhotoUpload(e, 'SHOP')}
+                    className="hidden"
+                  />
+                  {shopPhoto ? (
+                    <>
+                      <img
+                        src={shopPhoto}
+                        alt="Shop Photo"
+                        className="w-full h-14 object-cover rounded-lg border border-emerald-500/60"
+                      />
+                      <span className="text-[10px] font-bold text-emerald-400 flex items-center gap-1">
+                        <CheckCircle2 className="w-3 h-3" /> Shop Photo Ready
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      {isCompressingPhoto === 'SHOP' ? (
+                        <RefreshCw className="w-4 h-4 text-amber-400 animate-spin" />
+                      ) : (
+                        <Upload className="w-4 h-4 text-amber-400" />
+                      )}
+                      <span className="text-[10px] font-bold text-slate-200">Shop / Factory Photo</span>
                     </>
                   )}
                 </label>

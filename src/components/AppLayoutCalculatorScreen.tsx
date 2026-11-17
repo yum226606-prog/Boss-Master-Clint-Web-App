@@ -58,6 +58,11 @@ import {
   MessageSquarePlus,
 } from 'lucide-react';
 import { ClientAuthSession, fetchAdminServer } from '../utils/adminApiConfig';
+import {
+  callSupabaseProxy,
+  getEffectiveServerNowMs,
+  uploadImageToUserUploadsBucket,
+} from '../utils/supabaseClientConfig';
 
 import {
   AluminiumCostRow,
@@ -75,6 +80,7 @@ import {
   GlassCutResult,
   GlassFormula,
   MeasurementUnit,
+  MobileDownloadConfig,
   OpenableWindowItem,
   QuotationResult,
   SavedQuotation,
@@ -223,6 +229,8 @@ interface AppLayoutCalculatorScreenProps {
   onExportFullBackup?: () => void;
   onImportFullBackup?: (jsonStr: string) => boolean;
   activeOffer?: AppOfferBanner | null;
+  broadcasts?: AppOfferBanner[];
+  mobileDownloadConfig?: MobileDownloadConfig | null;
   onSaveOffer?: (offer: AppOfferBanner | null) => void;
   packages?: SubscriptionPackageConfig[];
   onUpdatePackages?: (pkgs: SubscriptionPackageConfig[]) => void;
@@ -233,12 +241,18 @@ interface AppLayoutCalculatorScreenProps {
     status: 'ACTIVE' | 'TRIAL' | 'BLOCKED' | 'FREE';
     tier: string;
     expiresAt: number | null;
+    serverNowMs?: number;
     reason: string;
     lastSyncedAt: number | null;
   };
   authSession?: ClientAuthSession | null;
   onLogout?: () => void;
   onSyncFromSupabase?: (options?: { forceRates?: boolean; silent?: boolean }) => Promise<boolean>;
+  onSyncUserProfileToCloud?: (profilePatch: {
+    companyName?: string;
+    selfieUrl?: string;
+    shopPhotoUrl?: string;
+  }) => Promise<void> | void;
   supportRequests?: ClientSupportRequest[];
   isSubmittingSupportRequest?: boolean;
   onSubmitSupportRequest?: (payload: {
@@ -349,6 +363,8 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     onExportFullBackup = () => {},
     onImportFullBackup = () => false,
     activeOffer,
+    broadcasts = [],
+    mobileDownloadConfig = null,
     onSaveOffer,
     packages = [],
     onUpdatePackages,
@@ -359,6 +375,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     authSession = null,
     onLogout,
     onSyncFromSupabase,
+    onSyncUserProfileToCloud,
     supportRequests = [],
     isSubmittingSupportRequest = false,
     onSubmitSupportRequest,
@@ -438,8 +455,15 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   });
 
   const [orderSelectedPackage, setOrderSelectedPackage] = useState<SubscriptionPackageConfig | null>(null);
-  const [orderBankName, setOrderBankName] = useState<string>('Easypaisa Wallet');
+  const [orderBankName, setOrderBankName] = useState<string>(
+    bankAccounts.find((b) => b.isActive !== false)?.bankName || 'Easypaisa Wallet'
+  );
+  const [orderAmountInput, setOrderAmountInput] = useState<string>(() =>
+    String(packages[0]?.priceRs ?? packages[0]?.price ?? 3000)
+  );
   const [orderTidInput, setOrderTidInput] = useState<string>('');
+  const [orderReceiptUrl, setOrderReceiptUrl] = useState<string>('');
+  const [isUploadingOrderReceipt, setIsUploadingOrderReceipt] = useState<boolean>(false);
   const [orderClientName, setOrderClientName] = useState<string>(authSession?.name || customerName || 'Client');
   const [orderClientPhone, setOrderClientPhone] = useState<string>(authSession?.phone || customerPhone || '');
   const [isSubmittingOrder, setIsSubmittingOrder] = useState<boolean>(false);
@@ -447,11 +471,57 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   const [isOrderAutoApproved, setIsOrderAutoApproved] = useState<boolean>(false);
   const [isCheckingOrderStatus, setIsCheckingOrderStatus] = useState<boolean>(false);
 
-  // Poll for order status every 5s if order is pending
+  useEffect(() => {
+    const pkg = orderSelectedPackage || packages[0];
+    if (pkg) {
+      setOrderAmountInput(String(pkg.priceRs ?? pkg.price ?? 3000));
+    }
+  }, [orderSelectedPackage, packages]);
+
+  useEffect(() => {
+    const activeBanks = bankAccounts.filter((b) => b.isActive !== false);
+    if (activeBanks.length > 0 && !activeBanks.some((b) => b.bankName === orderBankName)) {
+      setOrderBankName(activeBanks[0].bankName);
+    }
+  }, [bankAccounts, orderBankName]);
+
+  // Poll Supabase subscriptions + optional webhook server for order status
   const checkClientOrderStatus = async () => {
     if (!clientDeviceId) return;
     try {
       setIsCheckingOrderStatus(true);
+      const sbRes = await callSupabaseProxy({
+        table: 'subscriptions',
+        method: 'GET',
+        query: `device_id=eq.${encodeURIComponent(clientDeviceId)}&select=*&limit=1`,
+        timeoutMs: 7000,
+      });
+      const subRow = Array.isArray(sbRes.data) ? sbRes.data[0] : null;
+      if (subRow && (subRow.last_payment_tid || subRow.status)) {
+        const st = String(subRow.status || 'PENDING').toUpperCase();
+        const isApproved =
+          Boolean(subRow.is_activated) ||
+          st === 'ACTIVE' ||
+          st === 'APPROVED' ||
+          st === 'APPROVED_AUTO' ||
+          st === 'APPROVED_MANUAL';
+        if (subRow.last_payment_tid || isApproved) {
+          setActiveClientOrder({
+            tid: subRow.last_payment_tid || 'CLOUD-SUB',
+            status: isApproved ? 'APPROVED_MANUAL' : st,
+            packageName: subRow.package_name || 'Subscription Plan',
+            amount: subRow.amount,
+            bankName: subRow.payment_method,
+            receiptUrl: subRow.receipt_url,
+          });
+        }
+        if (isApproved) {
+          setIsOrderAutoApproved(true);
+          onSyncFromSupabase?.({ forceRates: false, silent: true });
+          return;
+        }
+      }
+
       const res = await fetchAdminServer(
         `/api/client-order-status/${encodeURIComponent(clientDeviceId)}`
       );
@@ -463,8 +533,8 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
           onSyncFromSupabase?.({ forceRates: false, silent: true });
         }
       }
-    } catch (err) {
-      // ignore
+    } catch {
+      // ignore offline error
     } finally {
       setIsCheckingOrderStatus(false);
     }
@@ -476,15 +546,31 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     }
   }, [showPackagesModal]);
 
-  useEffect(() => {
-    if (!showPackagesModal || !activeClientOrder || activeClientOrder.status !== 'PENDING') return;
-    const interval = setInterval(checkClientOrderStatus, 5000);
-    return () => clearInterval(interval);
-  }, [showPackagesModal, activeClientOrder]);
+  const handleOrderReceiptUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setIsUploadingOrderReceipt(true);
+    try {
+      const uploaded = await uploadImageToUserUploadsBucket({
+        fileOrDataUrl: file,
+        folder: 'receipts',
+        deviceId: clientDeviceId,
+        tag: 'payment_receipt',
+      });
+      setOrderReceiptUrl(uploaded.url);
+      showSettingsToast('✅ Payment screenshot uploaded!');
+    } catch {
+      showSettingsToast('Could not read receipt screenshot. Try again.');
+    } finally {
+      setIsUploadingOrderReceipt(false);
+    }
+  };
 
   const handleSubmitClientOrder = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!orderTidInput.trim()) {
+    const cleanTid = orderTidInput.trim().toUpperCase();
+    if (!cleanTid) {
       showSettingsToast('Please enter the Transaction ID (TID) from your bank receipt!');
       return;
     }
@@ -494,47 +580,102 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
       return;
     }
 
+    const amountVal = Number(orderAmountInput) || pkgToOrder.priceRs || pkgToOrder.price || 500;
+    const cleanClientName = orderClientName.trim() || authSession?.name || customerName || 'Client User';
+    const cleanClientPhone = orderClientPhone.trim() || authSession?.phone || customerPhone || '';
+
     try {
       setIsSubmittingOrder(true);
-      const selectedBankObj = bankAccounts.find((b) => b.bankName === orderBankName) || bankAccounts[0];
-      const payload = {
-        deviceId: clientDeviceId,
-        clientName: orderClientName.trim() || authSession?.name || customerName || 'Client User',
-        clientPhone: orderClientPhone.trim() || authSession?.phone || customerPhone || '',
-        clientEmail: authSession?.email || '',
-        clientCnic: authSession?.cnic || '',
-        packageId: pkgToOrder.id,
-        packageName: pkgToOrder.name,
-        planCode: pkgToOrder.planCode || 'MONTHLY',
-        durationMonths: pkgToOrder.durationMonths || 1,
-        amountRs: pkgToOrder.priceRs || pkgToOrder.price || 500,
-        bankAccountId: selectedBankObj?.id || '',
-        bankName: orderBankName,
-        accountTitle: selectedBankObj?.accountTitle || 'Syed Saboor Nawab',
-        accountNumber: selectedBankObj?.accountNumber || '03105524225',
-        tid: orderTidInput.trim(),
-      };
+      const now = Date.now();
+      const nowIso = new Date(now).toISOString();
 
-      const res = await fetchAdminServer('/api/client-submit-order', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
+      // 1. Direct Supabase subscriptions & users sync
+      const [sbSubRes] = await Promise.all([
+        callSupabaseProxy({
+          table: 'subscriptions',
+          method: 'POST',
+          upsert: true,
+          payload: {
+            device_id: clientDeviceId,
+            user_name: cleanClientName,
+            phone: cleanClientPhone,
+            email: authSession?.email || '',
+            cnic: authSession?.cnic || '',
+            package_name: pkgToOrder.name,
+            subscription_tier: pkgToOrder.planCode || 'MONTHLY',
+            amount: amountVal,
+            payment_method: orderBankName,
+            last_payment_tid: cleanTid,
+            ...(orderReceiptUrl ? { receipt_url: orderReceiptUrl } : {}),
+            status: 'PENDING',
+            last_updated: now,
+            updated_at: nowIso,
+          },
+          timeoutMs: 12000,
+        }),
+        callSupabaseProxy({
+          table: 'users',
+          method: 'PATCH',
+          query: `device_id=eq.${encodeURIComponent(clientDeviceId)}`,
+          payload: {
+            last_payment_tid: cleanTid,
+            package_name: pkgToOrder.name,
+            last_cloud_sync: now,
+          },
+          timeoutMs: 8000,
+        }).catch(() => ({ ok: false })),
+      ]);
 
-      const data = await res.json();
-      if (!res.ok || !data.ok) {
-        showSettingsToast(data.error || 'Failed to submit order. Try again.');
+      if (!sbSubRes.ok) {
+        showSettingsToast(sbSubRes.error || 'Could not save payment to Supabase. Try again.');
         return;
       }
 
-      setActiveClientOrder(data.order);
-      if (data.isApprovedNow) {
-        setIsOrderAutoApproved(true);
-        showSettingsToast('🎉 Payment Verified! Your Account is Activated Automatically!');
-        onSyncFromSupabase?.({ forceRates: false, silent: true });
-      } else {
-        showSettingsToast('✅ Order submitted! Robot is checking bank email...');
-      }
+      setActiveClientOrder({
+        tid: cleanTid,
+        status: 'PENDING',
+        packageName: pkgToOrder.name,
+        amount: amountVal,
+        bankName: orderBankName,
+        receiptUrl: orderReceiptUrl,
+      });
+      showSettingsToast('✅ Payment TID & Receipt sent directly to Admin Panel (Supabase)!');
+
+      // 2. Non-fatal optional webhook ping for automated bank-email matching
+      const selectedBankObj = bankAccounts.find((b) => b.bankName === orderBankName) || bankAccounts[0];
+      fetchAdminServer('/api/client-submit-order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          deviceId: clientDeviceId,
+          clientName: cleanClientName,
+          clientPhone: cleanClientPhone,
+          clientEmail: authSession?.email || '',
+          clientCnic: authSession?.cnic || '',
+          packageId: pkgToOrder.id,
+          packageName: pkgToOrder.name,
+          planCode: pkgToOrder.planCode || 'MONTHLY',
+          durationMonths: pkgToOrder.durationMonths || 1,
+          amountRs: amountVal,
+          bankAccountId: selectedBankObj?.id || '',
+          bankName: orderBankName,
+          accountTitle: selectedBankObj?.accountTitle || 'Syed Saboor Nawab',
+          accountNumber: selectedBankObj?.accountNumber || '03105524225',
+          tid: cleanTid,
+          receiptUrl: orderReceiptUrl,
+        }),
+        timeoutMs: 6000,
+      })
+        .then(async (res) => {
+          const data = await res.json().catch(() => ({}));
+          if (res.ok && data?.ok && data.isApprovedNow) {
+            setActiveClientOrder(data.order);
+            setIsOrderAutoApproved(true);
+            showSettingsToast('🎉 Payment Verified! Your Account is Activated Automatically!');
+            onSyncFromSupabase?.({ forceRates: false, silent: true });
+          }
+        })
+        .catch(() => {});
     } catch (err: any) {
       showSettingsToast('Error submitting order: ' + err?.message);
     } finally {
@@ -2024,25 +2165,55 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     }
   };
 
+  const visibleBanners: AppOfferBanner[] = (() => {
+    const list: AppOfferBanner[] = [];
+    const seen = new Set<string>();
+    const serverNow =
+      (cloudAccessInfo?.serverNowMs && cloudAccessInfo.serverNowMs > 0
+        ? cloudAccessInfo.serverNowMs
+        : getEffectiveServerNowMs()) || Date.now();
+    [activeOffer, ...(broadcasts || [])].forEach((b) => {
+      if (!b || !b.id) return;
+      if (seen.has(b.id)) return;
+      seen.add(b.id);
+      if (b.isActive === false || b.isVisible === false || b.showBanner === false) return;
+      if (b.expiresAt && Number(b.expiresAt) > 0 && serverNow > Number(b.expiresAt)) return;
+      if (dismissedBannerId === b.id) return;
+      list.push(b);
+    });
+    return list;
+  })();
+
   return (
     <div className="space-y-2.5 sm:space-y-3 w-full max-w-full overflow-x-hidden">
       {/* =================================================================== */}
-      {/* LIVE BROADCAST OFFER & ANNOUNCEMENT BANNER                          */}
+      {/* LIVE BROADCASTS, OFFERS & ANNOUNCEMENT BANNERS (SHOW/HIDE SYNCED)   */}
       {/* =================================================================== */}
-      {activeOffer && activeOffer.isActive && dismissedBannerId !== activeOffer.id && (
-        <div className="p-3 rounded-xl bg-gradient-to-r from-amber-500/20 via-rose-500/20 to-amber-500/20 border border-amber-400 shadow-lg flex items-center justify-between gap-2 flex-wrap no-print">
+      {visibleBanners.map((banner) => (
+        <div
+          key={banner.id}
+          className="p-3 rounded-xl bg-gradient-to-r from-amber-500/20 via-rose-500/20 to-amber-500/20 border border-amber-400 shadow-lg flex items-center justify-between gap-2 flex-wrap no-print"
+        >
           <div className="flex items-center gap-2 min-w-0">
-            <div className="w-8 h-8 rounded-lg bg-[#F5B738] text-black flex items-center justify-center font-black shrink-0">
-              <Zap className="w-4 h-4 text-black" />
-            </div>
+            {banner.imageUrl ? (
+              <img
+                src={banner.imageUrl}
+                alt={banner.title}
+                className="w-9 h-9 rounded-lg object-cover border border-[#F5B738] shrink-0"
+              />
+            ) : (
+              <div className="w-8 h-8 rounded-lg bg-[#F5B738] text-black flex items-center justify-center font-black shrink-0">
+                <Zap className="w-4 h-4 text-black" />
+              </div>
+            )}
             <div className="min-w-0">
               <div className="flex items-center gap-1.5 flex-wrap">
                 <span className="text-[9px] font-black px-2 py-0.5 rounded-full bg-rose-600 text-white uppercase">
-                  {activeOffer.badgeText || 'OFFER'}
+                  {banner.badgeText || 'OFFER'}
                 </span>
-                <span className="text-xs font-black text-white truncate">{activeOffer.title}</span>
+                <span className="text-xs font-black text-white truncate">{banner.title}</span>
               </div>
-              <div className="text-[11px] text-slate-300 truncate">{activeOffer.message}</div>
+              <div className="text-[11px] text-slate-300 truncate">{banner.message}</div>
             </div>
           </div>
 
@@ -2056,14 +2227,14 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
             </button>
             <button
               type="button"
-              onClick={() => setDismissedBannerId(activeOffer.id)}
+              onClick={() => setDismissedBannerId(banner.id)}
               className="boss-flat-btn p-1 rounded bg-black/40 text-slate-400 hover:text-white"
             >
               <X className="w-3.5 h-3.5" />
             </button>
           </div>
         </div>
-      )}
+      ))}
 
       {/* =================================================================== */}
       {/* UNIFIED STICKY COMPACT MOBILE & DESKTOP HEADER BAR                  */}
@@ -2115,14 +2286,15 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               </button>
             )}
 
-            {!isInstalled && (
+            {(!isInstalled ||
+              Boolean(mobileDownloadConfig?.androidApkUrl || mobileDownloadConfig?.iosAppUrl)) && (
               <button
                 type="button"
                 onClick={onTriggerInstall}
                 onDoubleClick={onTriggerInstall}
                 className="w-7 h-7 rounded-full bg-[#1C222B] border border-[#F5B738]/70 text-[#F5B738] hover:bg-[#F5B738] hover:text-black flex items-center justify-center transition-colors cursor-pointer shrink-0"
-                title="Download / Install App"
-                aria-label="Download / Install App"
+                title="Install Mobile App (Android / iOS / PC)"
+                aria-label="Install Mobile App"
               >
                 <Download className="w-3.5 h-3.5" />
               </button>
@@ -2289,11 +2461,15 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
           </div>
 
           <div className="flex items-center gap-1 shrink-0">
-            {/* Active Plan Badge + Remaining Days */}
+            {/* Active Plan Badge + Remaining Days (Server-Time Verified) */}
             {(() => {
+              const effectiveNow =
+                (cloudAccessInfo?.serverNowMs && cloudAccessInfo.serverNowMs > 0
+                  ? cloudAccessInfo.serverNowMs
+                  : getEffectiveServerNowMs()) || Date.now();
               const daysLeft =
-                cloudAccessInfo?.expiresAt && cloudAccessInfo.expiresAt > Date.now()
-                  ? Math.max(1, Math.ceil((cloudAccessInfo.expiresAt - Date.now()) / 86400000))
+                cloudAccessInfo?.expiresAt && cloudAccessInfo.expiresAt > effectiveNow
+                  ? Math.max(1, Math.ceil((cloudAccessInfo.expiresAt - effectiveNow) / 86400000))
                   : null;
               const isVip = cloudAccessInfo?.status === 'FREE';
               const isPro = cloudAccessInfo?.status === 'ACTIVE';
@@ -2325,6 +2501,19 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               );
             })()}
 
+            <button
+              type="button"
+              disabled={isSyncingCloud}
+              onClick={() => onSyncFromSupabase?.({ forceRates: true, silent: false })}
+              className="boss-flat-btn h-6 px-2 rounded-full bg-sky-500/15 border border-sky-500/50 text-sky-300 hover:bg-sky-500 hover:text-black flex items-center gap-1 cursor-pointer text-[9px] font-black shrink-0"
+              title="Sync / Check Updates from Admin Cloud"
+              aria-label="Sync / Check Updates"
+            >
+              <RefreshCw className={`w-2.5 h-2.5 shrink-0 ${isSyncingCloud ? 'animate-spin' : ''}`} />
+              <span className="hidden sm:inline">
+                {isSyncingCloud ? 'Syncing...' : 'Sync / Check Updates'}
+              </span>
+            </button>
             <button
               type="button"
               onClick={() => setShowSupportModal(true)}
@@ -4256,7 +4445,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
       {/* TAB 4: CUTTING CHART SCREEN                                         */}
       {/* =================================================================== */}
       {currentTab === 'CUTTING' && (
-        <div className="space-y-3 boss-printable-chart">
+        <div
+          className="space-y-3 boss-printable-chart select-none boss-protected-content"
+          onCopy={(e) => e.preventDefault()}
+          onContextMenu={(e) => e.preventDefault()}
+        >
           <div className="p-3 sm:p-3.5 rounded-xl bg-[#14181F] border border-[#2B3441] flex items-center justify-between gap-2 no-print">
             <div className="min-w-0">
               <h3 className="text-xs sm:text-sm font-extrabold text-[#F5B738] truncate">
@@ -4383,7 +4576,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
       {/* TAB 5: LENGTH CHART & STOCK TALLY SCREEN                            */}
       {/* =================================================================== */}
       {currentTab === 'LENGTH' && (
-        <div className="space-y-3 boss-printable-chart">
+        <div
+          className="space-y-3 boss-printable-chart select-none boss-protected-content"
+          onCopy={(e) => e.preventDefault()}
+          onContextMenu={(e) => e.preventDefault()}
+        >
           <div className="p-3 sm:p-3.5 rounded-xl bg-[#14181F] border border-[#2B3441] flex items-center justify-between gap-2 no-print">
             <div className="min-w-0">
               <h3 className="text-xs sm:text-sm font-extrabold text-[#F5B738] truncate">
@@ -4530,7 +4727,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
           0
         );
         return (
-          <div className="space-y-3 boss-printable-chart">
+          <div
+            className="space-y-3 boss-printable-chart select-none boss-protected-content"
+            onCopy={(e) => e.preventDefault()}
+            onContextMenu={(e) => e.preventDefault()}
+          >
             {/* Header, 3 Actions, Glass Fitting Type & 3-Col KPI Strip */}
             <div className="p-3.5 sm:p-4 rounded-xl bg-[#14181F] border border-[#2B3441] space-y-3 no-print">
               <div className="flex items-center justify-between gap-2">
@@ -5874,7 +6075,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
           {/* SUB-TAB 1: ALUMINIUM & GLASS RATES (3-COL GRID & TABLE)         */}
           {/* =============================================================== */}
           {ratesSubTab === 'RATES' && (
-            <div className="p-2.5 sm:p-3.5 rounded-xl bg-[#14181F] border border-[#2B3441] space-y-2.5 text-xs">
+            <div
+              className="p-2.5 sm:p-3.5 rounded-xl bg-[#14181F] border border-[#2B3441] space-y-2.5 text-xs select-none boss-protected-content"
+              onCopy={(e) => e.preventDefault()}
+              onContextMenu={(e) => e.preventDefault()}
+            >
               {/* Header & View Switcher */}
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <div>
@@ -5953,8 +6158,8 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                     disabled={isSyncingCloud}
                     onClick={() => onSyncFromSupabase?.({ forceRates: true, silent: false })}
                     className="boss-flat-btn w-8 h-8 rounded-lg bg-sky-500/20 border border-sky-500/60 text-sky-300 hover:bg-sky-500 hover:text-black flex items-center justify-center cursor-pointer"
-                    title={isSyncingCloud ? 'Syncing Cloud Rates...' : 'Sync Cloud Rates'}
-                    aria-label="Sync Cloud Rates"
+                    title={isSyncingCloud ? 'Syncing Updates...' : 'Sync / Check Updates'}
+                    aria-label="Sync / Check Updates"
                   >
                     <Cloud className={`w-4 h-4 ${isSyncingCloud ? 'animate-pulse' : ''}`} />
                   </button>
@@ -7379,6 +7584,79 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                 </div>
               </div>
 
+              {/* Client Cloud Profile Photos & Sync */}
+              {authSession && (
+                <div className="p-2.5 rounded-xl bg-[#0C0F14] border border-slate-800 space-y-2">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <span className="text-[11px] font-bold text-[#F5B738]">
+                      Client Cloud Profile &amp; Verification Photos
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onSyncUserProfileToCloud?.({ companyName });
+                        showSettingsToast('✅ Company Name & Profile synced to Admin Cloud!');
+                      }}
+                      className="boss-flat-btn px-2.5 py-1 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black font-black text-[10.5px] flex items-center gap-1 cursor-pointer"
+                    >
+                      <Cloud className="w-3 h-3" />
+                      <span>Sync Profile to Cloud</span>
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="cursor-pointer p-2 rounded-lg bg-[#14181F] border border-dashed border-slate-700 hover:border-[#F5B738] flex items-center gap-2 text-[10.5px]">
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={async (e) => {
+                          const f = e.target.files?.[0];
+                          e.target.value = '';
+                          if (!f) return;
+                          const up = await uploadImageToUserUploadsBucket({
+                            fileOrDataUrl: f,
+                            folder: 'selfies',
+                            deviceId: clientDeviceId,
+                            tag: 'selfie',
+                          });
+                          onSyncUserProfileToCloud?.({ selfieUrl: up.url, companyName });
+                          showSettingsToast('✅ Selfie photo synced to Admin Cloud!');
+                        }}
+                        className="hidden"
+                      />
+                      <Camera className="w-4 h-4 text-sky-400 shrink-0" />
+                      <span className="truncate font-semibold text-slate-200">
+                        {authSession.selfieUrl ? 'Update Selfie Photo' : 'Upload Selfie Photo'}
+                      </span>
+                    </label>
+
+                    <label className="cursor-pointer p-2 rounded-lg bg-[#14181F] border border-dashed border-slate-700 hover:border-[#F5B738] flex items-center gap-2 text-[10.5px]">
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={async (e) => {
+                          const f = e.target.files?.[0];
+                          e.target.value = '';
+                          if (!f) return;
+                          const up = await uploadImageToUserUploadsBucket({
+                            fileOrDataUrl: f,
+                            folder: 'shops',
+                            deviceId: clientDeviceId,
+                            tag: 'shop',
+                          });
+                          onSyncUserProfileToCloud?.({ shopPhotoUrl: up.url, companyName });
+                          showSettingsToast('✅ Shop photo synced to Admin Cloud!');
+                        }}
+                        className="hidden"
+                      />
+                      <Upload className="w-4 h-4 text-amber-400 shrink-0" />
+                      <span className="truncate font-semibold text-slate-200">
+                        {authSession.shopPhotoUrl ? 'Update Shop Photo' : 'Upload Shop Photo'}
+                      </span>
+                    </label>
+                  </div>
+                </div>
+              )}
+
               {/* Live PDF Letterhead Preview */}
               <div className="space-y-1.5">
                 <div className="text-[10px] font-extrabold text-[#F5B738] uppercase tracking-wider">
@@ -7698,22 +7976,36 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                     Choose a plan and submit your payment TID for instant verification.
                   </p>
                 </div>
-                <span className="px-2 py-0.5 rounded bg-[#0C0F14] border border-slate-700 text-[10px] font-mono text-slate-300">
-                  ID: {clientDeviceId}
-                </span>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    disabled={isSyncingCloud}
+                    onClick={() => onSyncFromSupabase?.({ forceRates: true, silent: false })}
+                    className="boss-flat-btn px-2.5 py-1 rounded-lg bg-sky-500/20 border border-sky-500/60 text-sky-300 hover:bg-sky-500 hover:text-black font-bold text-[10px] flex items-center gap-1 cursor-pointer"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${isSyncingCloud ? 'animate-spin' : ''}`} />
+                    <span>{isSyncingCloud ? 'Checking...' : 'Sync / Check Updates'}</span>
+                  </button>
+                  <span className="px-2 py-0.5 rounded bg-[#0C0F14] border border-slate-700 text-[10px] font-mono text-slate-300">
+                    ID: {clientDeviceId}
+                  </span>
+                </div>
               </div>
 
-              {activeOffer && activeOffer.isActive && (
-                <div className="p-3 rounded-xl bg-amber-500/15 border border-amber-500/60 space-y-1">
-                  <div className="flex items-center gap-2">
-                    <span className="px-2 py-0.5 rounded bg-rose-600 text-white text-[10px] font-black uppercase">
-                      {activeOffer.badgeText || 'OFFER'}
-                    </span>
-                    <span className="font-extrabold text-white">{activeOffer.title}</span>
+              {activeOffer &&
+                activeOffer.isActive !== false &&
+                activeOffer.isVisible !== false &&
+                activeOffer.showBanner !== false && (
+                  <div className="p-3 rounded-xl bg-amber-500/15 border border-amber-500/60 space-y-1">
+                    <div className="flex items-center gap-2">
+                      <span className="px-2 py-0.5 rounded bg-rose-600 text-white text-[10px] font-black uppercase">
+                        {activeOffer.badgeText || 'OFFER'}
+                      </span>
+                      <span className="font-extrabold text-white">{activeOffer.title}</span>
+                    </div>
+                    <p className="text-[11px] text-slate-300">{activeOffer.message}</p>
                   </div>
-                  <p className="text-[11px] text-slate-300">{activeOffer.message}</p>
-                </div>
-              )}
+                )}
 
               {/* Packages Grid */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -7929,24 +8221,27 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
 
             <div className="space-y-4 max-h-[75vh] overflow-y-auto pr-1">
               {/* Active Offer Callout */}
-              {activeOffer && activeOffer.isActive && (
-                <div className="p-3.5 rounded-xl bg-gradient-to-r from-amber-500/20 via-rose-500/20 to-amber-500/20 border border-amber-500/60 flex items-center justify-between gap-3 flex-wrap">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-rose-600 text-white font-black uppercase">
-                        {activeOffer.badgeText || 'OFFER'}
-                      </span>
-                      <span className="text-xs font-black text-white">{activeOffer.title}</span>
-                      {activeOffer.discountPct && activeOffer.discountPct > 0 && (
-                        <span className="text-[11px] font-black text-amber-300 bg-amber-950/70 px-2 py-0.5 rounded border border-amber-500/40">
-                          {activeOffer.discountPct}% DISCOUNT ACTIVE
+              {activeOffer &&
+                activeOffer.isActive !== false &&
+                activeOffer.isVisible !== false &&
+                activeOffer.showBanner !== false && (
+                  <div className="p-3.5 rounded-xl bg-gradient-to-r from-amber-500/20 via-rose-500/20 to-amber-500/20 border border-amber-500/60 flex items-center justify-between gap-3 flex-wrap">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-rose-600 text-white font-black uppercase">
+                          {activeOffer.badgeText || 'OFFER'}
                         </span>
-                      )}
+                        <span className="text-xs font-black text-white">{activeOffer.title}</span>
+                        {activeOffer.discountPct && activeOffer.discountPct > 0 && (
+                          <span className="text-[11px] font-black text-amber-300 bg-amber-950/70 px-2 py-0.5 rounded border border-amber-500/40">
+                            {activeOffer.discountPct}% DISCOUNT ACTIVE
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-slate-300 mt-1">{activeOffer.message}</p>
                     </div>
-                    <p className="text-[11px] text-slate-300 mt-1">{activeOffer.message}</p>
                   </div>
-                </div>
-              )}
+                )}
 
               {/* Packages Cards Grid */}
               <div className="space-y-2">
@@ -8193,16 +8488,19 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   </div>
                 )}
 
-                {/* Form to submit TID */}
+                {/* Form to submit TID, Amount & Receipt Screenshot */}
                 <form onSubmit={handleSubmitClientOrder} className="space-y-3.5">
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
                     <div>
                       <label className="block text-[11px] text-slate-400 mb-1 font-semibold">Select Subscription Package:</label>
                       <select
                         value={orderSelectedPackage?.id || (packages[0]?.id ?? '')}
                         onChange={(e) => {
                           const chosen = packages.find((p) => p.id === e.target.value);
-                          if (chosen) setOrderSelectedPackage(chosen);
+                          if (chosen) {
+                            setOrderSelectedPackage(chosen);
+                            setOrderAmountInput(String(chosen.priceRs ?? chosen.price ?? 3000));
+                          }
                         }}
                         className="w-full px-3 py-2 rounded-lg bg-[#0C1017] border border-slate-700 text-white text-xs focus:border-amber-400 outline-none"
                       >
@@ -8231,6 +8529,21 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
 
                     <div>
                       <label className="block text-[11px] text-slate-400 mb-1 font-semibold">
+                        Amount Sent (Rs.): <span className="text-amber-400">*</span>
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        value={orderAmountInput}
+                        onChange={(e) => setOrderAmountInput(e.target.value)}
+                        placeholder="e.g. 3000"
+                        className="w-full px-3 py-2 rounded-lg bg-[#0C1017] border border-slate-700 text-emerald-300 font-mono font-bold text-xs focus:border-amber-400 outline-none"
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] text-slate-400 mb-1 font-semibold">
                         Bank Receipt Transaction ID (TID): <span className="text-amber-400">*</span>
                       </label>
                       <input
@@ -8243,6 +8556,42 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                       />
                     </div>
                   </div>
+
+                  {/* Transaction Receipt Screenshot Upload */}
+                  <label className="cursor-pointer rounded-xl bg-[#0C1017] border border-dashed border-slate-700 hover:border-[#F5B738] p-2.5 flex items-center justify-between gap-2 text-xs">
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={handleOrderReceiptUpload}
+                      className="hidden"
+                    />
+                    {orderReceiptUrl ? (
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <img
+                          src={orderReceiptUrl}
+                          alt="Payment Receipt"
+                          className="w-10 h-10 object-cover rounded-lg border border-emerald-500/60 shrink-0"
+                        />
+                        <span className="text-[11px] font-bold text-emerald-400 truncate">
+                          ✓ Transaction Screenshot Ready (Tap to change)
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2 text-slate-300">
+                        {isUploadingOrderReceipt ? (
+                          <RefreshCw className="w-4 h-4 text-[#F5B738] animate-spin shrink-0" />
+                        ) : (
+                          <Camera className="w-4 h-4 text-[#F5B738] shrink-0" />
+                        )}
+                        <span className="text-[11px] font-semibold">
+                          {isUploadingOrderReceipt
+                            ? 'Uploading Payment Screenshot...'
+                            : 'Upload Payment Screenshot / Receipt (Saved to Admin Cloud)'}
+                        </span>
+                      </div>
+                    )}
+                    <Upload className="w-4 h-4 text-slate-400 shrink-0" />
+                  </label>
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                     <div>
@@ -8269,16 +8618,16 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
 
                   <div className="flex items-center justify-between flex-wrap gap-2 pt-2">
                     <span className="text-[11px] text-slate-400">
-                      TID submit karne ke baad robot auto-match karega
+                      TID &amp; Screenshot seedha Supabase par Admin Panel ko send hon ge
                     </span>
 
                     <button
                       type="submit"
-                      disabled={isSubmittingOrder || !orderTidInput.trim()}
+                      disabled={isSubmittingOrder || isUploadingOrderReceipt || !orderTidInput.trim()}
                       className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 text-black font-black text-xs flex items-center gap-2 shadow-lg shadow-amber-500/30 transition-all cursor-pointer disabled:opacity-50"
                     >
                       <Send className={`w-4 h-4 ${isSubmittingOrder ? 'animate-bounce' : ''}`} />
-                      <span>{isSubmittingOrder ? 'Submitting Order...' : '⚡ Submit Transaction ID (TID) for Verification'}</span>
+                      <span>{isSubmittingOrder ? 'Submitting Order...' : '⚡ Submit Payment TID & Receipt'}</span>
                     </button>
                   </div>
                 </form>

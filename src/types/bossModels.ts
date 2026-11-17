@@ -501,11 +501,22 @@ export interface AppOfferBanner {
   message: string;
   badgeText: string;
   isActive: boolean;
+  isVisible?: boolean;
+  showBanner?: boolean;
   createdAt: number;
   createdBy: string;
   discountPct?: number;
   discountCode?: string;
   expiresAt?: number;
+  imageUrl?: string;
+}
+
+export interface MobileDownloadConfig {
+  androidApkUrl: string;
+  iosAppUrl: string;
+  androidVersion?: string;
+  iosVersion?: string;
+  releaseNotes?: string;
 }
 
 export interface DynamicMasterSection {
@@ -600,6 +611,7 @@ export interface ClientSubscriptionOrder {
   rejectedAt?: number;
   rejectReason?: string;
   matchedAlertId?: string;
+  receiptUrl?: string;
 }
 
 export interface BankEmailAlert {

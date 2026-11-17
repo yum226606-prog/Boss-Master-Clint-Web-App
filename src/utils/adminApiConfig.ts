@@ -3,6 +3,8 @@ import {
   DEFAULT_PUBLISHABLE_KEY,
   DEFAULT_SMS_GATEWAY_CONFIG,
   DEFAULT_SUPABASE_URL,
+  getEffectiveServerNowMs,
+  isLocalClockRolledBack,
   SmsOtpGatewayConfig,
 } from './supabaseClientConfig';
 
@@ -13,6 +15,8 @@ export const ADMIN_SERVER_DEV =
 
 export const AUTH_SESSION_STORAGE_KEY = 'boss_client_auth_session_v1';
 export const DEVICE_ID_STORAGE_KEY = 'boss_client_device_id';
+export const MASTER_ENGINE_CACHE_KEY = 'boss_cached_master_engine_config_v1';
+export const PRIMARY_OWNER_EMAIL = 'ssaboor2t@gmail.com';
 export const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000;
 
 export interface ClientAuthSession {
@@ -24,6 +28,9 @@ export interface ClientAuthSession {
   email: string;
   cnic: string;
   shopAddress: string;
+  companyName?: string;
+  selfieUrl?: string;
+  shopPhotoUrl?: string;
   loggedInAt: number;
   trialStartTime?: number;
   trialExpiresAt?: number;
@@ -341,10 +348,10 @@ export async function verifySupabaseEmailOtp(
 }
 
 /**
- * Sync newly registered or re-bound client user into Admin Panel's master_engine_config.userAccessControl
- * (in addition to Supabase users, client_users & subscriptions tables) so Admin Panel sees every client instantly.
+ * Client App must NEVER write to app_configs (Admin-only config).
+ * Retained as a safe no-op export so existing call sites stay harmless and bandwidth-free.
  */
-export async function syncRegisteredUserToAdminUac(entry: {
+export async function syncRegisteredUserToAdminUac(_entry: {
   device_id: string;
   name: string;
   phone: string;
@@ -354,89 +361,7 @@ export async function syncRegisteredUserToAdminUac(entry: {
   trial_start_time: number;
   subscription_expiry: number;
 }): Promise<void> {
-  try {
-    const res = await callSupabaseProxy({
-      table: 'app_configs',
-      method: 'GET',
-      query: 'id=in.(master_engine_config,global_config)&select=id,value',
-      timeoutMs: 8000,
-    });
-    if (!res.ok || !Array.isArray(res.data)) return;
-
-    const uacItem = {
-      device_id: entry.device_id,
-      name: entry.name,
-      phone: entry.phone,
-      email: entry.email,
-      cnic: entry.cnic,
-      shop_address: entry.shop_address,
-      is_blocked: false,
-      is_lifetime: false,
-      block_reason: '',
-      is_activated: false,
-      trial_start_time: entry.trial_start_time,
-      subscription_tier: 'TRIAL',
-      subscription_expiry: entry.subscription_expiry,
-    };
-
-    for (const row of res.data) {
-      if (!row?.id || !row?.value || typeof row.value !== 'object') continue;
-      const curVal = { ...row.value };
-      const existingUac: any[] = Array.isArray(curVal.userAccessControl)
-        ? [...curVal.userAccessControl]
-        : Object.values(curVal.userAccessControl || {});
-
-      const pDigits = normalizePhoneDigits(entry.phone);
-      const cDigits = normalizeCnicDigits(entry.cnic);
-
-      const idx = existingUac.findIndex(
-        (u: any) =>
-          (u?.device_id && u.device_id === entry.device_id) ||
-          (pDigits && normalizePhoneDigits(u?.phone || '') === pDigits) ||
-          (cDigits && normalizeCnicDigits(u?.cnic || '') === cDigits)
-      );
-
-      if (idx >= 0) {
-        const prev = existingUac[idx] || {};
-        existingUac[idx] = {
-          ...uacItem,
-          ...prev,
-          device_id: entry.device_id,
-          name: entry.name || prev.name,
-          phone: entry.phone || prev.phone,
-          email: entry.email || prev.email,
-          cnic: entry.cnic || prev.cnic,
-          shop_address: entry.shop_address || prev.shop_address,
-        };
-      } else {
-        existingUac.push(uacItem);
-      }
-
-      curVal.userAccessControl = existingUac;
-      await callSupabaseProxy({
-        table: 'app_configs',
-        method: 'PATCH',
-        query: `id=eq.${encodeURIComponent(row.id)}`,
-        payload: { value: curVal },
-        timeoutMs: 8000,
-      });
-    }
-
-    if (!res.data.some((r: any) => r?.id === 'master_engine_config')) {
-      await callSupabaseProxy({
-        table: 'app_configs',
-        method: 'POST',
-        upsert: true,
-        payload: {
-          id: 'master_engine_config',
-          value: { userAccessControl: [uacItem] },
-        },
-        timeoutMs: 8000,
-      });
-    }
-  } catch {
-    // non-fatal best-effort sync
-  }
+  return;
 }
 
 /**
@@ -484,6 +409,185 @@ export function compressImageToDataUrl(
   });
 }
 
+export function loadCachedMasterEngineConfig(): Record<string, any> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(MASTER_ENGINE_CACHE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveCachedMasterEngineConfig(cfg: Record<string, any>): void {
+  if (typeof window === 'undefined' || !cfg || typeof cfg !== 'object') return;
+  try {
+    localStorage.setItem(MASTER_ENGINE_CACHE_KEY, JSON.stringify(cfg));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+export function extractOwnerCredentialsFromMaster(masterCfg: Record<string, any> = {}): {
+  emails: string[];
+  phones: string[];
+  cnics: string[];
+} {
+  const emailSet = new Set<string>([PRIMARY_OWNER_EMAIL]);
+  const phoneSet = new Set<string>();
+  const cnicSet = new Set<string>();
+
+  const addEmail = (val: any) => {
+    if (!val) return;
+    if (Array.isArray(val)) {
+      val.forEach(addEmail);
+      return;
+    }
+    const clean = String(val).trim().toLowerCase();
+    if (clean && clean.includes('@')) emailSet.add(clean);
+  };
+
+  const addPhone = (val: any) => {
+    if (!val) return;
+    if (Array.isArray(val)) {
+      val.forEach(addPhone);
+      return;
+    }
+    const digits = normalizePhoneDigits(String(val));
+    if (digits.length >= 10) phoneSet.add(digits);
+  };
+
+  const addCnic = (val: any) => {
+    if (!val) return;
+    if (Array.isArray(val)) {
+      val.forEach(addCnic);
+      return;
+    }
+    const digits = normalizeCnicDigits(String(val));
+    if (digits.length >= 13) cnicSet.add(digits);
+  };
+
+  if (masterCfg && typeof masterCfg === 'object') {
+    addEmail(masterCfg.ownerEmail);
+    addEmail(masterCfg.ownerEmails);
+    addEmail(masterCfg.masterOwnerEmail);
+    addEmail(masterCfg.adminEmail);
+    addEmail(masterCfg.adminEmails);
+    addEmail(masterCfg.vipOwnerEmail);
+    addEmail(masterCfg.vipEmails);
+    addEmail(masterCfg.owner?.email);
+    addEmail(masterCfg.ownerProfile?.email);
+    addEmail(masterCfg.security?.ownerEmail);
+    addEmail(masterCfg.security?.adminEmail);
+    addEmail(masterCfg.security?.adminEmails);
+    addEmail(masterCfg.security?.vipEmails);
+
+    addPhone(masterCfg.ownerPhone);
+    addPhone(masterCfg.ownerPhones);
+    addPhone(masterCfg.masterOwnerPhone);
+    addPhone(masterCfg.adminPhone);
+    addPhone(masterCfg.adminPhones);
+    addPhone(masterCfg.vipOwnerPhone);
+    addPhone(masterCfg.owner?.phone);
+    addPhone(masterCfg.ownerProfile?.phone);
+    addPhone(masterCfg.security?.ownerPhone);
+    addPhone(masterCfg.security?.adminPhone);
+    addPhone(masterCfg.security?.adminPhones);
+
+    addCnic(masterCfg.ownerCnic);
+    addCnic(masterCfg.ownerCnics);
+    addCnic(masterCfg.masterOwnerCnic);
+    addCnic(masterCfg.adminCnic);
+    addCnic(masterCfg.adminCnics);
+    addCnic(masterCfg.vipOwnerCnic);
+    addCnic(masterCfg.owner?.cnic);
+    addCnic(masterCfg.ownerProfile?.cnic);
+    addCnic(masterCfg.security?.ownerCnic);
+    addCnic(masterCfg.security?.adminCnic);
+
+    const adminArraySources = [
+      masterCfg.admins,
+      masterCfg.adminUsers,
+      masterCfg.adminAccounts,
+      masterCfg.ownerList,
+      masterCfg.security?.admins,
+    ];
+    adminArraySources.forEach((src) => {
+      if (!src) return;
+      const items = Array.isArray(src) ? src : typeof src === 'object' ? Object.values(src) : [];
+      items.forEach((item: any) => {
+        if (typeof item === 'string') {
+          if (item.includes('@')) addEmail(item);
+          else if (normalizeCnicDigits(item).length >= 13) addCnic(item);
+          else if (normalizePhoneDigits(item).length >= 10) addPhone(item);
+        } else if (item && typeof item === 'object') {
+          addEmail(item.email);
+          addPhone(item.phone);
+          addCnic(item.cnic);
+        }
+      });
+    });
+
+    const uacList = Array.isArray(masterCfg.userAccessControl)
+      ? masterCfg.userAccessControl
+      : Object.values(masterCfg.userAccessControl || {});
+    uacList.forEach((u: any) => {
+      if (!u || typeof u !== 'object') return;
+      const uEmail = String(u.email || '').trim().toLowerCase();
+      const roleUp = String(u.role || u.accountType || u.tier || u.subscription_tier || u.packagePlan || '')
+        .trim()
+        .toUpperCase();
+      const isMarkedOwnerOrAdmin =
+        Boolean(
+          u.isOwner ||
+            u.is_owner ||
+            u.isAdmin ||
+            u.is_admin ||
+            u.isLifetimeFree ||
+            u.is_lifetime ||
+            ['OWNER', 'ADMIN', 'SUPER_ADMIN', 'MASTER_ADMIN', 'LIFETIME_VIP'].includes(roleUp)
+        ) || (uEmail && emailSet.has(uEmail));
+      if (isMarkedOwnerOrAdmin) {
+        addEmail(u.email);
+        addPhone(u.phone);
+        addCnic(u.cnic);
+      }
+    });
+  }
+
+  return {
+    emails: Array.from(emailSet),
+    phones: Array.from(phoneSet),
+    cnics: Array.from(cnicSet),
+  };
+}
+
+export function isOwnerIdentity(params: {
+  email?: string;
+  phone?: string;
+  cnic?: string;
+  masterCfg?: Record<string, any>;
+}): boolean {
+  const effectiveCfg =
+    params.masterCfg && Object.keys(params.masterCfg).length > 0
+      ? params.masterCfg
+      : loadCachedMasterEngineConfig();
+  const ownerCreds = extractOwnerCredentialsFromMaster(effectiveCfg);
+
+  const email = String(params.email || '').trim().toLowerCase();
+  if (email && ownerCreds.emails.includes(email)) return true;
+
+  const phoneDigits = normalizePhoneDigits(String(params.phone || ''));
+  if (phoneDigits.length >= 10 && ownerCreds.phones.includes(phoneDigits)) return true;
+
+  const cnicDigits = normalizeCnicDigits(String(params.cnic || ''));
+  if (cnicDigits.length >= 13 && ownerCreds.cnics.includes(cnicDigits)) return true;
+
+  return false;
+}
+
 export async function fetchMasterEngineConfigFromSupabase(): Promise<Record<string, any>> {
   const res = await callSupabaseProxy({
     table: 'app_configs',
@@ -491,12 +595,18 @@ export async function fetchMasterEngineConfigFromSupabase(): Promise<Record<stri
     query: 'id=in.(master_engine_config,global_config)&select=id,value',
     timeoutMs: 8000,
   });
-  if (!res.ok || !Array.isArray(res.data)) return {};
+  if (!res.ok || !Array.isArray(res.data)) {
+    return loadCachedMasterEngineConfig();
+  }
   const map: Record<string, any> = {};
   res.data.forEach((row: any) => {
     if (row?.id && row?.value) map[row.id] = row.value;
   });
-  return { ...(map.global_config || {}), ...(map.master_engine_config || {}) };
+  const merged = { ...(map.global_config || {}), ...(map.master_engine_config || {}) };
+  if (Object.keys(merged).length > 0) {
+    saveCachedMasterEngineConfig(merged);
+  }
+  return merged;
 }
 
 export function extractSmsGatewayConfig(masterCfg: Record<string, any>): SmsOtpGatewayConfig {
@@ -516,13 +626,157 @@ export function extractSmsGatewayConfig(masterCfg: Record<string, any>): SmsOtpG
   };
 }
 
+export function parseTimestampMs(val: any): number {
+  if (val === null || val === undefined || val === '') return 0;
+  if (typeof val === 'number') {
+    if (!Number.isFinite(val) || val <= 0) return 0;
+    return val < 1e12 ? val * 1000 : val;
+  }
+  const str = String(val).trim();
+  if (!str) return 0;
+  if (/^\d+(\.\d+)?$/.test(str)) {
+    const num = Number(str);
+    if (!Number.isFinite(num) || num <= 0) return 0;
+    return num < 1e12 ? num * 1000 : num;
+  }
+  const parsed = Date.parse(str);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+export interface ExistingComboMatchResult {
+  matchedUser: any | null;
+  matchedSub: any | null;
+  matchedUac: any | null;
+  matchedFields: string[];
+  existingDeviceId: string;
+}
+
+/**
+ * Strict 6-Field Anti-Fake ID & One-Trial-Per-User Combo Check:
+ * Matches ANY existing row in users, subscriptions, or userAccessControl on:
+ * CNIC, Email, Phone Number, Device ID, Public IP Address, or MAC/Device Fingerprint.
+ */
+export function findExistingAccountComboMatch(params: {
+  email?: string;
+  phone?: string;
+  cnic?: string;
+  deviceId?: string;
+  ipAddress?: string;
+  macAddress?: string;
+  usersList: any[];
+  subsList: any[];
+  uacList?: any[];
+  identityOnly?: boolean;
+}): ExistingComboMatchResult {
+  const emailTarget = String(params.email || '').trim().toLowerCase();
+  const phoneDigits = normalizePhoneDigits(String(params.phone || ''));
+  const cnicDigits = normalizeCnicDigits(String(params.cnic || ''));
+  const devTarget = String(params.deviceId || '').trim();
+  const ipTarget = String(params.ipAddress || '').trim();
+  const macTarget = String(params.macAddress || '').trim().toLowerCase();
+  const identityOnly = Boolean(params.identityOnly);
+
+  const getRowMatchReasons = (r: any): string[] => {
+    if (!r || typeof r !== 'object') return [];
+    const reasons: string[] = [];
+    const rCnic = normalizeCnicDigits(String(r.cnic || ''));
+    if (cnicDigits.length >= 13 && rCnic && rCnic === cnicDigits) reasons.push('CNIC');
+
+    const rEmail = String(r.email || '').trim().toLowerCase();
+    if (emailTarget && emailTarget.includes('@') && rEmail && rEmail === emailTarget) {
+      reasons.push('EMAIL');
+    }
+
+    const rPhone = normalizePhoneDigits(String(r.phone || ''));
+    if (phoneDigits.length >= 10 && rPhone && rPhone === phoneDigits) reasons.push('PHONE');
+
+    if (!identityOnly) {
+      const rDev = String(r.device_id || r.deviceId || '').trim();
+      if (
+        devTarget &&
+        devTarget !== 'DEV-CLIENT-DEFAULT' &&
+        !devTarget.startsWith('RESET_') &&
+        rDev &&
+        !rDev.startsWith('RESET_') &&
+        rDev === devTarget
+      ) {
+        reasons.push('DEVICE_ID');
+      }
+
+      const rIp = String(r.ip_address || r.ipAddress || '').trim();
+      if (ipTarget.length >= 7 && rIp && rIp === ipTarget) reasons.push('IP_ADDRESS');
+
+      const rMac = String(r.mac_address || r.macAddress || '').trim().toLowerCase();
+      if (macTarget.length >= 11 && rMac && rMac === macTarget) reasons.push('MAC_FINGERPRINT');
+    }
+
+    return reasons;
+  };
+
+  const matchedReasons = new Set<string>();
+  let matchedUser: any | null = null;
+  let matchedSub: any | null = null;
+  let matchedUac: any | null = null;
+
+  for (const u of params.usersList || []) {
+    const reasons = getRowMatchReasons(u);
+    if (reasons.length > 0) {
+      reasons.forEach((x) => matchedReasons.add(x));
+      if (!matchedUser) matchedUser = u;
+    }
+  }
+
+  for (const s of params.subsList || []) {
+    const reasons = getRowMatchReasons(s);
+    if (reasons.length > 0) {
+      reasons.forEach((x) => matchedReasons.add(x));
+      if (!matchedSub) matchedSub = s;
+    }
+  }
+
+  for (const a of params.uacList || []) {
+    const reasons = getRowMatchReasons(a);
+    if (reasons.length > 0) {
+      reasons.forEach((x) => matchedReasons.add(x));
+      if (!matchedUac) matchedUac = a;
+    }
+  }
+
+  // Link companion user/sub row by existing matched record's identity or device_id
+  const anchorDev = String(
+    matchedUser?.device_id || matchedSub?.device_id || matchedUac?.device_id || ''
+  ).trim();
+  if (!matchedSub && anchorDev && !anchorDev.startsWith('RESET_')) {
+    matchedSub =
+      (params.subsList || []).find((s) => String(s?.device_id || '').trim() === anchorDev) || null;
+  }
+  if (!matchedUser && anchorDev && !anchorDev.startsWith('RESET_')) {
+    matchedUser =
+      (params.usersList || []).find((u) => String(u?.device_id || '').trim() === anchorDev) || null;
+  }
+
+  const existingDeviceId = String(
+    matchedUser?.device_id || matchedSub?.device_id || matchedUac?.device_id || matchedUac?.deviceId || ''
+  ).trim();
+
+  return {
+    matchedUser,
+    matchedSub,
+    matchedUac,
+    matchedFields: Array.from(matchedReasons),
+    existingDeviceId,
+  };
+}
+
 export interface EvaluatedCloudAccess {
   status: 'ACTIVE' | 'TRIAL' | 'BLOCKED' | 'FREE';
   tier: string;
   expiresAt: number | null;
+  serverNowMs: number;
   reason: string;
   isExpired: boolean;
   forceResetLogout: boolean;
+  forceLogoutReason: string;
   cloudDeviceId: string;
   matchedUser: any | null;
   matchedSub: any | null;
@@ -532,14 +786,19 @@ export interface EvaluatedCloudAccess {
 export function evaluateClientAccessState(params: {
   session: ClientAuthSession | null;
   clientDeviceId: string;
+  clientIpAddress?: string;
+  clientMacAddress?: string;
   usersList: any[];
   clientUsersList?: any[];
   subsList: any[];
   masterCfg: Record<string, any>;
+  serverNowMs?: number;
 }): EvaluatedCloudAccess {
   const {
     session,
     clientDeviceId,
+    clientIpAddress = '',
+    clientMacAddress = '',
     usersList,
     clientUsersList = [],
     subsList,
@@ -549,17 +808,29 @@ export function evaluateClientAccessState(params: {
   const targetPhoneDigits = normalizePhoneDigits(session?.phone || '');
   const targetCnicDigits = normalizeCnicDigits(session?.cnic || '');
   const targetEmail = (session?.email || '').trim().toLowerCase();
+  const targetIp = clientIpAddress.trim();
+  const targetMac = clientMacAddress.trim().toLowerCase();
 
   const matchesRecord = (r: any) => {
     if (!r || typeof r !== 'object') return false;
-    const dev = r.device_id || r.deviceId || '';
-    if (dev && dev === clientDeviceId) return true;
+    const dev = String(r.device_id || r.deviceId || '').trim();
+    if (dev && clientDeviceId && dev === clientDeviceId) return true;
     const p = normalizePhoneDigits(r.phone || '');
     if (targetPhoneDigits && p && p === targetPhoneDigits) return true;
     const c = normalizeCnicDigits(r.cnic || '');
     if (targetCnicDigits && c && c === targetCnicDigits) return true;
-    const em = (r.email || '').trim().toLowerCase();
+    const em = String(r.email || '').trim().toLowerCase();
     if (targetEmail && em && em === targetEmail) return true;
+    return false;
+  };
+
+  const matchesHardwareOrNetwork = (r: any) => {
+    if (!r || typeof r !== 'object') return false;
+    if (matchesRecord(r)) return true;
+    const ip = String(r.ip_address || r.ipAddress || '').trim();
+    if (targetIp && ip && ip === targetIp) return true;
+    const mac = String(r.mac_address || r.macAddress || '').trim().toLowerCase();
+    if (targetMac && mac && mac === targetMac) return true;
     return false;
   };
 
@@ -583,31 +854,92 @@ export function evaluateClientAccessState(params: {
   const resetDeviceId = deviceCandidates.find((d) => d.startsWith('RESET_')) || '';
   const cloudDeviceId = resetDeviceId || deviceCandidates[0] || '';
 
-  // Check if Admin triggered RESET_ on this user's device_id while logged in
-  const forceResetLogout = Boolean(session && resetDeviceId);
+  // Check if Admin triggered RESET_ OR force_logout_at is newer than session.loggedInAt
+  const forceLogoutTs = Math.max(
+    parseTimestampMs(matchedUser?.force_logout_at),
+    parseTimestampMs(matchedSub?.force_logout_at),
+    parseTimestampMs(matchedUac?.force_logout_at),
+    parseTimestampMs(matchedUac?.forceLogoutAt)
+  );
+  const isRemoteForceLogout = Boolean(
+    session && forceLogoutTs > 0 && forceLogoutTs > Number(session.loggedInAt || 0)
+  );
+  const forceResetLogout = Boolean((session && resetDeviceId) || isRemoteForceLogout);
+  const forceLogoutReason = isRemoteForceLogout
+    ? 'Admin ne aapka session remotely logout kiya hai — dobara Login karein.'
+    : resetDeviceId
+    ? 'Admin ne aapka Device Reset kiya hai — dobara Login karein.'
+    : '';
 
   let status: 'ACTIVE' | 'TRIAL' | 'BLOCKED' | 'FREE' = 'TRIAL';
   let tier = 'TRIAL';
   let expiresAt: number | null = null;
   let reason = '';
 
-  const isBlockedFlag = Boolean(
-    matchedUser?.is_blocked ||
-      matchedUser?.isBlocked ||
-      matchedUser?.account_status === 'BLOCKED' ||
-      matchedSub?.is_blocked ||
-      matchedUac?.is_blocked ||
-      matchedUac?.isBlocked
-  );
+  const isRowBlocked = (r: any) =>
+    Boolean(
+      r &&
+        (r.is_blocked ||
+          r.isBlocked ||
+          String(r.account_status || '').toUpperCase() === 'BLOCKED' ||
+          String(r.status || '').toUpperCase() === 'BLOCKED')
+    );
+
+  // Check if any matching record (Account, Device ID, IP, MAC, CNIC, or Email) is blocked
+  const blockedAnyRecord =
+    [matchedUser, matchedSub, matchedUac].find(isRowBlocked) ||
+    usersList.find((r) => matchesHardwareOrNetwork(r) && isRowBlocked(r)) ||
+    subsList.find((r) => matchesHardwareOrNetwork(r) && isRowBlocked(r)) ||
+    uacList.find((r: any) => matchesHardwareOrNetwork(r) && isRowBlocked(r)) ||
+    null;
+
+  // Check optional blocklists inside master_engine_config
+  const inList = (arr: any, val: string) =>
+    Boolean(
+      val &&
+        Array.isArray(arr) &&
+        arr.some((x) => String(x || '').trim().toLowerCase() === val.toLowerCase())
+    );
+  const isMasterBlocklisted =
+    inList(masterCfg?.blockedIps, targetIp) ||
+    inList(masterCfg?.blockedMacs, targetMac) ||
+    inList(masterCfg?.blockedDevices, clientDeviceId) ||
+    inList(masterCfg?.blockedEmails, targetEmail) ||
+    (targetCnicDigits &&
+      Array.isArray(masterCfg?.blockedCnics) &&
+      masterCfg.blockedCnics.some((x: any) => normalizeCnicDigits(String(x || '')) === targetCnicDigits));
+
+  const isBlockedFlag = Boolean(blockedAnyRecord || isMasterBlocklisted);
+
+  const isOwnerUser =
+    isOwnerIdentity({
+      email: targetEmail || matchedUser?.email || matchedSub?.email || matchedUac?.email,
+      phone: targetPhoneDigits || matchedUser?.phone || matchedSub?.phone || matchedUac?.phone,
+      cnic: targetCnicDigits || matchedUser?.cnic || matchedSub?.cnic || matchedUac?.cnic,
+      masterCfg,
+    }) ||
+    Boolean(
+      matchedUser?.is_owner ||
+        matchedUser?.is_admin ||
+        matchedUac?.isOwner ||
+        matchedUac?.is_owner ||
+        matchedUac?.isAdmin ||
+        matchedUac?.is_admin ||
+        ['OWNER', 'ADMIN', 'SUPER_ADMIN', 'MASTER_ADMIN'].includes(
+          String(matchedUser?.role || matchedUac?.role || '').toUpperCase()
+        )
+    );
 
   const isLifetimeFlag = Boolean(
-    matchedUser?.is_lifetime ||
+    isOwnerUser ||
+      matchedUser?.is_lifetime ||
       matchedSub?.is_lifetime ||
       matchedUac?.is_lifetime ||
       matchedUac?.isLifetimeFree ||
-      matchedSub?.subscription_tier === 'LIFETIME_VIP' ||
-      matchedUac?.subscription_tier === 'LIFETIME_VIP' ||
-      matchedUac?.packagePlan === 'LIFETIME_VIP'
+      String(matchedUser?.subscription_tier || '').toUpperCase() === 'LIFETIME_VIP' ||
+      String(matchedSub?.subscription_tier || '').toUpperCase() === 'LIFETIME_VIP' ||
+      String(matchedUac?.subscription_tier || '').toUpperCase() === 'LIFETIME_VIP' ||
+      String(matchedUac?.packagePlan || '').toUpperCase() === 'LIFETIME_VIP'
   );
 
   const rawCloudExpiry = Math.max(
@@ -620,41 +952,54 @@ export function evaluateClientAccessState(params: {
       matchedUser?.activated_until_ms,
       matchedUser?.activated_until,
       matchedUser?.subscription_expiry,
+      matchedUser?.trial_end,
       matchedUac?.subscription_expiry,
       matchedUac?.subscriptionExpiresAt,
       matchedUac?.activatedUntil,
       matchedUac?.activated_until,
       matchedUac?.activated_until_ms,
       matchedUac?.trialExpiresAt,
-    ].map((v) => (Number.isFinite(Number(v)) ? Number(v) : 0))
+    ].map(parseTimestampMs)
   );
 
   const rawTrialStart =
-    Number(
-      matchedSub?.trial_start_ms ||
-        matchedSub?.trial_start_time ||
-        matchedUser?.trial_start_time ||
-        matchedUser?.registered_at_epoch_ms ||
-        matchedUac?.trial_start_time ||
-        matchedUac?.trialStartTime ||
-        session?.trialStartTime ||
-        session?.loggedInAt ||
-        0
-    ) || 0;
+    [
+      matchedSub?.trial_start_ms,
+      matchedSub?.trial_start_time,
+      matchedUser?.trial_start,
+      matchedUser?.trial_start_time,
+      matchedUser?.registered_at_epoch_ms,
+      matchedUac?.trial_start_time,
+      matchedUac?.trialStartTime,
+      session?.trialStartTime,
+      session?.loggedInAt,
+    ]
+      .map(parseTimestampMs)
+      .find((t) => t > 0) || 0;
 
   const isPaidActivated = Boolean(
-    matchedSub?.is_activated ||
+    isOwnerUser ||
+      matchedSub?.is_activated ||
       matchedUser?.is_activated ||
-      matchedUser?.account_status === 'ACTIVE' ||
-      matchedUser?.account_status === 'APPROVED' ||
+      String(matchedUser?.account_status || '').toUpperCase() === 'ACTIVE' ||
+      String(matchedUser?.account_status || '').toUpperCase() === 'APPROVED' ||
+      String(matchedUser?.status || '').toUpperCase() === 'ACTIVE' ||
+      String(matchedSub?.status || '').toUpperCase() === 'ACTIVE' ||
       matchedUac?.is_activated ||
       matchedUac?.isPaidActive
   );
 
-  if (isBlockedFlag) {
+  if (isOwnerUser) {
+    status = 'FREE';
+    tier = 'LIFETIME_VIP';
+    expiresAt = null;
+    reason = '';
+  } else if (isBlockedFlag) {
     status = 'BLOCKED';
     tier = 'BLOCKED';
     reason =
+      blockedAnyRecord?.block_reason ||
+      blockedAnyRecord?.blockReason ||
       matchedUser?.block_reason ||
       matchedUac?.block_reason ||
       matchedUac?.blockReason ||
@@ -666,12 +1011,14 @@ export function evaluateClientAccessState(params: {
   } else if (isPaidActivated) {
     const cloudTier = String(
       matchedSub?.subscription_tier ||
+        matchedSub?.package_name ||
+        matchedUser?.subscription_tier ||
+        matchedUser?.package_name ||
         matchedUac?.subscription_tier ||
         matchedUac?.packagePlan ||
         matchedUac?.planName ||
         'PRO'
     );
-    // Notice: Tariq Mehmood in UAC has is_activated: true with subscription_tier: 'TRIAL'
     if (cloudTier.toUpperCase() === 'TRIAL') {
       status = 'TRIAL';
       tier = 'TRIAL';
@@ -705,22 +1052,39 @@ export function evaluateClientAccessState(params: {
       ? Boolean(masterCfg.layoutConfig.autoLockOnSubscriptionExpiry)
       : true;
 
+  // Strictly compare against authentic Server Time (never phone's local clock)
+  const effectiveServerNowMs =
+    params.serverNowMs && params.serverNowMs > 1_600_000_000_000
+      ? params.serverNowMs
+      : getEffectiveServerNowMs();
+
+  const clockTampered = Boolean(
+    !isOwnerUser &&
+      (isLocalClockRolledBack() ||
+        (effectiveServerNowMs > 0 && rawTrialStart > 0 && effectiveServerNowMs + 60_000 < rawTrialStart))
+  );
+
   const isExpired = Boolean(
-    autoLockEnabled &&
+    !isOwnerUser &&
+      autoLockEnabled &&
       status !== 'FREE' &&
       status !== 'BLOCKED' &&
-      expiresAt !== null &&
-      expiresAt > 0 &&
-      Date.now() > expiresAt
+      (clockTampered ||
+        (expiresAt !== null &&
+          expiresAt > 0 &&
+          effectiveServerNowMs > 0 &&
+          effectiveServerNowMs > expiresAt))
   );
 
   return {
     status,
     tier,
     expiresAt,
+    serverNowMs: effectiveServerNowMs,
     reason,
     isExpired,
-    forceResetLogout,
+    forceResetLogout: isOwnerUser ? false : forceResetLogout,
+    forceLogoutReason: isOwnerUser ? '' : forceLogoutReason,
     cloudDeviceId,
     matchedUser,
     matchedSub,
@@ -1014,4 +1378,209 @@ export async function verifyBiometricPasskey(
     }
   }
   return { ok: true, mode: 'DEVICE_PASSKEY' };
+}
+
+// ============================================================================
+// DEVICE TELEMETRY: PUBLIC IP (ipify), MAC/DEVICE FINGERPRINT, MODEL & ONLINE SYNC
+// ============================================================================
+export const CLIENT_IP_STORAGE_KEY = 'boss_client_public_ip_v1';
+export const CLIENT_MAC_STORAGE_KEY = 'boss_client_mac_fingerprint_v1';
+
+export function getDeviceModelName(): string {
+  if (typeof navigator === 'undefined') return 'Web Browser';
+  const ua = navigator.userAgent || '';
+  let os = 'Desktop';
+  if (/android/i.test(ua)) os = 'Android';
+  else if (/iPhone|iPad|iPod/i.test(ua)) os = 'iOS';
+  else if (/Windows/i.test(ua)) os = 'Windows';
+  else if (/Mac OS/i.test(ua)) os = 'macOS';
+  else if (/Linux/i.test(ua)) os = 'Linux';
+
+  let browser = 'Browser';
+  if (/Edg\//i.test(ua)) browser = 'Edge';
+  else if (/Chrome\//i.test(ua)) browser = 'Chrome';
+  else if (/Safari\//i.test(ua) && !/Chrome/i.test(ua)) browser = 'Safari';
+  else if (/Firefox\//i.test(ua)) browser = 'Firefox';
+
+  return `${browser} (${os})`;
+}
+
+export function getOrCreateDeviceMacFingerprint(): string {
+  if (typeof window === 'undefined') return 'BC:00:00:00:00:01';
+  try {
+    const existing = localStorage.getItem(CLIENT_MAC_STORAGE_KEY);
+    if (existing && existing.trim()) return existing.trim();
+
+    const seed = [
+      navigator.userAgent || '',
+      navigator.language || '',
+      String(navigator.hardwareConcurrency || 4),
+      String(window.screen?.width || 0),
+      String(window.screen?.height || 0),
+      String(window.screen?.colorDepth || 24),
+      Intl.DateTimeFormat().resolvedOptions().timeZone || '',
+    ].join('|');
+
+    // Deterministic 48-bit hash formatted as XX:XX:XX:XX:XX:XX + short suffix
+    let h1 = 0x811c9dc5;
+    let h2 = 0x12345678;
+    for (let i = 0; i < seed.length; i++) {
+      const ch = seed.charCodeAt(i);
+      h1 ^= ch;
+      h1 = Math.imul(h1, 0x01000193);
+      h2 = Math.imul(h2 ^ ch, 0x85ebca6b);
+    }
+    const bytes = [
+      ((h1 >>> 24) & 0xfc) | 0x02,
+      (h1 >>> 16) & 0xff,
+      (h1 >>> 8) & 0xff,
+      h1 & 0xff,
+      (h2 >>> 16) & 0xff,
+      h2 & 0xff,
+    ];
+    const mac = bytes.map((b) => b.toString(16).padStart(2, '0').toUpperCase()).join(':');
+    localStorage.setItem(CLIENT_MAC_STORAGE_KEY, mac);
+    return mac;
+  } catch {
+    return 'BC:DE:FA:01:02:03';
+  }
+}
+
+export function getCachedPublicIpAddress(): string {
+  if (typeof window === 'undefined') return '';
+  try {
+    const raw = localStorage.getItem(CLIENT_IP_STORAGE_KEY);
+    if (!raw) return '';
+    const parsed = JSON.parse(raw);
+    return typeof parsed?.ip === 'string' ? parsed.ip : '';
+  } catch {
+    return '';
+  }
+}
+
+export async function getClientPublicIpAddress(): Promise<string> {
+  if (typeof window === 'undefined') return '';
+  try {
+    const raw = localStorage.getItem(CLIENT_IP_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed?.ip && Date.now() - Number(parsed.fetchedAt || 0) < 10 * 60 * 1000) {
+        return String(parsed.ip);
+      }
+    }
+  } catch {
+    // ignore cache error
+  }
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
+    const resp = await fetch('https://api.ipify.org?format=json', {
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      if (data?.ip) {
+        const ip = String(data.ip).trim();
+        try {
+          localStorage.setItem(
+            CLIENT_IP_STORAGE_KEY,
+            JSON.stringify({ ip, fetchedAt: Date.now() })
+          );
+        } catch {
+          // ignore storage error
+        }
+        return ip;
+      }
+    }
+  } catch {
+    // non-fatal network fallback
+  }
+  return getCachedPublicIpAddress();
+}
+
+export async function collectAndSyncUserTelemetryToSupabase(params: {
+  deviceId: string;
+  session?: ClientAuthSession | null;
+  companyName?: string;
+  selfieUrl?: string;
+  shopPhotoUrl?: string;
+  isOnline?: boolean;
+  extraFields?: Record<string, any>;
+}): Promise<void> {
+  if (!params.deviceId || params.deviceId.startsWith('RESET_')) return;
+  try {
+    const [ip, gps] = await Promise.all([
+      getClientPublicIpAddress(),
+      Promise.resolve(loadStoredGpsLocation()),
+    ]);
+    const mac = getOrCreateDeviceMacFingerprint();
+    const model = getDeviceModelName();
+    const bio = loadBiometricBinding();
+    const now = Date.now();
+    const nowIso = new Date(now).toISOString();
+
+    const payload: Record<string, any> = {
+      ip_address: ip || undefined,
+      mac_address: mac,
+      device_model: model,
+      fingerprint_enabled: Boolean(bio),
+      is_online: params.isOnline !== undefined ? params.isOnline : true,
+      last_seen: nowIso,
+      last_cloud_sync: now,
+      ...(params.companyName ? { company_name: params.companyName } : {}),
+      ...(params.session?.name ? { name: params.session.name } : {}),
+      ...(params.session?.email ? { email: params.session.email } : {}),
+      ...(params.session?.phone ? { phone: params.session.phone } : {}),
+      ...(params.session?.cnic ? { cnic: params.session.cnic } : {}),
+      ...(params.session?.shopAddress ? { shop_address: params.session.shopAddress } : {}),
+      ...(params.selfieUrl || params.session?.selfieUrl
+        ? { selfie_url: params.selfieUrl || params.session?.selfieUrl }
+        : {}),
+      ...(params.shopPhotoUrl || params.session?.shopPhotoUrl
+        ? { shop_photo_url: params.shopPhotoUrl || params.session?.shopPhotoUrl }
+        : {}),
+      ...(gps
+        ? {
+            latitude: gps.latitude,
+            longitude: gps.longitude,
+            location_url: gps.locationUrl,
+          }
+        : {}),
+      ...(params.extraFields || {}),
+    };
+
+    Object.keys(payload).forEach((k) => {
+      if (payload[k] === undefined) delete payload[k];
+    });
+
+    await callSupabaseProxy({
+      table: 'users',
+      method: 'PATCH',
+      query: `device_id=eq.${encodeURIComponent(params.deviceId)}`,
+      payload,
+      timeoutMs: 7000,
+    });
+  } catch {
+    // non-fatal background telemetry
+  }
+}
+
+export async function markUserOfflineInSupabase(deviceId: string): Promise<void> {
+  if (!deviceId || deviceId.startsWith('RESET_')) return;
+  try {
+    await callSupabaseProxy({
+      table: 'users',
+      method: 'PATCH',
+      query: `device_id=eq.${encodeURIComponent(deviceId)}`,
+      payload: {
+        is_online: false,
+        last_seen: new Date().toISOString(),
+      },
+      timeoutMs: 4000,
+    });
+  } catch {
+    // non-fatal
+  }
 }

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   AlertOctagon,
+  Camera,
   CheckCircle2,
   Clock,
   Copy,
@@ -11,7 +12,7 @@ import {
   Send,
   ShieldAlert,
   ShieldCheck,
-  Zap,
+  Upload,
 } from 'lucide-react';
 import bossLionLogoImg from '../assets/images/boss_lion_logo_1791741005749.jpg';
 import {
@@ -19,6 +20,10 @@ import {
   SubscriptionPackageConfig,
 } from '../types/bossModels';
 import { ClientAuthSession, fetchAdminServer } from '../utils/adminApiConfig';
+import {
+  callSupabaseProxy,
+  uploadImageToUserUploadsBucket,
+} from '../utils/supabaseClientConfig';
 
 // =========================================================================
 // 1. NON-DISMISSIBLE ACCOUNT BLOCKED LOCK MODAL (RED SECURITY GATE)
@@ -63,7 +68,7 @@ export const AccountBlockedLockModal: React.FC<AccountBlockedLockModalProps> = (
               ACCOUNT BLOCKED BY ADMIN
             </h2>
             <p className="text-[11px] text-rose-200/80 truncate">
-              {authSession.name} · {authSession.phone}
+              {authSession.name} · {authSession.phone || authSession.email}
             </p>
           </div>
         </div>
@@ -133,6 +138,7 @@ interface SubscriptionExpiredLockModalProps {
   isSyncing: boolean;
   onRefreshCloudStatus: () => Promise<boolean>;
   onLogout: () => void;
+  mainLogoUrl?: string;
 }
 
 export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModalProps> = ({
@@ -144,6 +150,7 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
   isSyncing,
   onRefreshCloudStatus,
   onLogout,
+  mainLogoUrl,
 }) => {
   const [selectedPkg, setSelectedPkg] = useState<SubscriptionPackageConfig | null>(
     packages[0] || null
@@ -151,15 +158,30 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
   const [selectedBank, setSelectedBank] = useState<string>(
     bankAccounts[0]?.bankName || 'Easypaisa Wallet'
   );
+  const [amountInput, setAmountInput] = useState<string>(() =>
+    String(packages[0]?.priceRs ?? packages[0]?.price ?? 3000)
+  );
   const [tidInput, setTidInput] = useState('');
+  const [receiptUrl, setReceiptUrl] = useState('');
+  const [isUploadingReceipt, setIsUploadingReceipt] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [orderNotice, setOrderNotice] = useState<string | null>(null);
   const [activeOrder, setActiveOrder] = useState<any>(null);
 
   useEffect(() => {
-    if (!selectedPkg && packages.length > 0) setSelectedPkg(packages[0]);
+    if (!selectedPkg && packages.length > 0) {
+      setSelectedPkg(packages[0]);
+      setAmountInput(String(packages[0].priceRs ?? packages[0].price ?? 3000));
+    }
   }, [packages, selectedPkg]);
+
+  useEffect(() => {
+    const activeBanks = bankAccounts.filter((b) => b.isActive !== false);
+    if (activeBanks.length > 0 && !activeBanks.some((b) => b.bankName === selectedBank)) {
+      setSelectedBank(activeBanks[0].bankName);
+    }
+  }, [bankAccounts, selectedBank]);
 
   useEffect(() => {
     const blockEscape = (e: KeyboardEvent) => {
@@ -173,6 +195,40 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
   }, []);
 
   const checkOrder = async () => {
+    try {
+      const sbRes = await callSupabaseProxy({
+        table: 'subscriptions',
+        method: 'GET',
+        query: `device_id=eq.${encodeURIComponent(clientDeviceId)}&select=*&limit=1`,
+        timeoutMs: 7000,
+      });
+      const subRow = Array.isArray(sbRes.data) ? sbRes.data[0] : null;
+      if (subRow && (subRow.last_payment_tid || subRow.status)) {
+        const st = String(subRow.status || 'PENDING').toUpperCase();
+        const isApproved =
+          Boolean(subRow.is_activated) ||
+          st === 'ACTIVE' ||
+          st === 'APPROVED' ||
+          st === 'APPROVED_AUTO' ||
+          st === 'APPROVED_MANUAL';
+        if (subRow.last_payment_tid || isApproved) {
+          setActiveOrder({
+            tid: subRow.last_payment_tid || 'CLOUD-SUB',
+            status: isApproved ? 'APPROVED_MANUAL' : st,
+            amount: subRow.amount,
+            bankName: subRow.payment_method,
+            receiptUrl: subRow.receipt_url,
+          });
+        }
+        if (isApproved) {
+          await onRefreshCloudStatus();
+          return;
+        }
+      }
+    } catch {
+      // ignore direct check error
+    }
+
     try {
       const resp = await fetchAdminServer(
         `/api/client-order-status/${encodeURIComponent(clientDeviceId)}`
@@ -196,27 +252,102 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
     checkOrder();
   }, [clientDeviceId]);
 
-  useEffect(() => {
-    if (!activeOrder || activeOrder.status !== 'PENDING') return;
-    const t = setInterval(checkOrder, 5000);
-    return () => clearInterval(t);
-  }, [activeOrder]);
+  const handleReceiptUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setIsUploadingReceipt(true);
+    setOrderNotice(null);
+    try {
+      const uploaded = await uploadImageToUserUploadsBucket({
+        fileOrDataUrl: file,
+        folder: 'receipts',
+        deviceId: clientDeviceId,
+        tag: 'payment_receipt',
+      });
+      setReceiptUrl(uploaded.url);
+    } catch {
+      setOrderNotice('Receipt screenshot upload nahi ho saka, dobara try karein.');
+    } finally {
+      setIsUploadingReceipt(false);
+    }
+  };
 
   const handleSubmitTid = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!tidInput.trim()) {
+    const cleanTid = tidInput.trim().toUpperCase();
+    if (!cleanTid) {
       setOrderNotice('Bank receipt ki Transaction ID (TID) darj karein.');
       return;
     }
     const pkg = selectedPkg || packages[0];
-    if (!pkg) return;
+    const pkgAmount = Number(amountInput) || pkg?.priceRs || pkg?.price || 3000;
 
     setIsSubmitting(true);
     setOrderNotice(null);
     try {
+      const now = Date.now();
+      const nowIso = new Date(now).toISOString();
+      const subPayload: Record<string, any> = {
+        device_id: clientDeviceId,
+        user_name: authSession.name || 'Client',
+        phone: authSession.phone || '',
+        email: authSession.email || '',
+        cnic: authSession.cnic || '',
+        package_name: pkg?.name || 'Monthly Pro Plan',
+        subscription_tier: pkg?.planCode || 'MONTHLY',
+        amount: pkgAmount,
+        payment_method: selectedBank,
+        last_payment_tid: cleanTid,
+        ...(receiptUrl ? { receipt_url: receiptUrl } : {}),
+        status: 'PENDING',
+        last_updated: now,
+        updated_at: nowIso,
+      };
+
+      const [sbSubRes] = await Promise.all([
+        callSupabaseProxy({
+          table: 'subscriptions',
+          method: 'POST',
+          upsert: true,
+          payload: subPayload,
+          timeoutMs: 12000,
+        }),
+        callSupabaseProxy({
+          table: 'users',
+          method: 'PATCH',
+          query: `device_id=eq.${encodeURIComponent(clientDeviceId)}`,
+          payload: {
+            last_payment_tid: cleanTid,
+            package_name: pkg?.name || 'Monthly Pro Plan',
+            last_cloud_sync: now,
+          },
+          timeoutMs: 8000,
+        }).catch(() => ({ ok: false })),
+      ]);
+
+      if (!sbSubRes.ok) {
+        setOrderNotice(sbSubRes.error || 'Supabase par payment details save nahi ho sakin.');
+        return;
+      }
+
+      const submittedOrder = {
+        tid: cleanTid,
+        status: 'PENDING',
+        amount: pkgAmount,
+        bankName: selectedBank,
+        packageName: pkg?.name || 'Plan',
+        receiptUrl,
+      };
+      setActiveOrder(submittedOrder);
+      setOrderNotice(
+        '✅ Payment TID aur Receipt Supabase par Admin Panel ko send ho chuki hai! Verify hote hi App unlock ho jaye gi.'
+      );
+
+      // Non-fatal optional ping to Admin Webhook server for instant email robot matching
       const bankObj =
         bankAccounts.find((b) => b.bankName === selectedBank) || bankAccounts[0];
-      const resp = await fetchAdminServer('/api/client-submit-order', {
+      fetchAdminServer('/api/client-submit-order', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -225,32 +356,31 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
           clientPhone: authSession.phone,
           clientEmail: authSession.email,
           clientCnic: authSession.cnic,
-          packageId: pkg.id,
-          packageName: pkg.name,
-          planCode: pkg.planCode || 'MONTHLY',
-          durationMonths: pkg.durationMonths || 1,
-          amountRs: pkg.priceRs || pkg.price || 3000,
+          packageId: pkg?.id || 'pkg-custom',
+          packageName: pkg?.name || 'Monthly Pro Plan',
+          planCode: pkg?.planCode || 'MONTHLY',
+          durationMonths: pkg?.durationMonths || 1,
+          amountRs: pkgAmount,
           bankAccountId: bankObj?.id || '',
           bankName: selectedBank,
           accountTitle: bankObj?.accountTitle || 'Syed Saboor Nawab',
           accountNumber: bankObj?.accountNumber || '03105524225',
-          tid: tidInput.trim(),
+          tid: cleanTid,
+          receiptUrl,
         }),
-      });
-      const data = await resp.json();
-      if (!resp.ok || !data?.ok) {
-        setOrderNotice(data?.error || 'Order submit nahi ho saka.');
-        return;
-      }
-      setActiveOrder(data.order);
-      if (data.isApprovedNow) {
-        setOrderNotice('🎉 Payment Verify ho gayi! App unlock ho rahi hai...');
-        await onRefreshCloudStatus();
-      } else {
-        setOrderNotice('✅ TID submit ho gayi hai. Admin / Robot verify karte hi App khul jaye gi!');
-      }
-    } catch {
-      setOrderNotice('Server se rabta nahi ho saka. WhatsApp par receipt bhej dein.');
+        timeoutMs: 6000,
+      })
+        .then(async (r) => {
+          const d = await r.json().catch(() => ({}));
+          if (d?.ok && d?.isApprovedNow) {
+            setActiveOrder(d.order);
+            setOrderNotice('🎉 Payment Verify ho gayi! App unlock ho rahi hai...');
+            await onRefreshCloudStatus();
+          }
+        })
+        .catch(() => {});
+    } catch (err: any) {
+      setOrderNotice(err?.message || 'Payment submit karte waqt error aaya.');
     } finally {
       setIsSubmitting(false);
     }
@@ -263,7 +393,7 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
         <div className="flex items-center justify-between gap-2 border-b border-slate-800 pb-3 flex-wrap">
           <div className="flex items-center gap-2.5 min-w-0">
             <img
-              src={bossLionLogoImg}
+              src={mainLogoUrl || bossLionLogoImg}
               alt="Boss Aluminium"
               className="w-10 h-10 rounded-full object-cover border-2 border-[#F5B738] shrink-0"
             />
@@ -275,7 +405,7 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
                 </h2>
               </div>
               <p className="text-[11px] text-slate-300 truncate">
-                {authSession.name} ({authSession.phone}) · ID: {clientDeviceId}
+                {authSession.name} ({authSession.phone || authSession.email}) · ID: {clientDeviceId}
                 {expiresAt ? ` · Expired: ${new Date(expiresAt).toLocaleDateString('en-GB')}` : ''}
               </p>
             </div>
@@ -312,7 +442,10 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
                 <button
                   key={pkg.id || idx}
                   type="button"
-                  onClick={() => setSelectedPkg(pkg)}
+                  onClick={() => {
+                    setSelectedPkg(pkg);
+                    setAmountInput(String(price));
+                  }}
                   className={`text-left p-3 rounded-xl border transition-all cursor-pointer space-y-1 ${
                     selected
                       ? 'bg-amber-500/15 border-[#F5B738] ring-1 ring-[#F5B738]'
@@ -394,17 +527,17 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
             </div>
           )}
 
-          {/* TID Submission Form */}
+          {/* TID + Amount + Receipt Screenshot Form */}
           <form
             onSubmit={handleSubmitTid}
             className="p-3.5 rounded-xl bg-[#14181F] border border-[#F5B738]/50 space-y-2.5 text-xs"
           >
             <div className="font-black text-[#F5B738] flex items-center gap-1.5">
               <ShieldCheck className="w-4 h-4" />
-              <span>Payment Raseed ki TID Submit Karein (Auto-Unlock)</span>
+              <span>Payment TID, Amount &amp; Raseed Screenshot Submit Karein</span>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
               <select
                 value={selectedBank}
                 onChange={(e) => setSelectedBank(e.target.value)}
@@ -420,6 +553,16 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
               </select>
 
               <input
+                type="number"
+                value={amountInput}
+                onChange={(e) => setAmountInput(e.target.value)}
+                placeholder="Amount (Rs.)"
+                min={1}
+                className="px-3 py-2 rounded-lg bg-[#0C1017] border border-slate-700 text-emerald-300 font-mono font-bold text-xs outline-none"
+                required
+              />
+
+              <input
                 type="text"
                 value={tidInput}
                 onChange={(e) => setTidInput(e.target.value)}
@@ -429,10 +572,46 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
               />
             </div>
 
+            {/* Transaction Receipt Screenshot Upload */}
+            <label className="cursor-pointer rounded-xl bg-[#0C1017] border border-dashed border-slate-700 hover:border-[#F5B738] p-2.5 flex items-center justify-between gap-2">
+              <input
+                type="file"
+                accept="image/*"
+                onChange={handleReceiptUpload}
+                className="hidden"
+              />
+              {receiptUrl ? (
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <img
+                    src={receiptUrl}
+                    alt="Payment Receipt"
+                    className="w-10 h-10 object-cover rounded-lg border border-emerald-500/60 shrink-0"
+                  />
+                  <span className="text-[11px] font-bold text-emerald-400 truncate">
+                    ✓ Transaction Screenshot Attached (Tap to change)
+                  </span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 text-slate-300">
+                  {isUploadingReceipt ? (
+                    <RefreshCw className="w-4 h-4 text-[#F5B738] animate-spin shrink-0" />
+                  ) : (
+                    <Camera className="w-4 h-4 text-[#F5B738] shrink-0" />
+                  )}
+                  <span className="text-[11px] font-semibold">
+                    {isUploadingReceipt
+                      ? 'Uploading Receipt Screenshot...'
+                      : 'Upload Payment Screenshot / Raseed (Recommended)'}
+                  </span>
+                </div>
+              )}
+              <Upload className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+            </label>
+
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <a
                 href={`https://wa.me/923105524225?text=${encodeURIComponent(
-                  `Assalam-o-Alaikum Admin, I sent payment for ${selectedPkg?.name || 'Plan'}. Name: ${authSession.name}, Phone: ${authSession.phone}, Device: ${clientDeviceId}, TID: ${tidInput}`
+                  `Assalam-o-Alaikum Admin, I sent Rs. ${amountInput} payment for ${selectedPkg?.name || 'Plan'}. Name: ${authSession.name}, Phone: ${authSession.phone}, Device: ${clientDeviceId}, TID: ${tidInput}`
                 )}`}
                 target="_blank"
                 rel="noreferrer"
@@ -444,7 +623,7 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
 
               <button
                 type="submit"
-                disabled={isSubmitting || !tidInput.trim()}
+                disabled={isSubmitting || isUploadingReceipt || !tidInput.trim()}
                 className="boss-flat-btn px-4 py-2 rounded-lg bg-[#F5B738] hover:bg-amber-400 text-black font-black text-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
               >
                 {isSubmitting ? (

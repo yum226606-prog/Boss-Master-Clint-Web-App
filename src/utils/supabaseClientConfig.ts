@@ -1,4 +1,4 @@
-import { createClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
 export const DEFAULT_SUPABASE_URL = (
   import.meta.env.VITE_SUPABASE_URL || 'https://sumeemoqtnveiftzjhsl.supabase.co'
@@ -9,24 +9,54 @@ export const DEFAULT_PUBLISHABLE_KEY = (
   'sb_publishable_rEQFsCRG9_kjgPvauNvocg_hhxDPjOd'
 ).trim();
 
-const resolvedSupabaseUrl = (
-  (typeof window !== 'undefined' ? localStorage.getItem('boss_custom_supabase_url') : null) ||
-  DEFAULT_SUPABASE_URL
-)
-  .replace(/\/rest\/v1\/?$/i, '')
-  .replace(/\/$/, '');
+export function normalizeSupabaseUrl(raw: string): string {
+  return String(raw || '')
+    .trim()
+    .replace(/\/rest\/v1\/?$/i, '')
+    .replace(/\/$/, '');
+}
 
-const resolvedSupabaseKey =
-  (typeof window !== 'undefined' ? localStorage.getItem('boss_custom_supabase_key') : null) ||
-  DEFAULT_PUBLISHABLE_KEY;
+export function getActiveSupabaseCredentials(): { url: string; key: string } {
+  const customUrl =
+    typeof window !== 'undefined' ? localStorage.getItem('boss_custom_supabase_url') : null;
+  const customKey =
+    typeof window !== 'undefined' ? localStorage.getItem('boss_custom_supabase_key') : null;
+  return {
+    url: normalizeSupabaseUrl(customUrl || DEFAULT_SUPABASE_URL),
+    key: (customKey || DEFAULT_PUBLISHABLE_KEY).trim(),
+  };
+}
 
-export const supabase = createClient(resolvedSupabaseUrl, resolvedSupabaseKey, {
-  auth: {
-    detectSessionInUrl: true,
-    persistSession: true,
-    autoRefreshToken: true,
-  },
-});
+function buildSupabaseClient(url: string, key: string): SupabaseClient {
+  return createClient(url, key, {
+    auth: {
+      detectSessionInUrl: true,
+      persistSession: true,
+      autoRefreshToken: true,
+    },
+  });
+}
+
+const initialCreds = getActiveSupabaseCredentials();
+export let supabase: SupabaseClient = buildSupabaseClient(initialCreds.url, initialCreds.key);
+
+export function reinitializeSupabaseClient(newUrl: string, newKey: string): boolean {
+  const cleanUrl = normalizeSupabaseUrl(newUrl);
+  const cleanKey = String(newKey || '').trim();
+  if (!cleanUrl.startsWith('http') || !cleanKey) return false;
+  const current = getActiveSupabaseCredentials();
+  if (current.url === cleanUrl && current.key === cleanKey) return false;
+  if (typeof window !== 'undefined') {
+    try {
+      localStorage.setItem('boss_custom_supabase_url', cleanUrl);
+      localStorage.setItem('boss_custom_supabase_key', cleanKey);
+    } catch {
+      // ignore storage errors
+    }
+  }
+  supabase = buildSupabaseClient(cleanUrl, cleanKey);
+  return true;
+}
 
 
 export interface SmsOtpGatewayConfig {
@@ -59,6 +89,174 @@ export const DEFAULT_SMS_GATEWAY_CONFIG: SmsOtpGatewayConfig = {
     'BOSS Aluminium & Glass Verification Code: {OTP}. Valid for 10 minutes. Do not share this code.',
   allowFallbackOtpWhenUnconfigured: true,
 };
+
+export const SERVER_TIME_CACHE_KEY = 'boss_server_clock_hwm_v1';
+
+let lastObservedServerMs = 0;
+let lastObservedPerfMs = 0;
+
+export function parseServerEpochMs(val: any): number {
+  if (val === null || val === undefined || val === '') return 0;
+  if (typeof val === 'number') {
+    if (!Number.isFinite(val) || val <= 0) return 0;
+    return val < 1e12 ? Math.round(val * 1000) : Math.round(val);
+  }
+  if (typeof val === 'object') {
+    const candidate =
+      val.server_time_ms ??
+      val.get_server_time_ms ??
+      val.time_ms ??
+      val.serverTimeMs ??
+      val.now ??
+      val.timestamp;
+    if (candidate !== undefined) return parseServerEpochMs(candidate);
+  }
+  const str = String(val).trim();
+  if (!str) return 0;
+  if (/^\d+(\.\d+)?$/.test(str)) {
+    const num = Number(str);
+    if (!Number.isFinite(num) || num <= 0) return 0;
+    return num < 1e12 ? Math.round(num * 1000) : Math.round(num);
+  }
+  const parsed = Date.parse(str);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+export function getStoredServerTimeHwmMs(): number {
+  if (typeof window === 'undefined') return 0;
+  try {
+    const raw = localStorage.getItem(SERVER_TIME_CACHE_KEY);
+    if (!raw) return 0;
+    const parsed = JSON.parse(raw);
+    const val = Number(parsed?.serverMs || 0);
+    return Number.isFinite(val) && val > 1_600_000_000_000 ? val : 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function recordObservedServerTimeMs(serverMs: number): number {
+  if (!Number.isFinite(serverMs) || serverMs < 1_600_000_000_000) return 0;
+  const rounded = Math.round(serverMs);
+  const perfNow = typeof performance !== 'undefined' ? performance.now() : 0;
+  if (rounded >= lastObservedServerMs) {
+    lastObservedServerMs = rounded;
+    lastObservedPerfMs = perfNow;
+  }
+  if (typeof window !== 'undefined') {
+    try {
+      const prev = getStoredServerTimeHwmMs();
+      const next = Math.max(prev, rounded);
+      localStorage.setItem(SERVER_TIME_CACHE_KEY, JSON.stringify({ serverMs: next }));
+    } catch {
+      // ignore storage errors
+    }
+  }
+  return rounded;
+}
+
+export function getEffectiveServerNowMs(): number {
+  if (lastObservedServerMs > 0) {
+    const perfElapsed =
+      typeof performance !== 'undefined' ? Math.max(0, performance.now() - lastObservedPerfMs) : 0;
+    return Math.round(lastObservedServerMs + perfElapsed);
+  }
+  return getStoredServerTimeHwmMs();
+}
+
+export function isLocalClockRolledBack(): boolean {
+  const hwm = Math.max(lastObservedServerMs, getStoredServerTimeHwmMs());
+  if (hwm <= 0) return false;
+  return Date.now() + 60_000 < hwm;
+}
+
+function captureDateHeaderFromResponse(resp: Response): number {
+  try {
+    const dateHdr = resp.headers?.get('date');
+    if (dateHdr) {
+      const parsed = Date.parse(dateHdr);
+      if (Number.isFinite(parsed) && parsed > 1_600_000_000_000) {
+        return recordObservedServerTimeMs(parsed);
+      }
+    }
+  } catch {
+    // ignore header access issues
+  }
+  return 0;
+}
+
+/**
+ * Fetch authentic server timestamp (epoch ms) from Supabase RPC 'get_server_time_ms'
+ * with automatic fallback to Supabase HTTP response 'Date' header.
+ * Never trusts mobile/desktop local clock for Trial or Subscription verification.
+ */
+export async function fetchSupabaseServerTimeMs(): Promise<number> {
+  const { url: urlBase, key: apiKey } = getActiveSupabaseCredentials();
+  let headerServerMs = 0;
+
+  // 1. Primary: Supabase RPC get_server_time_ms
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    const rpcResp = await fetch(`${urlBase}/rest/v1/rpc/get_server_time_ms`, {
+      method: 'POST',
+      headers: {
+        apikey: apiKey,
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: '{}',
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    headerServerMs = captureDateHeaderFromResponse(rpcResp);
+    if (rpcResp.ok) {
+      const txt = await rpcResp.text().catch(() => '');
+      let parsedBody: any = txt;
+      try {
+        parsedBody = txt ? JSON.parse(txt) : null;
+      } catch {
+        // raw string/number
+      }
+      const rpcMs = parseServerEpochMs(parsedBody);
+      if (rpcMs > 1_600_000_000_000) {
+        return recordObservedServerTimeMs(rpcMs);
+      }
+    }
+  } catch {
+    // fallback below
+  }
+
+  if (headerServerMs > 1_600_000_000_000) {
+    return headerServerMs;
+  }
+
+  // 2. Fallback: Lightweight Supabase REST GET HTTP 'Date' header
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 4500);
+    const restResp = await fetch(`${urlBase}/rest/v1/app_configs?select=id&limit=1`, {
+      method: 'GET',
+      cache: 'no-store',
+      headers: {
+        apikey: apiKey,
+        Authorization: `Bearer ${apiKey}`,
+        Accept: 'application/json',
+      },
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    const restDateMs = captureDateHeaderFromResponse(restResp);
+    if (restDateMs > 1_600_000_000_000) {
+      return restDateMs;
+    }
+  } catch {
+    // fallback below
+  }
+
+  return getEffectiveServerNowMs();
+}
 
 export async function callSupabaseProxy(params: {
   table: string;
@@ -106,6 +304,7 @@ export async function callSupabaseProxy(params: {
       signal: controller.signal,
       ...(activePayload && method !== 'GET' ? { body: JSON.stringify(activePayload) } : {}),
     });
+    captureDateHeaderFromResponse(resp);
 
     // If PostgREST reports PGRST204 ("Could not find the '<col>' column"), strip that column and retry cleanly
     let stripRetries = 0;
@@ -123,6 +322,7 @@ export async function callSupabaseProxy(params: {
         signal: controller.signal,
         body: JSON.stringify(activePayload),
       });
+      captureDateHeaderFromResponse(resp);
     }
 
     // If POST upsert times out (500 statement timeout on huge JSON) or conflicts (409), fallback to direct PATCH by primary key
@@ -145,6 +345,7 @@ export async function callSupabaseProxy(params: {
             body: JSON.stringify(activePayload),
             signal: controller.signal,
           });
+          captureDateHeaderFromResponse(patchResp);
           if (patchResp.ok) {
             resp = patchResp;
           }
@@ -191,4 +392,95 @@ export async function callSupabaseProxy(params: {
       error: e?.name === 'AbortError' ? 'Supabase cloud timeout (10s)' : e?.message || 'Network error',
     };
   }
+}
+
+async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
+  const res = await fetch(dataUrl);
+  return res.blob();
+}
+
+function compressFileToJpegDataUrl(
+  file: File,
+  maxWidth = 960,
+  quality = 0.74
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Failed to read image'));
+    reader.onload = () => {
+      const src = typeof reader.result === 'string' ? reader.result : '';
+      if (!src) {
+        reject(new Error('Empty image'));
+        return;
+      }
+      const img = new Image();
+      img.onerror = () => resolve(src);
+      img.onload = () => {
+        try {
+          const scale = img.width > maxWidth ? maxWidth / img.width : 1;
+          const targetW = Math.max(1, Math.round(img.width * scale));
+          const targetH = Math.max(1, Math.round(img.height * scale));
+          const canvas = document.createElement('canvas');
+          canvas.width = targetW;
+          canvas.height = targetH;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve(src);
+            return;
+          }
+          ctx.drawImage(img, 0, 0, targetW, targetH);
+          const jpeg = canvas.toDataURL('image/jpeg', quality);
+          resolve(jpeg.length < src.length ? jpeg : src);
+        } catch {
+          resolve(src);
+        }
+      };
+      img.src = src;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * Upload an image (File or compressed Data URL) to Supabase Storage 'user_uploads' bucket.
+ * Falls back cleanly to compact compressed JPEG Data URL if storage bucket isn't provisioned yet.
+ */
+export async function uploadImageToUserUploadsBucket(params: {
+  fileOrDataUrl: File | string;
+  folder: 'cnic' | 'selfies' | 'shops' | 'receipts' | 'logos';
+  deviceId: string;
+  tag?: string;
+}): Promise<{ url: string; storedInBucket: boolean }> {
+  const dataUrl =
+    typeof params.fileOrDataUrl === 'string'
+      ? params.fileOrDataUrl
+      : await compressFileToJpegDataUrl(params.fileOrDataUrl, 960, 0.74);
+
+  try {
+    const { url: urlBase, key: apiKey } = getActiveSupabaseCredentials();
+    const safeDev = (params.deviceId || 'DEV-UNKNOWN').replace(/[^A-Za-z0-9_-]/g, '_');
+    const safeTag = (params.tag || 'img').replace(/[^A-Za-z0-9_-]/g, '_');
+    const filePath = `${params.folder}/${safeDev}/${safeTag}_${Date.now()}.jpg`;
+    const blob = await dataUrlToBlob(dataUrl);
+
+    const uploadResp = await fetch(`${urlBase}/storage/v1/object/user_uploads/${filePath}`, {
+      method: 'POST',
+      headers: {
+        apikey: apiKey,
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': blob.type || 'image/jpeg',
+        'x-upsert': 'true',
+      },
+      body: blob,
+    });
+
+    if (uploadResp.ok) {
+      const publicUrl = `${urlBase}/storage/v1/object/public/user_uploads/${filePath}`;
+      return { url: publicUrl, storedInBucket: true };
+    }
+  } catch {
+    // Non-fatal fallback to compact JPEG Data URL
+  }
+
+  return { url: dataUrl, storedInBucket: false };
 }
