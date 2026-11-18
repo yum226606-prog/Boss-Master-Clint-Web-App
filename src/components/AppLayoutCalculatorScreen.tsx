@@ -56,6 +56,7 @@ import {
   Cloud,
   LogOut,
   MessageSquarePlus,
+  WifiOff,
 } from 'lucide-react';
 import { ClientAuthSession, fetchAdminServer } from '../utils/adminApiConfig';
 import {
@@ -70,8 +71,8 @@ import {
   ClientAppLayoutControlConfig,
   ClientSupportRequest,
   CutPiece,
+  DgWindowItem,
   DoorItem,
-  DragDropBlueprint,
   ExtraPiece,
   FixFrameItem,
   FormulaCategorySettings,
@@ -95,7 +96,7 @@ import {
 } from '../types/bossModels';
 import {
   barLengthsFor,
-  computeBlueprintWindowPieces,
+  computeDgWindowPieces,
   computeGlassCutsForState,
   computeOpenablePieces,
   computeSlidingDoorPieces,
@@ -157,6 +158,8 @@ interface AppLayoutCalculatorScreenProps {
   onRestoreBackupItem?: (id: string | any) => void;
   windows: WindowItem[];
   onUpdateWindows: (list: WindowItem[]) => void;
+  dgWindows: DgWindowItem[];
+  onUpdateDgWindows: (list: DgWindowItem[]) => void;
   doors: DoorItem[];
   onUpdateDoors: (list: DoorItem[]) => void;
   fixframes: FixFrameItem[];
@@ -175,6 +178,7 @@ interface AppLayoutCalculatorScreenProps {
   onToggleHideSection: (sec: string) => void;
   onUnhideAllSections: () => void;
   windowFormula: WindowFormulaSettings;
+  dgWindowFormula: WindowFormulaSettings;
   slidingDoorFormula: SlidingDoorFormulaSettings;
   doorFormula: FormulaCategorySettings;
   fixFormula: FormulaCategorySettings;
@@ -209,8 +213,6 @@ interface AppLayoutCalculatorScreenProps {
   onSaveQuotationHistory: (q: SavedQuotation) => void;
   onDeleteQuotationHistory: (id: number) => void;
   onRestoreQuotation: (q: SavedQuotation) => void;
-  blueprints: DragDropBlueprint[];
-  onDeleteBlueprint?: (id: string) => void;
   onClearAllRates: () => void;
   onRestoreDefaultRates: () => void;
   onOpenThemeStudio: () => void;
@@ -262,6 +264,12 @@ interface AppLayoutCalculatorScreenProps {
     requestType: string;
     message: string;
   }) => Promise<boolean | { ok: boolean; error?: string }>;
+  onRefreshSupportRequests?: () => Promise<void> | void;
+  onDeleteSupportRequest?: (id: string) => Promise<void> | void;
+  onClearAllSupportRequests?: () => Promise<void> | void;
+  lastSeenSupportMs?: number;
+  onMarkSupportMessagesRead?: () => void;
+  isOnline?: boolean;
 }
 
 export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps> = (props) => {
@@ -299,6 +307,8 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     onRestoreBackupItem = () => {},
     windows,
     onUpdateWindows,
+    dgWindows,
+    onUpdateDgWindows,
     doors,
     onUpdateDoors,
     fixframes,
@@ -317,6 +327,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     onToggleHideSection,
     onUnhideAllSections,
     windowFormula,
+    dgWindowFormula,
     slidingDoorFormula,
     doorFormula,
     fixFormula,
@@ -345,8 +356,6 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     onSaveQuotationHistory,
     onDeleteQuotationHistory,
     onRestoreQuotation,
-    blueprints,
-    onDeleteBlueprint,
     onClearAllRates,
     onRestoreDefaultRates,
     onOpenThemeStudio,
@@ -379,6 +388,12 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     supportRequests = [],
     isSubmittingSupportRequest = false,
     onSubmitSupportRequest,
+    onRefreshSupportRequests,
+    onDeleteSupportRequest,
+    onClearAllSupportRequests,
+    lastSeenSupportMs = 0,
+    onMarkSupportMessagesRead,
+    isOnline = true,
   } = props;
 
   const [doorSubTab, setDoorSubTab] = useState<'DOORS' | 'FIX' | 'OP_WIN' | 'SLIDING'>('DOORS');
@@ -395,6 +410,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
   const [showPackagesModal, setShowPackagesModal] = useState(false);
   const [showSupportModal, setShowSupportModal] = useState(false);
+  const [isRefreshingSupport, setIsRefreshingSupport] = useState(false);
   const [reqUserName, setReqUserName] = useState(authSession?.name || customerName || '');
   const [reqUserPhone, setReqUserPhone] = useState(authSession?.phone || customerPhone || '');
   const [reqUserEmail, setReqUserEmail] = useState(authSession?.email || '');
@@ -403,7 +419,26 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   const [supportSubmitError, setSupportSubmitError] = useState<string | null>(null);
   const [supportSubmitSuccess, setSupportSubmitSuccess] = useState<string | null>(null);
   const [copiedBankId, setCopiedBankId] = useState<string | null>(null);
-  const [dismissedBannerId, setDismissedBannerId] = useState<string | null>(null);
+  const [dismissedBannerSignatures, setDismissedBannerSignatures] = useState<string[]>([]);
+
+  const getBannerDismissKey = (b: AppOfferBanner) =>
+    `${b.id}|${b.updatedAt || b.createdAt || ''}|${b.title}|${b.message}|${b.discountPct || ''}|${b.badgeText || ''}|${b.isActive}`;
+
+  const unreadAdminSupportCount = supportRequests.filter((r) => {
+    const hasAdmin = r.sender === 'ADMIN' || Boolean(r.adminReply);
+    if (!hasAdmin) return false;
+    const msgTs = Math.max(Number(r.repliedAt || 0), Number(r.createdAt || 0));
+    return msgTs > lastSeenSupportMs;
+  }).length;
+
+  const openSupportModal = () => {
+    setShowSupportModal(true);
+    onMarkSupportMessagesRead?.();
+    if (onRefreshSupportRequests) {
+      setIsRefreshingSupport(true);
+      Promise.resolve(onRefreshSupportRequests()).finally(() => setIsRefreshingSupport(false));
+    }
+  };
   const [showBackgroundAdjustments, setShowBackgroundAdjustments] = useState(false);
   const [shareModalTarget, setShareModalTarget] = useState<
     | { kind: 'CHART'; chartType: 'CUTTING' | 'LENGTH' | 'GLASS' | 'QUOTATION' }
@@ -686,34 +721,6 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   const showSettingsToast = (msg: string) => {
     setSettingsNotice(msg);
     setTimeout(() => setSettingsNotice(null), 3200);
-  };
-
-  const handleAddBlueprintToCalc = (bp: DragDropBlueprint) => {
-    const ft = bp.outerSectionCode || (ctxFrameType === 'F' ? 'F' : 'C');
-    const newWin: WindowItem = {
-      id: `win-bp-${Date.now()}`,
-      width: 48,
-      height: 60,
-      qty: 1,
-      frameType: ft,
-      sectionGauge: ctxGaugeMode === 'ON' ? ctxGauge : '1.6',
-      glassGauge: ctxGlassMode === 'ON' ? ctxGlassGauge : '5',
-      glassColor: ctxGlassMode === 'ON' ? ctxGlassColor : 'CLEAR',
-      glassEnabled: true,
-      m24Qty: (bp.panelCount || 2) * 2,
-      m24aQty: 0,
-      d29HeightQty: bp.hasNetJali ? ((bp.panelCount || 2) >= 3 ? 4 : 2) : 0,
-      d29WidthQty: bp.hasNetJali ? ((bp.panelCount || 2) >= 3 ? 4 : 2) : 0,
-      extras: [],
-      outerSection: bp.outerSectionCode || (ft === 'F' ? 'DC30F' : 'DC30C'),
-      panelCount: bp.panelCount || 2,
-      lockType: 'LATCH',
-      blueprintId: bp.id,
-      blueprintName: bp.name,
-    };
-    onUpdateWindows([...windows, newWin]);
-    onSelectTab(`BP:${bp.id}`);
-    showSettingsToast(`Added "${bp.name}" (48" × 60", ${bp.panelCount || 2} Palay) calculation!`);
   };
 
   const handleImageFileUpload = (
@@ -1200,24 +1207,29 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
       const effFt = targetFt || (w.frameType ? w.frameType : 'C');
       const effGauge = masterGaugeActive ? ctxGauge : w.sectionGauge;
       const winWithEff = { ...w, frameType: effFt, sectionGauge: effGauge };
-      const matchedBp = blueprints.find(
-        (b) => b.id === w.blueprintId || b.id === w.frameType || b.name === w.blueprintName
-      );
-      if (matchedBp) {
-        const src = `Window #${idx + 1} · ${matchedBp.name} (${w.panelCount} Palay)`;
-        computeBlueprintWindowPieces(winWithEff, matchedBp, windowFormula).forEach((p) => {
-          all.push({
-            ...p,
-            source: src,
-            gauge: p.section === 'D29' || p.section === 'D31' ? '1.2' : p.gauge || effGauge,
-          });
+      const src = `Window #${idx + 1} (${w.panelCount} Palay)`;
+      computeSlidingWindowPieces(winWithEff, effFt, windowFormula, fSectionFormula).forEach((p) => {
+        all.push({ ...p, source: src, gauge: p.section === 'D29' || p.section === 'D31' ? '1.2' : effGauge });
+      });
+    });
+
+    dgWindows.forEach((dw, idx) => {
+      const effFt =
+        targetFt === 'F' || targetFt === 'C'
+          ? targetFt
+          : dw.frameType === 'F'
+          ? 'F'
+          : 'C';
+      const effGauge = masterGaugeActive ? ctxGauge : dw.sectionGauge;
+      const dwWithEff: DgWindowItem = { ...dw, frameType: effFt, sectionGauge: effGauge };
+      const src = `DG.Window #${idx + 1} (${dw.panelCount} Palay)`;
+      computeDgWindowPieces(dwWithEff, effFt, dgWindowFormula, fSectionFormula).forEach((p) => {
+        all.push({
+          ...p,
+          source: src,
+          gauge: p.section === 'DG.29' || p.section === 'DG.31' ? '1.2' : effGauge,
         });
-      } else {
-        const src = `Window #${idx + 1} (${w.panelCount} Palay)`;
-        computeSlidingWindowPieces(winWithEff, effFt, windowFormula, fSectionFormula).forEach((p) => {
-          all.push({ ...p, source: src, gauge: p.section === 'D29' || p.section === 'D31' ? '1.2' : effGauge });
-        });
-      }
+      });
     });
 
     doors.forEach((d, idx) => {
@@ -1310,12 +1322,14 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
 
   const glassCuts = computeGlassCutsForState({
     windows,
+    dgWindows,
     doors,
     fixframes,
     openableWindows,
     slidingDoors,
     glassFormulas,
     windowFormula,
+    dgWindowFormula,
     glassFittingOption,
     measurementUnit,
     ctxGlassMode,
@@ -1369,6 +1383,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
 
     const totalUnits =
       windows.reduce((s, i) => s + i.qty, 0) +
+      dgWindows.reduce((s, i) => s + i.qty, 0) +
       doors.reduce((s, i) => s + i.qty, 0) +
       fixframes.reduce((s, i) => s + i.qty, 0) +
       openableWindows.reduce((s, i) => s + i.qty, 0) +
@@ -2065,46 +2080,9 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     return `https://wa.me/?text=${encodeURIComponent(msg)}`;
   };
 
-  const standardWindows = windows.filter((w) => !w.blueprintId);
-  const standardTabKeySet = new Set([
-    'WINDOWS',
-    'DOORS',
-    'EXTRA_PIECES',
-    'CUTTING',
-    'LENGTH',
-    'GLASS',
-    'QUOTATION',
-    'HISTORY',
-    'RATES',
-  ]);
+  const isDgWindowsLocked = layoutConfig.lockedTabs?.DG_WINDOWS !== false;
 
-  const customBlueprintTabs = (blueprints || [])
-    .filter((bp) => !bp.isHidden)
-    .map((bp) => {
-      const count = windows.filter((w) => w.blueprintId === bp.id).length;
-      return {
-        id: `BP:${bp.id}` as BossTab,
-        title: `${bp.name} (${count})`,
-      };
-    });
-
-  const standaloneCustomTabs = Object.keys(layoutConfig.tabCustomTitles || {})
-    .filter(
-      (k) =>
-        !standardTabKeySet.has(k) &&
-        !k.startsWith('BP:') &&
-        !blueprints?.some((b) => b.id === k)
-    )
-    .map((k) => {
-      const count = windows.filter((w) => w.blueprintId === k).length;
-      const title = layoutConfig.tabCustomTitles[k] || k;
-      return {
-        id: k as BossTab,
-        title: `${title} (${count})`,
-      };
-    });
-
-  const TABS: { id: BossTab; title: string; iconKey: string }[] = (
+  const TABS: { id: BossTab; title: string; iconKey: string; isLocked?: boolean }[] = (
     [
       {
         id: 'WINDOWS' as BossTab,
@@ -2112,12 +2090,16 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
         iconKey: 'WINDOWS',
       },
       {
+        id: 'DG_WINDOWS' as BossTab,
+        title: layoutConfig.tabCustomTitles.DG_WINDOWS || 'DG.Windows',
+        iconKey: 'DG_WINDOWS',
+        isLocked: isDgWindowsLocked,
+      },
+      {
         id: 'DOORS' as BossTab,
         title: layoutConfig.tabCustomTitles.DOORS || 'Doors & Frames',
         iconKey: 'DOORS',
       },
-      ...customBlueprintTabs.map((b) => ({ ...b, iconKey: 'CUSTOM' })),
-      ...standaloneCustomTabs.map((b) => ({ ...b, iconKey: 'CUSTOM' })),
       {
         id: 'EXTRA_PIECES' as BossTab,
         title: layoutConfig.tabCustomTitles.EXTRA_PIECES || 'Extra',
@@ -2143,6 +2125,8 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   const renderTabIcon = (iconKey: string) => {
     switch (iconKey) {
       case 'WINDOWS':
+        return <LayoutGrid className="w-3.5 h-3.5 shrink-0" />;
+      case 'DG_WINDOWS':
         return <LayoutGrid className="w-3.5 h-3.5 shrink-0" />;
       case 'DOORS':
         return <DoorOpen className="w-3.5 h-3.5 shrink-0" />;
@@ -2178,7 +2162,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
       seen.add(b.id);
       if (b.isActive === false || b.isVisible === false || b.showBanner === false) return;
       if (b.expiresAt && Number(b.expiresAt) > 0 && serverNow > Number(b.expiresAt)) return;
-      if (dismissedBannerId === b.id) return;
+      if (dismissedBannerSignatures.includes(getBannerDismissKey(b))) return;
       list.push(b);
     });
     return list;
@@ -2191,7 +2175,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
       {/* =================================================================== */}
       {visibleBanners.map((banner) => (
         <div
-          key={banner.id}
+          key={getBannerDismissKey(banner)}
           className="p-3 rounded-xl bg-gradient-to-r from-amber-500/20 via-rose-500/20 to-amber-500/20 border border-amber-400 shadow-lg flex items-center justify-between gap-2 flex-wrap no-print"
         >
           <div className="flex items-center gap-2 min-w-0">
@@ -2212,6 +2196,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   {banner.badgeText || 'OFFER'}
                 </span>
                 <span className="text-xs font-black text-white truncate">{banner.title}</span>
+                {banner.discountPct && banner.discountPct > 0 && (
+                  <span className="text-[10px] font-black px-2 py-0.5 rounded bg-amber-950/80 border border-amber-500/60 text-amber-300">
+                    Save {banner.discountPct}% OFF!
+                  </span>
+                )}
               </div>
               <div className="text-[11px] text-slate-300 truncate">{banner.message}</div>
             </div>
@@ -2223,12 +2212,16 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               onClick={() => setShowPackagesModal(true)}
               className="px-2.5 py-1 rounded-lg bg-[#F5B738] text-black text-[11px] font-black cursor-pointer"
             >
-              👑 Offers
+              👑 View Subscription Packages
             </button>
             <button
               type="button"
-              onClick={() => setDismissedBannerId(banner.id)}
-              className="boss-flat-btn p-1 rounded bg-black/40 text-slate-400 hover:text-white"
+              onClick={() =>
+                setDismissedBannerSignatures((prev) =>
+                  Array.from(new Set([...prev, getBannerDismissKey(banner)]))
+                )
+              }
+              className="boss-flat-btn p-1 rounded bg-black/40 text-slate-400 hover:text-white cursor-pointer"
             >
               <X className="w-3.5 h-3.5" />
             </button>
@@ -2362,7 +2355,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               }`}
             >
               <select
-                value={ctxFrameType}
+                value={ctxFrameType === 'F' || ctxFrameType === 'OFF' ? ctxFrameType : 'C'}
                 onChange={(e) => onSetCtxFrameType(e.target.value)}
                 className={`w-full bg-transparent text-[10px] sm:text-[11px] font-bold text-center focus:outline-none cursor-pointer truncate ${
                   ctxFrameType === 'OFF' ? 'text-rose-300' : 'text-sky-400'
@@ -2374,20 +2367,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                 <option value="F" className="bg-[#14181F] text-white">
                   Frame F
                 </option>
-                <option value="DG" className="bg-[#14181F] text-amber-300">
-                  DG Series
-                </option>
-                <option value="DG_F" className="bg-[#14181F] text-amber-300">
-                  DG-F
-                </option>
-                <option value="OFF" className="bg-[#14181F] text-rose-300">
-                  Sep Frame
-                </option>
-                {customSections.map((sec) => (
-                  <option key={sec} value={sec} className="bg-[#14181F] text-white">
-                    {sec}
+                {ctxFrameType === 'OFF' && (
+                  <option value="OFF" hidden className="bg-[#14181F] text-rose-300">
+                    Sep Frame
                   </option>
-                ))}
+                )}
               </select>
             </div>
           )}
@@ -2501,6 +2485,16 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               );
             })()}
 
+            {!isOnline && (
+              <span
+                className="h-6 px-1.5 sm:px-2 rounded-full bg-amber-500/20 border border-amber-500/70 text-amber-300 text-[9px] font-black flex items-center gap-1 shrink-0"
+                title="Offline Mode — Calculator & Local Saved Data Active"
+              >
+                <WifiOff className="w-2.5 h-2.5 shrink-0" />
+                <span>Offline</span>
+              </span>
+            )}
+
             <button
               type="button"
               disabled={isSyncingCloud}
@@ -2516,12 +2510,17 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
             </button>
             <button
               type="button"
-              onClick={() => setShowSupportModal(true)}
-              className="boss-flat-btn w-6 h-6 rounded-full bg-sky-500/15 border border-sky-500/50 text-sky-300 hover:bg-sky-500 hover:text-black flex items-center justify-center cursor-pointer"
-              title="Support Team Request Box"
+              onClick={openSupportModal}
+              className="boss-flat-btn relative w-6 h-6 rounded-full bg-sky-500/15 border border-sky-500/50 text-sky-300 hover:bg-sky-500 hover:text-black flex items-center justify-center cursor-pointer"
+              title="Support Team Request & Messages Box"
               aria-label="Support Team Request Box"
             >
               <MessageSquarePlus className="w-3 h-3" />
+              {unreadAdminSupportCount > 0 && (
+                <span className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-0.5 rounded-full bg-rose-600 text-white text-[8px] font-black flex items-center justify-center leading-none border border-[#0C0F14]">
+                  {unreadAdminSupportCount > 9 ? '9+' : unreadAdminSupportCount}
+                </span>
+              )}
             </button>
             <button
               type="button"
@@ -2563,6 +2562,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               >
                 {renderTabIcon(tab.iconKey)}
                 <span>{tab.title}</span>
+                {tab.isLocked && <Lock className="w-3 h-3 shrink-0 opacity-80" />}
               </button>
             );
           })}
@@ -2570,452 +2570,10 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
       </div>
 
       {/* =================================================================== */}
-      {/* DYNAMIC TAB: DRAG & DROP CUSTOM SECTION & STANDALONE PAGES          */}
-      {/* =================================================================== */}
-      {!['WINDOWS', 'DOORS', 'EXTRA_PIECES', 'CUTTING', 'LENGTH', 'GLASS', 'QUOTATION', 'HISTORY', 'RATES'].includes(currentTab) && (() => {
-        const bpId = currentTab.startsWith('BP:') ? currentTab.slice(3) : currentTab;
-        const bp = blueprints.find((b) => b.id === bpId || `BP:${b.id}` === currentTab);
-        const tabTitle =
-          layoutConfig.tabCustomTitles?.[currentTab] ||
-          layoutConfig.tabCustomTitles?.[bpId] ||
-          bp?.name ||
-          currentTab;
-        const effectiveBpId = bp ? bp.id : currentTab;
-        const bpItems = windows.filter(
-          (w) => w.blueprintId === effectiveBpId || w.blueprintId === currentTab
-        );
-
-        const handleAddCalculation = () => {
-          if (bp) {
-            handleAddBlueprintToCalc(bp);
-          } else {
-            const ft = ctxFrameType === 'F' ? 'F' : 'C';
-            const newWin: WindowItem = {
-              id: `win-custom-${Date.now()}`,
-              width: 48,
-              height: 60,
-              qty: 1,
-              frameType: ft,
-              sectionGauge: ctxGaugeMode === 'ON' ? ctxGauge : '1.6',
-              glassGauge: ctxGlassMode === 'ON' ? ctxGlassGauge : '5',
-              glassColor: ctxGlassMode === 'ON' ? ctxGlassColor : 'CLEAR',
-              glassEnabled: true,
-              m24Qty: 4,
-              m24aQty: 0,
-              d29HeightQty: 2,
-              d29WidthQty: 2,
-              extras: [],
-              outerSection: ft === 'F' ? 'DC30F' : 'DC30C',
-              panelCount: 2,
-              lockType: 'LATCH',
-              blueprintId: currentTab,
-              blueprintName: tabTitle,
-            };
-            onUpdateWindows([...windows, newWin]);
-            showSettingsToast(`Added "${tabTitle}" (48" × 60", 2 Palay) calculation!`);
-          }
-        };
-
-        const handleDeleteTabFromCalc = () => {
-          const curDel = layoutConfig.deletedTabs || [];
-          const nextDeleted = Array.from(new Set([...curDel, currentTab]));
-          const nextEnabled = { ...(layoutConfig.enabledTabs || {}), [currentTab]: false };
-          const nextTitles = { ...(layoutConfig.tabCustomTitles || {}), [currentTab]: tabTitle };
-          onUpdateLayoutConfig({
-            ...layoutConfig,
-            deletedTabs: nextDeleted,
-            enabledTabs: nextEnabled,
-            tabCustomTitles: nextTitles,
-          });
-          if (bp && onDeleteBlueprint) {
-            onDeleteBlueprint(bp.id);
-          }
-          if (onAddBackupItem) {
-            onAddBackupItem({
-              id: 'del-tab-' + Date.now(),
-              category: 'CALC_TAB',
-              title: `App Tab: ${tabTitle} (${currentTab})`,
-              codeOrKey: currentTab,
-              deletedAt: Date.now(),
-              payload: { tabId: currentTab, tabTitle, blueprint: bp },
-            });
-          }
-          onUpdateWindows(
-            windows.filter((w) => w.blueprintId !== effectiveBpId && w.blueprintId !== currentTab)
-          );
-          onSelectTab('WINDOWS');
-          showSettingsToast(`Tab "${tabTitle}" deleted and saved to Backup Vault!`);
-        };
-
-        return (
-          <div className="space-y-2">
-            <div className="flex items-center justify-between gap-2 p-2 sm:p-2.5 rounded-xl bg-[#14181F] border border-[#2B3441]">
-              <div className="min-w-0">
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  <h3 className="text-xs sm:text-sm font-extrabold text-[#F5B738] truncate">
-                    {tabTitle} ({bpItems.length})
-                  </h3>
-                  <span className="text-[9.5px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono font-bold">
-                    {bp?.panelCount || 2}P · {bp?.outerSectionCode || (ctxFrameType === 'F' ? 'DC30F' : 'DC30C')}
-                  </span>
-                </div>
-                <p className="text-[10px] text-slate-400 truncate">
-                  Unit: {unitLabel(measurementUnit)} · Auto-Calculated
-                </p>
-              </div>
-
-              <div className="flex items-center gap-1 shrink-0">
-                <button
-                  type="button"
-                  onClick={handleAddCalculation}
-                  className="boss-flat-btn w-7 h-7 rounded-lg bg-[#F5B738] text-black hover:bg-amber-400 flex items-center justify-center transition-colors cursor-pointer"
-                  title={`Add ${tabTitle}`}
-                  aria-label={`Add ${tabTitle}`}
-                >
-                  <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
-                </button>
-
-                <button
-                  type="button"
-                  onClick={handleDeleteTabFromCalc}
-                  className="boss-flat-btn w-7 h-7 rounded-lg bg-rose-950/60 hover:bg-rose-900 border border-rose-700/60 text-rose-300 flex items-center justify-center transition-colors cursor-pointer"
-                  title="Delete section and remove tab"
-                  aria-label="Delete section and remove tab"
-                >
-                  <Trash2 className="w-3.5 h-3.5 text-rose-400" />
-                </button>
-              </div>
-            </div>
-
-            {bpItems.length === 0 ? (
-              <div className="p-6 sm:p-10 rounded-xl bg-[#14181F] border border-[#2B3441] text-center space-y-2.5">
-                <div className="text-xs font-bold text-slate-300">
-                  No {tabTitle} calculations added yet.
-                </div>
-                <p className="text-[11px] text-slate-400 max-w-md mx-auto">
-                  Tap &quot;+ Add&quot; above to add your first calculation.
-                </p>
-                <button
-                  type="button"
-                  onClick={handleAddCalculation}
-                  className="px-3.5 py-1.5 rounded-lg bg-[#F5B738] text-black text-[11px] font-extrabold hover:bg-amber-400 inline-flex items-center gap-1"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Add First {tabTitle}</span>
-                </button>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
-                {bpItems.map((win, idx) => {
-                  const isLastBp = idx === bpItems.length - 1;
-                  return (
-                  <div
-                    key={win.id}
-                    className="p-2.5 sm:p-3 rounded-xl bg-[#14181F] border border-[#2B3441] space-y-2"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-1.5 min-w-0">
-                        <span className="text-xs font-extrabold text-[#F5B738] truncate">
-                          {tabTitle} #{idx + 1}
-                        </span>
-                        <span className="px-1.5 py-0.5 rounded-full border border-[#F5B738]/60 bg-[#0C0F14] text-[9.5px] font-mono font-bold text-[#F5B738] shrink-0">
-                          {((win.width * win.height) / 144).toFixed(2)} sq.ft
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-1 shrink-0">
-                        {isLastBp && (
-                          <button
-                            type="button"
-                            onClick={handleAddCalculation}
-                            className="boss-flat-btn w-6 h-6 rounded-full bg-[#F5B738] hover:bg-amber-400 text-black flex items-center justify-center shadow cursor-pointer"
-                            title={`Add another ${tabTitle}`}
-                          >
-                            <Plus className="w-3.5 h-3.5 stroke-[2.6]" />
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() =>
-                            onUpdateWindows(windows.filter((w) => w.id !== win.id))
-                          }
-                          className="boss-flat-btn text-rose-400 hover:text-rose-300 p-1 shrink-0 cursor-pointer"
-                          title="Remove calculation"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Panels Selector */}
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs text-slate-400 font-semibold shrink-0">Panels:</span>
-                      <div className="flex items-center gap-1.5">
-                        {[2, 3, 4].map((count) => (
-                          <button
-                            key={count}
-                            type="button"
-                            onClick={() =>
-                              onUpdateWindows(
-                                windows.map((w) =>
-                                  w.id === win.id
-                                    ? {
-                                        ...w,
-                                        panelCount: count,
-                                        m24Qty: count * 2,
-                                        d29HeightQty: bp?.hasNetJali ? (count >= 3 ? 4 : 2) : 0,
-                                        d29WidthQty: bp?.hasNetJali ? (count >= 3 ? 4 : 2) : 0,
-                                      }
-                                    : w
-                                )
-                              )
-                            }
-                            className={`boss-flat-btn px-2.5 py-1 rounded-md text-[11px] font-bold transition-colors cursor-pointer ${
-                              win.panelCount === count
-                                ? 'bg-[#F5B738] text-black'
-                                : 'bg-[#0C0F14] text-slate-300 border border-slate-700'
-                            }`}
-                          >
-                            {count} Palay
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Lock / Handle Selector */}
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs text-slate-400 font-semibold shrink-0">
-                        Lock / Handle:
-                      </span>
-                      <div className="flex items-center gap-1.5">
-                        {(['LATCH', 'PUSH_HANDLE'] as const).map((lk) => (
-                          <button
-                            key={lk}
-                            type="button"
-                            onClick={() =>
-                              onUpdateWindows(
-                                windows.map((w) =>
-                                  w.id === win.id ? { ...w, lockType: lk } : w
-                                )
-                              )
-                            }
-                            className={`boss-flat-btn px-2.5 py-1 rounded-md text-[11px] font-bold transition-colors cursor-pointer ${
-                              win.lockType === lk
-                                ? lk === 'PUSH_HANDLE'
-                                  ? 'bg-sky-500 text-black'
-                                  : 'bg-[#F5B738] text-black'
-                                : 'bg-[#0C0F14] text-slate-300 border border-slate-700'
-                            }`}
-                          >
-                            {lk === 'LATCH' ? 'Latch' : 'Push Handle'}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Width, Height, Qty Inputs — 3 Columns Side-by-Side on Mobile */}
-                    <div className="grid grid-cols-3 gap-2">
-                      <div>
-                        <label className="block text-[10px] text-slate-400 mb-0.5 truncate">
-                          Width ({unitLabel(measurementUnit)})
-                        </label>
-                        <input
-                          type="text"
-                          defaultValue={formatDimValueOnly(win.width, measurementUnit)}
-                          onBlur={(e) => {
-                            const parsed = parseDimToInches(e.target.value, measurementUnit);
-                            if (parsed > 0) {
-                              onUpdateWindows(
-                                windows.map((w) =>
-                                  w.id === win.id ? { ...w, width: parsed } : w
-                                )
-                              );
-                            }
-                          }}
-                          className="w-full px-2.5 py-1.5 rounded-lg bg-[#0C0F14] border border-slate-700 text-xs sm:text-sm font-mono font-semibold text-white"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] text-slate-400 mb-0.5 truncate">
-                          Height ({unitLabel(measurementUnit)})
-                        </label>
-                        <input
-                          type="text"
-                          defaultValue={formatDimValueOnly(win.height, measurementUnit)}
-                          onBlur={(e) => {
-                            const parsed = parseDimToInches(e.target.value, measurementUnit);
-                            if (parsed > 0) {
-                              onUpdateWindows(
-                                windows.map((w) =>
-                                  w.id === win.id ? { ...w, height: parsed } : w
-                                )
-                              );
-                            }
-                          }}
-                          className="w-full px-2.5 py-1.5 rounded-lg bg-[#0C0F14] border border-slate-700 text-xs sm:text-sm font-mono font-semibold text-white"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] text-slate-400 mb-0.5">Qty</label>
-                        <input
-                          type="number"
-                          value={win.qty}
-                          onChange={(e) =>
-                            onUpdateWindows(
-                              windows.map((w) =>
-                                w.id === win.id
-                                  ? { ...w, qty: Math.max(1, parseInt(e.target.value, 10) || 1) }
-                                  : w
-                              )
-                            )
-                          }
-                          className="w-full px-2.5 py-1.5 rounded-lg bg-[#0C0F14] border border-slate-700 text-xs sm:text-sm font-mono font-semibold text-white"
-                        />
-                      </div>
-                    </div>
-
-                    {/* Frame Section + Glass Toggle Row */}
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="px-2.5 py-1.5 rounded-full bg-[#0C0F14] border border-slate-700/80 flex items-center justify-between gap-2 text-[11px] flex-1 min-w-0">
-                        <span className="text-slate-300 font-semibold truncate">
-                          Section: {win.outerSection || bp?.outerSectionCode || 'DC30C'}
-                        </span>
-                        <Lock className="w-3 h-3 text-slate-400 shrink-0" />
-                      </div>
-                      <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-200 shrink-0 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={win.glassEnabled}
-                          onChange={(e) =>
-                            onUpdateWindows(
-                              windows.map((w) =>
-                                w.id === win.id ? { ...w, glassEnabled: e.target.checked } : w
-                              )
-                            )
-                          }
-                          className="w-4 h-4 rounded accent-[#F5B738] cursor-pointer"
-                        />
-                        <span>Glass</span>
-                      </label>
-                    </div>
-
-                    {/* Per-Frame Gauge & Glass Specs 3-Chip Strip */}
-                    {renderFrameGaugeAndGlassControls({
-                      sectionGauge: win.sectionGauge,
-                      onChangeGauge: (g) =>
-                        onUpdateWindows(
-                          windows.map((w) =>
-                            w.id === win.id ? { ...w, sectionGauge: g } : w
-                          )
-                        ),
-                      glassEnabled: win.glassEnabled,
-                      onChangeGlassEnabled: (en) =>
-                        onUpdateWindows(
-                          windows.map((w) =>
-                            w.id === win.id ? { ...w, glassEnabled: en } : w
-                          )
-                        ),
-                      glassGauge: win.glassGauge,
-                      glassColor: win.glassColor,
-                      onChangeGlassSpec: (g, col) =>
-                        onUpdateWindows(
-                          windows.map((w) =>
-                            w.id === win.id
-                              ? { ...w, glassGauge: g, glassColor: col }
-                              : w
-                          )
-                        ),
-                    })}
-
-                    {/* Piece Steppers Row: 4 Columns Side-by-Side */}
-                    <div className="grid grid-cols-4 gap-1.5 pt-0.5">
-                      {[
-                        {
-                          label: 'M24 Pcs',
-                          val: win.m24Qty,
-                          set: (v: number) =>
-                            onUpdateWindows(
-                              windows.map((w) => (w.id === win.id ? { ...w, m24Qty: v } : w))
-                            ),
-                        },
-                        {
-                          label: 'M24A Pcs',
-                          val: win.m24aQty,
-                          set: (v: number) =>
-                            onUpdateWindows(
-                              windows.map((w) => (w.id === win.id ? { ...w, m24aQty: v } : w))
-                            ),
-                        },
-                        {
-                          label: 'D29 (H)',
-                          val: win.d29HeightQty,
-                          set: (v: number) =>
-                            onUpdateWindows(
-                              windows.map((w) =>
-                                w.id === win.id ? { ...w, d29HeightQty: v } : w
-                              )
-                            ),
-                        },
-                        {
-                          label: 'D29 (W)',
-                          val: win.d29WidthQty,
-                          set: (v: number) =>
-                            onUpdateWindows(
-                              windows.map((w) =>
-                                w.id === win.id ? { ...w, d29WidthQty: v } : w
-                              )
-                            ),
-                        },
-                      ].map((cnt, cIdx) => (
-                        <div
-                          key={cIdx}
-                          className="p-1 rounded-lg bg-[#0C0F14] border border-slate-800 text-center"
-                        >
-                          <div className="text-[9px] text-slate-400 truncate">{cnt.label}</div>
-                          <div className="flex items-center justify-center gap-1.5 mt-0.5 font-mono text-[11px]">
-                            <button
-                              type="button"
-                              onClick={() => cnt.set(Math.max(0, cnt.val - 1))}
-                              className="boss-flat-btn text-[#F5B738] font-black px-1 cursor-pointer"
-                            >
-                              -
-                            </button>
-                            <span className="font-bold text-white tabular-nums">{cnt.val}</span>
-                            <button
-                              type="button"
-                              onClick={() => cnt.set(cnt.val + 1)}
-                              className="boss-flat-btn text-[#F5B738] font-black px-1 cursor-pointer"
-                            >
-                              +
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-
-                    {isLastBp && (
-                      <button
-                        type="button"
-                        onClick={handleAddCalculation}
-                        className="boss-flat-btn w-full py-1.5 rounded-lg bg-[#0C0F14] hover:bg-[#F5B738] border border-dashed border-[#F5B738]/60 text-[#F5B738] hover:text-black text-[11px] font-extrabold flex items-center justify-center gap-1 transition-colors cursor-pointer"
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                        <span>Add Next {tabTitle}</span>
-                      </button>
-                    )}
-                  </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        );
-      })()}
-
-      {/* =================================================================== */}
       {/* TAB 1: SLIDING WINDOWS SCREEN                                       */}
       {/* =================================================================== */}
       {currentTab === 'WINDOWS' && (() => {
-        const standardWindows = windows.filter((w) => !w.blueprintId);
+        const standardWindows = windows;
         const handleAddStandardWindow = () => {
           const ft = ctxFrameType === 'F' ? 'F' : 'C';
           const newWin: WindowItem = {
@@ -3238,47 +2796,21 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                         <div className="px-2.5 py-1.5 rounded-full bg-[#0C0F14] border border-slate-700/80 flex items-center gap-1.5 min-w-0 flex-1">
                           <span className="text-[11px] text-slate-400 shrink-0">Section:</span>
                           <select
-                            disabled={isFrameLocked && !win.blueprintId}
-                            value={
-                              win.blueprintId
-                                ? `BP:${win.blueprintId}`
-                                : isFrameLocked
-                                ? ctxFrameType
-                                : win.frameType
-                            }
+                            disabled={isFrameLocked}
+                            value={isFrameLocked ? (ctxFrameType === 'F' ? 'F' : 'C') : win.frameType}
                             onChange={(e) => {
                               const val = e.target.value;
-                              if (val.startsWith('BP:')) {
-                                const bpId = val.slice(3);
-                                const bp = blueprints.find((b) => b.id === bpId);
-                                onUpdateWindows(
-                                  windows.map((w) =>
-                                    w.id === win.id
-                                      ? {
-                                          ...w,
-                                          blueprintId: bpId,
-                                          blueprintName: bp?.name,
-                                          frameType: bp?.outerSectionCode || w.frameType,
-                                          outerSection: bp?.outerSectionCode || w.outerSection,
-                                        }
-                                      : w
-                                  )
-                                );
-                              } else {
-                                onUpdateWindows(
-                                  windows.map((w) =>
-                                    w.id === win.id
-                                      ? {
-                                          ...w,
-                                          blueprintId: undefined,
-                                          blueprintName: undefined,
-                                          frameType: val,
-                                          outerSection: val,
-                                        }
-                                      : w
-                                  )
-                                );
-                              }
+                              onUpdateWindows(
+                                windows.map((w) =>
+                                  w.id === win.id
+                                    ? {
+                                        ...w,
+                                        frameType: val,
+                                        outerSection: val === 'F' ? 'DC30F' : val === 'C' ? 'DC30C' : val,
+                                      }
+                                    : w
+                                )
+                              );
                             }}
                             className="flex-1 min-w-0 bg-transparent text-[11px] font-bold text-slate-200 disabled:text-slate-300 focus:outline-none cursor-pointer truncate"
                           >
@@ -3442,6 +2974,441 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                         >
                           <Plus className="w-3.5 h-3.5" />
                           <span>Add Next Window</span>
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* =================================================================== */}
+      {/* TAB 1B: DG.WINDOWS SCREEN (ADMIN LOCK / UNLOCK CONTROLLED)          */}
+      {/* =================================================================== */}
+      {currentTab === 'DG_WINDOWS' && (() => {
+        const handleAddDgWindow = () => {
+          const ft = ctxFrameType === 'F' ? 'F' : 'C';
+          const newDw: DgWindowItem = {
+            id: `dgwin-${Date.now()}`,
+            width: 48,
+            height: 60,
+            qty: 1,
+            frameType: ft,
+            sectionGauge: ctxGaugeMode === 'ON' ? ctxGauge : '1.6',
+            glassGauge: ctxGlassMode === 'ON' ? ctxGlassGauge : '5',
+            glassColor: ctxGlassMode === 'ON' ? ctxGlassColor : 'CLEAR',
+            glassEnabled: true,
+            panelCount: 2,
+            lockType: 'LATCH',
+            dg23aHQty: 0,
+            dg23aWQty: 0,
+            dg24aHQty: 0,
+            dg24aWQty: 0,
+            extras: [],
+          };
+          onUpdateDgWindows([...dgWindows, newDw]);
+        };
+
+        if (isDgWindowsLocked) {
+          return (
+            <div className="p-6 sm:p-10 rounded-2xl bg-[#14181F] border border-amber-500/40 text-center space-y-3">
+              <div className="w-12 h-12 mx-auto rounded-2xl bg-amber-500/15 border border-amber-500/50 text-[#F5B738] flex items-center justify-center">
+                <Lock className="w-6 h-6" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-sm sm:text-base font-black text-[#F5B738]">
+                  {layoutConfig.tabCustomTitles.DG_WINDOWS || 'DG.Windows'} Locked
+                </h3>
+                <p className="text-xs text-slate-300 max-w-md mx-auto">
+                  This module is currently locked from the Admin Panel. Once the Admin unlocks DG.Windows, tap Sync to activate it.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => onSyncFromSupabase?.({ forceRates: false, silent: false })}
+                disabled={isSyncingCloud}
+                className="boss-flat-btn px-4 py-2 rounded-xl bg-[#F5B738] hover:bg-amber-400 text-black text-xs font-extrabold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isSyncingCloud ? 'animate-spin' : ''}`} />
+                <span>{isSyncingCloud ? 'Syncing...' : 'Sync / Check Updates'}</span>
+              </button>
+            </div>
+          );
+        }
+
+        return (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <h3 className="text-sm sm:text-base font-extrabold text-[#F5B738] truncate">
+                  DG.Windows ({dgWindows.length})
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={handleAddDgWindow}
+                className="boss-flat-btn w-7 h-7 rounded-lg bg-[#F5B738] text-black hover:bg-amber-400 flex items-center justify-center shrink-0 cursor-pointer shadow"
+                title="Add DG.Window"
+                aria-label="Add DG.Window"
+              >
+                <Plus className="w-4 h-4 stroke-[2.5]" />
+              </button>
+            </div>
+
+            {dgWindows.length === 0 ? (
+              <div className="p-6 sm:p-10 rounded-xl bg-[#14181F] border border-[#2B3441] text-center space-y-2.5">
+                <div className="text-xs text-slate-400">
+                  No DG.Windows added yet. Tap &quot;+&quot; above to start calculating.
+                </div>
+                <button
+                  type="button"
+                  onClick={handleAddDgWindow}
+                  className="px-3.5 py-1.5 rounded-lg bg-[#F5B738] text-black text-[11px] font-extrabold hover:bg-amber-400 inline-flex items-center gap-1 cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Add First DG.Window</span>
+                </button>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                {dgWindows.map((dw, idx) => {
+                  const isFrameLocked = ctxFrameType !== 'OFF';
+                  const activeFrame = isFrameLocked
+                    ? ctxFrameType === 'F'
+                      ? 'F'
+                      : 'C'
+                    : dw.frameType === 'F'
+                    ? 'F'
+                    : 'C';
+                  const isLastDw = idx === dgWindows.length - 1;
+
+                  return (
+                    <div
+                      key={dw.id}
+                      className="p-2.5 sm:p-3 rounded-xl bg-[#14181F] border border-[#2B3441] space-y-2"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="text-xs font-extrabold text-[#F5B738] truncate">
+                            DG.Window #{idx + 1}
+                          </span>
+                          <span className="px-1.5 py-0.5 rounded-full border border-[#F5B738]/60 bg-[#0C0F14] text-[9.5px] font-mono font-bold text-[#F5B738] shrink-0">
+                            {((dw.width * dw.height) / 144).toFixed(2)} sq.ft
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          {isLastDw && (
+                            <button
+                              type="button"
+                              onClick={handleAddDgWindow}
+                              className="boss-flat-btn w-6 h-6 rounded-full bg-[#F5B738] hover:bg-amber-400 text-black flex items-center justify-center shadow cursor-pointer"
+                              title="Add next DG.Window"
+                            >
+                              <Plus className="w-3.5 h-3.5 stroke-[2.6]" />
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onUpdateDgWindows(dgWindows.filter((item) => item.id !== dw.id))
+                            }
+                            className="boss-flat-btn text-rose-400 hover:text-rose-300 p-1 shrink-0 cursor-pointer"
+                            title="Remove DG.Window"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Panels Selector (2 / 3 / 4 Palay) */}
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs text-slate-400 font-semibold shrink-0">Panels:</span>
+                        <div className="flex items-center gap-1.5">
+                          {[2, 3, 4].map((count) => (
+                            <button
+                              key={count}
+                              type="button"
+                              onClick={() =>
+                                onUpdateDgWindows(
+                                  dgWindows.map((item) =>
+                                    item.id === dw.id ? { ...item, panelCount: count } : item
+                                  )
+                                )
+                              }
+                              className={`boss-flat-btn px-2.5 py-1 rounded-md text-[11px] font-bold transition-colors cursor-pointer ${
+                                dw.panelCount === count
+                                  ? 'bg-[#F5B738] text-black'
+                                  : 'bg-[#0C0F14] text-slate-300 border border-slate-700'
+                              }`}
+                            >
+                              {count} Palay
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Lock / Handle Selector */}
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs text-slate-400 font-semibold shrink-0">
+                          Lock / Handle:
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          {(['LATCH', 'PUSH_HANDLE'] as const).map((lk) => (
+                            <button
+                              key={lk}
+                              type="button"
+                              onClick={() =>
+                                onUpdateDgWindows(
+                                  dgWindows.map((item) =>
+                                    item.id === dw.id ? { ...item, lockType: lk } : item
+                                  )
+                                )
+                              }
+                              className={`boss-flat-btn px-2.5 py-1 rounded-md text-[11px] font-bold transition-colors cursor-pointer ${
+                                dw.lockType === lk
+                                  ? lk === 'PUSH_HANDLE'
+                                    ? 'bg-sky-500 text-black'
+                                    : 'bg-[#F5B738] text-black'
+                                  : 'bg-[#0C0F14] text-slate-300 border border-slate-700'
+                              }`}
+                            >
+                              {lk === 'LATCH' ? 'Latch' : 'Push Handle'}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Width, Height, Qty Inputs */}
+                      <div className="grid grid-cols-3 gap-2">
+                        <div>
+                          <label className="block text-[10px] text-slate-400 mb-0.5 truncate">
+                            Width ({unitLabel(measurementUnit)})
+                          </label>
+                          <input
+                            key={`${dw.id}-w-${dw.width}-${measurementUnit}`}
+                            type="text"
+                            defaultValue={formatDimValueOnly(dw.width, measurementUnit)}
+                            onBlur={(e) => {
+                              const parsed = parseDimToInches(e.target.value, measurementUnit);
+                              if (parsed > 0) {
+                                onUpdateDgWindows(
+                                  dgWindows.map((item) =>
+                                    item.id === dw.id ? { ...item, width: parsed } : item
+                                  )
+                                );
+                              }
+                            }}
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0C0F14] border border-slate-700 text-xs sm:text-sm font-mono font-semibold text-white"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] text-slate-400 mb-0.5 truncate">
+                            Height ({unitLabel(measurementUnit)})
+                          </label>
+                          <input
+                            key={`${dw.id}-h-${dw.height}-${measurementUnit}`}
+                            type="text"
+                            defaultValue={formatDimValueOnly(dw.height, measurementUnit)}
+                            onBlur={(e) => {
+                              const parsed = parseDimToInches(e.target.value, measurementUnit);
+                              if (parsed > 0) {
+                                onUpdateDgWindows(
+                                  dgWindows.map((item) =>
+                                    item.id === dw.id ? { ...item, height: parsed } : item
+                                  )
+                                );
+                              }
+                            }}
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0C0F14] border border-slate-700 text-xs sm:text-sm font-mono font-semibold text-white"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] text-slate-400 mb-0.5">Qty</label>
+                          <input
+                            type="number"
+                            value={dw.qty}
+                            onChange={(e) =>
+                              onUpdateDgWindows(
+                                dgWindows.map((item) =>
+                                  item.id === dw.id
+                                    ? { ...item, qty: Math.max(1, parseInt(e.target.value, 10) || 1) }
+                                    : item
+                                )
+                              )
+                            }
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0C0F14] border border-slate-700 text-xs sm:text-sm font-mono font-semibold text-white"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Frame (C / F) + Glass Checkbox Row */}
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="px-2.5 py-1.5 rounded-full bg-[#0C0F14] border border-slate-700/80 flex items-center gap-1.5 min-w-0 flex-1">
+                          <span className="text-[11px] text-slate-400 shrink-0">Frame:</span>
+                          <select
+                            disabled={isFrameLocked}
+                            value={activeFrame}
+                            onChange={(e) => {
+                              const val = e.target.value === 'F' ? 'F' : 'C';
+                              onUpdateDgWindows(
+                                dgWindows.map((item) =>
+                                  item.id === dw.id ? { ...item, frameType: val } : item
+                                )
+                              );
+                            }}
+                            className="flex-1 min-w-0 bg-transparent text-[11px] font-bold text-slate-200 disabled:text-slate-300 focus:outline-none cursor-pointer truncate"
+                          >
+                            <option value="C" className="bg-[#14181F] text-white">
+                              Frame C
+                            </option>
+                            <option value="F" className="bg-[#14181F] text-white">
+                              Frame F
+                            </option>
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => onSetCtxFrameType(isFrameLocked ? 'OFF' : 'C')}
+                            className={`boss-flat-btn p-0.5 rounded shrink-0 cursor-pointer ${
+                              isFrameLocked ? 'text-slate-400 hover:text-[#F5B738]' : 'text-[#F5B738]'
+                            }`}
+                            title={
+                              isFrameLocked
+                                ? 'Main Frame Locked — Tap to Unlock Separate Frame'
+                                : 'Separate Frame Unlocked — Tap to Lock'
+                            }
+                          >
+                            {isFrameLocked ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
+                          </button>
+                        </div>
+
+                        <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-200 shrink-0 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={dw.glassEnabled}
+                            onChange={(e) =>
+                              onUpdateDgWindows(
+                                dgWindows.map((item) =>
+                                  item.id === dw.id
+                                    ? { ...item, glassEnabled: e.target.checked }
+                                    : item
+                                )
+                              )
+                            }
+                            className="w-4 h-4 rounded accent-[#F5B738] cursor-pointer"
+                          />
+                          <span>Glass</span>
+                        </label>
+                      </div>
+
+                      {/* Per-Frame Gauge & Glass 3-Chip Strip */}
+                      {renderFrameGaugeAndGlassControls({
+                        sectionGauge: dw.sectionGauge,
+                        onChangeGauge: (g) =>
+                          onUpdateDgWindows(
+                            dgWindows.map((item) =>
+                              item.id === dw.id ? { ...item, sectionGauge: g } : item
+                            )
+                          ),
+                        glassEnabled: dw.glassEnabled,
+                        onChangeGlassEnabled: (en) =>
+                          onUpdateDgWindows(
+                            dgWindows.map((item) =>
+                              item.id === dw.id ? { ...item, glassEnabled: en } : item
+                            )
+                          ),
+                        glassGauge: dw.glassGauge,
+                        glassColor: dw.glassColor,
+                        onChangeGlassSpec: (g, col) =>
+                          onUpdateDgWindows(
+                            dgWindows.map((item) =>
+                              item.id === dw.id
+                                ? { ...item, glassGauge: g, glassColor: col }
+                                : item
+                            )
+                          ),
+                      })}
+
+                      {/* Optional Piece Steppers (Start at 0): DG.23A H, DG.23A W, DG.24A H, DG.24A W */}
+                      <div className="grid grid-cols-4 gap-1.5 pt-0.5">
+                        {[
+                          {
+                            label: 'DG.23A H',
+                            val: dw.dg23aHQty || 0,
+                            set: (v: number) =>
+                              onUpdateDgWindows(
+                                dgWindows.map((item) =>
+                                  item.id === dw.id ? { ...item, dg23aHQty: v } : item
+                                )
+                              ),
+                          },
+                          {
+                            label: 'DG.23A W',
+                            val: dw.dg23aWQty || 0,
+                            set: (v: number) =>
+                              onUpdateDgWindows(
+                                dgWindows.map((item) =>
+                                  item.id === dw.id ? { ...item, dg23aWQty: v } : item
+                                )
+                              ),
+                          },
+                          {
+                            label: 'DG.24A H',
+                            val: dw.dg24aHQty || 0,
+                            set: (v: number) =>
+                              onUpdateDgWindows(
+                                dgWindows.map((item) =>
+                                  item.id === dw.id ? { ...item, dg24aHQty: v } : item
+                                )
+                              ),
+                          },
+                          {
+                            label: 'DG.24A W',
+                            val: dw.dg24aWQty || 0,
+                            set: (v: number) =>
+                              onUpdateDgWindows(
+                                dgWindows.map((item) =>
+                                  item.id === dw.id ? { ...item, dg24aWQty: v } : item
+                                )
+                              ),
+                          },
+                        ].map((cnt, cIdx) => (
+                          <div
+                            key={cIdx}
+                            className="p-1 rounded-lg bg-[#0C0F14] border border-slate-800 text-center"
+                          >
+                            <div className="text-[9px] text-slate-400 truncate">{cnt.label}</div>
+                            <div className="flex items-center justify-center gap-1.5 mt-0.5 font-mono text-[11px]">
+                              <button
+                                type="button"
+                                onClick={() => cnt.set(Math.max(0, cnt.val - 1))}
+                                className="boss-flat-btn text-[#F5B738] font-black px-1 cursor-pointer"
+                              >
+                                -
+                              </button>
+                              <span className="font-bold text-white tabular-nums">{cnt.val}</span>
+                              <button
+                                type="button"
+                                onClick={() => cnt.set(cnt.val + 1)}
+                                className="boss-flat-btn text-[#F5B738] font-black px-1 cursor-pointer"
+                              >
+                                +
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {isLastDw && (
+                        <button
+                          type="button"
+                          onClick={handleAddDgWindow}
+                          className="boss-flat-btn w-full py-1.5 rounded-lg bg-[#0C0F14] hover:bg-[#F5B738] border border-dashed border-[#F5B738]/60 text-[#F5B738] hover:text-black text-[11px] font-extrabold flex items-center justify-center gap-1 transition-colors cursor-pointer"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>Add Next DG.Window</span>
                         </button>
                       )}
                     </div>
@@ -5111,7 +5078,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                 <button
                   type="button"
                   onClick={() => {
-                    const summary = `${windows.length} Win, ${doors.length} Doors, ${fixframes.length} Fix`;
+                    const summary = `${windows.length} Win${dgWindows.length > 0 ? `, ${dgWindows.length} DG.Win` : ''}, ${doors.length} Doors, ${fixframes.length} Fix`;
                     onSaveQuotationHistory({
                       id: Date.now(),
                       timestamp: new Date().toLocaleString('en-GB'),
@@ -5130,6 +5097,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                       totalUnits: activeQuote.totalUnits,
                       itemsSummary: summary,
                       windowsJson: JSON.stringify(windows),
+                      dgWindowsJson: JSON.stringify(dgWindows),
                       doorsJson: JSON.stringify(doors),
                       fixframesJson: JSON.stringify(fixframes),
                       openableWindowsJson: JSON.stringify(openableWindows),
@@ -6054,11 +6022,16 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
 
             <button
               type="button"
-              onClick={() => setShowSupportModal(true)}
-              className="boss-flat-btn shrink-0 px-2.5 py-1.5 rounded-lg border border-sky-500/60 bg-sky-950/30 text-sky-300 hover:bg-sky-500 hover:text-black text-[11px] font-extrabold flex items-center gap-1 cursor-pointer"
+              onClick={openSupportModal}
+              className="boss-flat-btn relative shrink-0 px-2.5 py-1.5 rounded-lg border border-sky-500/60 bg-sky-950/30 text-sky-300 hover:bg-sky-500 hover:text-black text-[11px] font-extrabold flex items-center gap-1 cursor-pointer"
             >
               <MessageSquarePlus className="w-3 h-3 shrink-0" />
               <span>Support Request</span>
+              {unreadAdminSupportCount > 0 && (
+                <span className="ml-0.5 px-1.5 py-0.2 rounded-full bg-rose-600 text-white text-[9px] font-black">
+                  {unreadAdminSupportCount}
+                </span>
+              )}
             </button>
 
             <button
@@ -6684,7 +6657,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                                   type="button"
                                   onClick={() => {
                                     onDeleteColor(col);
-                                    showSettingsToast(`Deleted color "${col}" (Saved in Backup Vault)`);
+                                    showSettingsToast(`Deleted color "${col}"`);
                                   }}
                                   className="boss-flat-btn text-rose-400 hover:text-rose-300 font-bold text-[10px] cursor-pointer"
                                   title="Delete color"
@@ -6879,7 +6852,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                                           type="button"
                                           onClick={() => {
                                             onDeleteSection(sec);
-                                            showSettingsToast(`Deleted "${sec}" (Saved in Backup Vault)`);
+                                            showSettingsToast(`Deleted "${sec}"`);
                                           }}
                                           className="boss-flat-btn p-1 rounded bg-rose-950/80 border border-rose-500/50 text-rose-300"
                                           title="Delete section"
@@ -6928,7 +6901,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                                     type="button"
                                     onClick={() => {
                                       onDeleteSection(sec);
-                                      showSettingsToast(`Deleted "${sec}" (Saved in Backup Vault)`);
+                                      showSettingsToast(`Deleted "${sec}"`);
                                     }}
                                     className="boss-flat-btn p-0.5 text-rose-400 hover:text-rose-300 cursor-pointer"
                                     title="Delete Section"
@@ -7250,7 +7223,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                                   type="button"
                                   onClick={() => {
                                     onDeleteGlassColor(gm, col);
-                                    showSettingsToast(`Deleted "${col}" from ${gm}mm Glass (Saved to Backup)`);
+                                    showSettingsToast(`Deleted "${col}" from ${gm}mm Glass`);
                                   }}
                                   className="boss-flat-btn p-0.5 text-rose-400 hover:text-rose-300 shrink-0 cursor-pointer"
                                   title={`Delete ${col} from ${gm}mm Glass`}
@@ -7274,36 +7247,6 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                           ))}
                         </div>
                       )}
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Deleted Items Backup Vault (1-Click Restore) */}
-              {deletedBackupVault.length > 0 && (
-                <div className="p-2.5 rounded-xl bg-[#0C0F14] border border-amber-500/40 space-y-1.5 max-h-36 overflow-y-auto">
-                  <div className="text-[11px] font-bold text-[#F5B738]">
-                    Deleted Items Backup Vault ({deletedBackupVault.length} — 1-Click Restore):
-                  </div>
-                  {deletedBackupVault.map((bItem) => (
-                    <div
-                      key={bItem.id}
-                      className="p-1.5 rounded bg-[#14181F] border border-slate-800 flex items-center justify-between gap-2 text-[11px]"
-                    >
-                      <div className="truncate">
-                        <span className="font-mono text-amber-300">[{bItem.category}]</span>{' '}
-                        <span className="font-bold text-white">{bItem.title}</span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          onRestoreBackupItem(bItem.id);
-                          showSettingsToast(`Restored "${bItem.title}" from Backup!`);
-                        }}
-                        className="boss-flat-btn px-2 py-0.5 rounded bg-emerald-500 text-black font-bold text-[10px] shrink-0"
-                      >
-                        Restore
-                      </button>
                     </div>
                   ))}
                 </div>
@@ -8012,12 +7955,19 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                 {packages.map((pkg, idx) => {
                   const curPrice = pkg.priceRs ?? pkg.price ?? 0;
                   const origPrice = pkg.originalPriceRs ?? curPrice;
-                  const hasDiscount =
-                    (pkg.discountPct && pkg.discountPct > 0) || origPrice > curPrice;
+                  const discPct =
+                    pkg.discountPct && pkg.discountPct > 0
+                      ? pkg.discountPct
+                      : origPrice > curPrice
+                      ? Math.round(((origPrice - curPrice) / origPrice) * 100)
+                      : 0;
+                  const hasDiscount = discPct > 0 || origPrice > curPrice;
                   return (
                     <div
                       key={pkg.id || idx}
-                      className="p-3.5 rounded-xl bg-[#0C0F14] border border-slate-800 flex flex-col justify-between space-y-2.5"
+                      className={`p-3.5 rounded-xl bg-[#0C0F14] border ${
+                        hasDiscount ? 'border-amber-500/70' : 'border-slate-800'
+                      } flex flex-col justify-between space-y-2.5`}
                     >
                       <div className="space-y-1.5">
                         <div className="flex items-center justify-between gap-1.5">
@@ -8028,16 +7978,26 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                             </span>
                           )}
                         </div>
-                        <div className="flex items-baseline gap-2">
-                          <span className="text-xl font-black text-[#F5B738]">
+                        <div className="flex items-baseline gap-2 flex-wrap">
+                          <span className={`text-xl font-black ${hasDiscount ? 'text-emerald-400' : 'text-[#F5B738]'}`}>
                             Rs. {curPrice.toLocaleString()}
                           </span>
                           {hasDiscount && (
-                            <span className="text-xs line-through text-slate-500">
-                              Rs. {origPrice.toLocaleString()}
-                            </span>
+                            <>
+                              <span className="text-xs line-through text-slate-500">
+                                Rs. {origPrice.toLocaleString()}
+                              </span>
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-600 text-white font-black">
+                                {discPct}% OFF
+                              </span>
+                            </>
                           )}
                         </div>
+                        {pkg.discountOfferText && (
+                          <div className="text-[10.5px] text-amber-300 font-semibold italic">
+                            ⚡ {pkg.discountOfferText}
+                          </div>
+                        )}
                         <div className="text-[10px] text-slate-400">
                           Duration: {pkg.durationLabel || `${pkg.durationMonths} Month(s)`}
                         </div>
@@ -8839,41 +8799,118 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               </div>
             </form>
 
-            {/* Submitted Requests History */}
-            <div className="border-t border-slate-800 pt-2.5 space-y-1.5">
-              <div className="flex items-center justify-between text-[11px] font-bold text-slate-300">
-                <span>Your Sent Requests ({supportRequests.length})</span>
-                <span className="text-[10px] text-slate-400">Synced with Support Team</span>
+            {/* Submitted Requests & Admin Messages / Replies */}
+            <div className="border-t border-slate-800 pt-2.5 space-y-2">
+              <div className="flex items-center justify-between gap-2 flex-wrap text-[11px] font-bold text-slate-300">
+                <span>Messages &amp; Admin Replies ({supportRequests.length})</span>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={isRefreshingSupport}
+                    onClick={() => {
+                      onMarkSupportMessagesRead?.();
+                      if (onRefreshSupportRequests) {
+                        setIsRefreshingSupport(true);
+                        Promise.resolve(onRefreshSupportRequests()).finally(() =>
+                          setIsRefreshingSupport(false)
+                        );
+                      }
+                    }}
+                    className="boss-flat-btn px-2 py-1 rounded bg-sky-500/15 border border-sky-500/50 text-sky-300 hover:bg-sky-500 hover:text-black text-[10px] font-bold flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${isRefreshingSupport ? 'animate-spin' : ''}`} />
+                    <span>{isRefreshingSupport ? 'Refreshing...' : 'Refresh'}</span>
+                  </button>
+                  {supportRequests.length > 0 && onClearAllSupportRequests && (
+                    <button
+                      type="button"
+                      onClick={() => onClearAllSupportRequests()}
+                      className="boss-flat-btn px-2 py-1 rounded bg-rose-950/70 border border-rose-500/60 text-rose-300 hover:bg-rose-600 hover:text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                      <span>Clear All</span>
+                    </button>
+                  )}
+                </div>
               </div>
               {supportRequests.length === 0 ? (
                 <div className="py-3 text-center text-[11px] text-slate-500">
-                  No requests sent yet.
+                  No messages or admin replies yet.
                 </div>
               ) : (
-                <div className="max-h-36 overflow-y-auto space-y-1.5 pr-0.5">
-                  {supportRequests.map((req) => (
-                    <div
-                      key={req.id}
-                      className="p-2 rounded-lg bg-[#14181F] border border-slate-800 text-[11px] space-y-0.5"
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-bold text-sky-300 truncate">{req.requestType}</span>
-                        <span
-                          className={`px-1.5 py-0.5 rounded text-[9.5px] font-bold shrink-0 ${
-                            req.isResolved
-                              ? 'bg-emerald-500/20 text-emerald-300'
-                              : 'bg-amber-500/20 text-amber-300'
-                          }`}
-                        >
-                          {req.isResolved ? 'Resolved' : 'Pending'}
-                        </span>
+                <div className="max-h-52 overflow-y-auto space-y-2 pr-0.5">
+                  {supportRequests.map((req) => {
+                    const isAdminMsg = req.sender === 'ADMIN';
+                    return (
+                      <div
+                        key={req.id}
+                        className={`p-2.5 rounded-xl border text-[11px] space-y-1.5 ${
+                          isAdminMsg
+                            ? 'bg-emerald-950/25 border-emerald-500/60'
+                            : 'bg-[#14181F] border-slate-800'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            {isAdminMsg && (
+                              <span className="px-1.5 py-0.5 rounded bg-emerald-500 text-black text-[9px] font-black uppercase shrink-0">
+                                {req.isBroadcast ? 'ADMIN BROADCAST' : 'ADMIN MESSAGE'}
+                              </span>
+                            )}
+                            <span className="font-bold text-sky-300 truncate">{req.requestType}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            {!isAdminMsg && (
+                              <span
+                                className={`px-1.5 py-0.5 rounded text-[9.5px] font-bold ${
+                                  req.adminReply || req.isResolved
+                                    ? 'bg-emerald-500/20 text-emerald-300'
+                                    : 'bg-amber-500/20 text-amber-300'
+                                }`}
+                              >
+                                {req.adminReply ? 'Replied' : req.isResolved ? 'Resolved' : 'Pending'}
+                              </span>
+                            )}
+                            {onDeleteSupportRequest && (
+                              <button
+                                type="button"
+                                onClick={() => onDeleteSupportRequest(req.id)}
+                                className="boss-flat-btn p-1 rounded bg-rose-950/70 border border-rose-500/40 text-rose-300 hover:bg-rose-600 hover:text-white cursor-pointer"
+                                title="Clear this message"
+                                aria-label="Clear message"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="text-slate-100 leading-snug whitespace-pre-wrap break-words">
+                          {req.message}
+                        </div>
+
+                        {req.adminReply && (
+                          <div className="p-2 rounded-lg bg-emerald-950/50 border border-emerald-500/50 space-y-0.5">
+                            <div className="flex items-center justify-between gap-2 text-[9.5px] font-black text-emerald-300">
+                              <span>ADMIN REPLY</span>
+                              {req.repliedAt && (
+                                <span className="font-mono text-emerald-200/70">
+                                  {new Date(req.repliedAt).toLocaleString('en-GB')}
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[11px] text-emerald-100 leading-snug whitespace-pre-wrap break-words">
+                              {req.adminReply}
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="text-[9.5px] text-slate-500 font-mono">
+                          {new Date(req.createdAt).toLocaleString('en-GB')}
+                        </div>
                       </div>
-                      <div className="text-slate-200 leading-snug">{req.message}</div>
-                      <div className="text-[9.5px] text-slate-500 font-mono">
-                        {new Date(req.createdAt).toLocaleString('en-GB')}
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>

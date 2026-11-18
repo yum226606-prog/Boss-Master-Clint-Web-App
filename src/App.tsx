@@ -14,8 +14,8 @@ import {
   ClientAppLayoutControlConfig,
   ClientSupportRequest,
   DeletedBackupItem,
+  DgWindowItem,
   DoorItem,
-  DragDropBlueprint,
   ExtraPiece,
   FixFrameItem,
   FormulaCategorySettings,
@@ -46,6 +46,7 @@ import {
   GAUGES,
   getClearedZeroRates,
   getDefaultCategoryFormula,
+  getDefaultDgWindowFormula,
   getDefaultFSectionFormula,
   getDefaultGlassFormulas,
   getDefaultLayoutControlConfig,
@@ -54,7 +55,6 @@ import {
   getInitialGlassRates,
   getInitialRates,
   getStarterBankAccounts,
-  getStarterBlueprints,
   getStarterPackages,
 } from './utils/bossDefaultRates';
 import bossLionLogoImg from './assets/images/boss_lion_logo_1791741005749.jpg';
@@ -91,6 +91,53 @@ import {
 
 const STORAGE_KEY = 'boss_aluminium_master_web_state_v1';
 const DEVICE_RATES_KEY = 'boss_client_device_rates_v1';
+const CLEARED_SUPPORT_MSG_IDS_KEY = 'boss_cleared_support_msg_ids_v1';
+const LAST_SEEN_SUPPORT_MS_KEY = 'boss_last_seen_support_ms_v1';
+
+function loadClearedSupportIds(): Set<string> {
+  if (typeof window === 'undefined') return new Set();
+  try {
+    const raw = localStorage.getItem(CLEARED_SUPPORT_MSG_IDS_KEY);
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? new Set(arr.map((x) => String(x))) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function addClearedSupportIds(ids: string[]): void {
+  if (typeof window === 'undefined' || ids.length === 0) return;
+  try {
+    const set = loadClearedSupportIds();
+    ids.forEach((id) => {
+      if (id) set.add(String(id));
+    });
+    const trimmed = Array.from(set).slice(-500);
+    localStorage.setItem(CLEARED_SUPPORT_MSG_IDS_KEY, JSON.stringify(trimmed));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function loadLastSeenSupportMs(): number {
+  if (typeof window === 'undefined') return 0;
+  try {
+    const val = Number(localStorage.getItem(LAST_SEEN_SUPPORT_MS_KEY) || 0);
+    return Number.isFinite(val) ? val : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function saveLastSeenSupportMs(ms: number): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(LAST_SEEN_SUPPORT_MS_KEY, String(ms));
+  } catch {
+    // ignore storage errors
+  }
+}
 
 export default function App() {
   const [authSession, setAuthSession] = useState<ClientAuthSession | null>(() =>
@@ -129,6 +176,9 @@ export default function App() {
   // Formulas State
   const [windowFormula, setWindowFormula] = useState<WindowFormulaSettings>(() =>
     getDefaultWindowFormula()
+  );
+  const [dgWindowFormula, setDgWindowFormula] = useState<WindowFormulaSettings>(() =>
+    getDefaultDgWindowFormula()
   );
   const [slidingDoorFormula, setSlidingDoorFormula] = useState<SlidingDoorFormulaSettings>(() =>
     getDefaultSlidingDoorFormula()
@@ -171,6 +221,7 @@ export default function App() {
       lockType: 'LATCH',
     },
   ]);
+  const [dgWindows, setDgWindows] = useState<DgWindowItem[]>([]);
   const [doors, setDoors] = useState<DoorItem[]>([
     {
       id: 'door-starter-1',
@@ -209,10 +260,7 @@ export default function App() {
   const [labourCost, setLabourCost] = useState<number>(0);
   const [savedQuotations, setSavedQuotations] = useState<SavedQuotation[]>([]);
 
-  // Blueprints, Packages, Bank Accounts & Layout Config
-  const [blueprints, setBlueprints] = useState<DragDropBlueprint[]>(() =>
-    getStarterBlueprints()
-  );
+  // Packages, Bank Accounts & Layout Config
   const [bankAccounts, setBankAccounts] = useState<BankAccountConfig[]>(() =>
     getStarterBankAccounts()
   );
@@ -286,6 +334,12 @@ export default function App() {
   // Client Support Team Requests State
   const [supportRequests, setSupportRequests] = useState<ClientSupportRequest[]>([]);
   const [isSubmittingSupportRequest, setIsSubmittingSupportRequest] = useState(false);
+  const [lastSeenSupportMs, setLastSeenSupportMs] = useState<number>(() =>
+    loadLastSeenSupportMs()
+  );
+  const [isOnline, setIsOnline] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine !== false : true
+  );
 
   // PWA Install & Mobile Theme Studio State
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
@@ -330,14 +384,21 @@ export default function App() {
     const silent = Boolean(options?.silent);
     const activeSession =
       options?.sessionOverride !== undefined ? options.sessionOverride : authSession;
+
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      if (!silent) {
+        triggerGlobalToast('📴 Offline Mode — App aapke saved local data par chal rahi hai.');
+      }
+      return false;
+    }
+
     setIsSyncingCloud(true);
     try {
       const [cfgRes, usersRes, clientUsersRes, subsRes, clientIpAddress, serverNowMs] = await Promise.all([
         callSupabaseProxy({
           table: 'app_configs',
           method: 'GET',
-          query:
-            'id=in.(global_config,master_engine_config,aluminium_rates_v1,custom_sections_v1,formulas_v1,blueprints_v1,layout_config_v1,company_branding_v1,supabase_config_v1)&select=id,value',
+          query: 'select=id,value',
         }),
         callSupabaseProxy({
           table: 'users',
@@ -358,10 +419,20 @@ export default function App() {
         fetchSupabaseServerTimeMs(),
       ]);
 
+      // Offline / unreachable network guard: NEVER overwrite cached access, offers, packages, or rates when offline!
+      const anyCloudSuccess =
+        cfgRes.ok || usersRes.ok || subsRes.ok || clientUsersRes.ok;
+      if (!anyCloudSuccess) {
+        if (!silent) {
+          triggerGlobalToast('📴 Offline / Cloud unreachable — Using saved device data.');
+        }
+        return false;
+      }
+
       const cfgMap: Record<string, any> = {};
       if (cfgRes.ok && Array.isArray(cfgRes.data)) {
         cfgRes.data.forEach((row: any) => {
-          if (row?.id && row?.value) {
+          if (row?.id && row?.value !== undefined) {
             cfgMap[row.id] = row.value;
           }
         });
@@ -377,7 +448,6 @@ export default function App() {
       const ratesCfg = cfgMap.aluminium_rates_v1 || {};
       const sectionsCfg = cfgMap.custom_sections_v1 || {};
       const formulasCfg = cfgMap.formulas_v1 || {};
-      const blueprintsCfg = cfgMap.blueprints_v1 || {};
       const layoutCfg = cfgMap.layout_config_v1 || {};
       const brandingCfg = cfgMap.company_branding_v1 || {};
       const sbMigrationCfg =
@@ -416,23 +486,170 @@ export default function App() {
       }
 
       // 1. Packages, Bank Accounts, Broadcasts, Offers, Main Logo, Mobile APK/iOS & Themes
-      if (Array.isArray(globalCfg.packages) && globalCfg.packages.length > 0) {
-        setPackages(globalCfg.packages);
-      }
       if (Array.isArray(globalCfg.bankAccounts) && globalCfg.bankAccounts.length > 0) {
         setBankAccounts(globalCfg.bankAccounts);
       }
-      if (globalCfg.activeOffer !== undefined || globalCfg.activeBanner !== undefined || globalCfg.bannerConfig !== undefined) {
-        setActiveOffer(globalCfg.activeOffer || globalCfg.activeBanner || globalCfg.bannerConfig || null);
+
+      // Normalize Admin Discount Offer & Broadcast Banners (supporting all Admin field/key variants)
+      const cloudOfferUpdateTs = Number(
+        globalCfg.lastUpdated || globalCfg.lastCloudSyncAt || Date.now()
+      );
+      const rawOffersList = [
+        ...(Array.isArray(globalCfg.offers) ? globalCfg.offers : []),
+        ...(Array.isArray(globalCfg.activeOffers) ? globalCfg.activeOffers : []),
+        ...(Array.isArray(cfgMap.offers_v1) ? cfgMap.offers_v1 : []),
+      ];
+      const activeFromList =
+        rawOffersList.find(
+          (o: any) => o && o.isActive !== false && o.isVisible !== false && o.showBanner !== false
+        ) || rawOffersList[0];
+
+      const rawCandidateOffer =
+        globalCfg.activeOffer ||
+        globalCfg.discountOffer ||
+        globalCfg.specialOffer ||
+        globalCfg.promoOffer ||
+        globalCfg.offerBanner ||
+        globalCfg.activeBanner ||
+        globalCfg.bannerConfig ||
+        globalCfg.offer ||
+        cfgMap.offer_banner_v1 ||
+        cfgMap.active_offer_v1 ||
+        cfgMap.discount_offer_v1 ||
+        activeFromList ||
+        null;
+
+      const normalizeOfferObj = (raw: any): AppOfferBanner | null => {
+        if (!raw || typeof raw !== 'object') return null;
+        const rawTitle = String(raw.title || raw.name || raw.heading || '').trim();
+        const rawMsg = String(raw.message || raw.description || raw.text || '').trim();
+        const rawBadge = String(raw.badgeText || raw.badge || 'SPECIAL OFFER').trim();
+        let parsedPct = Number(
+          raw.discountPct ??
+            raw.discount_pct ??
+            raw.discountPercent ??
+            raw.discount ??
+            raw.percentage ??
+            globalCfg.globalDiscountPct ??
+            0
+        );
+        if (!Number.isFinite(parsedPct) || parsedPct < 0) parsedPct = 0;
+        if (parsedPct === 0) {
+          const pctMatch = `${rawBadge} ${rawTitle} ${rawMsg}`.match(/(\d{1,2})\s*%/);
+          if (pctMatch) parsedPct = Number(pctMatch[1]) || 0;
+        }
+        return {
+          id: String(raw.id || 'admin-offer-1'),
+          title: rawTitle || (parsedPct > 0 ? `${parsedPct}% Special Discount Offer` : 'Special Offer'),
+          message: rawMsg,
+          badgeText: rawBadge,
+          isActive: raw.isActive !== false && raw.enabled !== false,
+          isVisible: raw.isVisible !== false,
+          showBanner: raw.showBanner !== false,
+          createdAt: Number(raw.createdAt || raw.created_at || Date.now()),
+          updatedAt: Number(raw.updatedAt || raw.updated_at || cloudOfferUpdateTs || raw.createdAt || Date.now()),
+          createdBy: String(raw.createdBy || 'Admin'),
+          discountPct: parsedPct,
+          discountCode: raw.discountCode ? String(raw.discountCode) : undefined,
+          applyToAllPackages: raw.applyToAllPackages !== false && raw.applyToPackages !== false,
+          expiresAt: raw.expiresAt ? Number(raw.expiresAt) : undefined,
+          imageUrl: raw.imageUrl ? String(raw.imageUrl) : undefined,
+        };
+      };
+
+      const normalizedOffer = normalizeOfferObj(rawCandidateOffer);
+      const hasOfferKeyInCloud =
+        cfgRes.ok &&
+        (globalCfg.activeOffer !== undefined ||
+          globalCfg.discountOffer !== undefined ||
+          globalCfg.specialOffer !== undefined ||
+          globalCfg.promoOffer !== undefined ||
+          globalCfg.offerBanner !== undefined ||
+          globalCfg.activeBanner !== undefined ||
+          globalCfg.bannerConfig !== undefined ||
+          globalCfg.offer !== undefined ||
+          cfgMap.offer_banner_v1 !== undefined ||
+          cfgMap.active_offer_v1 !== undefined ||
+          rawOffersList.length > 0);
+      if (hasOfferKeyInCloud) {
+        setActiveOffer(normalizedOffer);
       }
-      if (Array.isArray(globalCfg.broadcasts)) {
-        setBroadcasts(globalCfg.broadcasts);
-      } else if (Array.isArray(globalCfg.banners)) {
-        setBroadcasts(globalCfg.banners);
-      } else if (Array.isArray(globalCfg.announcements)) {
-        setBroadcasts(globalCfg.announcements);
-      } else if (Array.isArray(globalCfg.broadcastBanners)) {
-        setBroadcasts(globalCfg.broadcastBanners);
+
+      // Sync Broadcasts / Banners list
+      const rawBroadcasts = Array.isArray(globalCfg.broadcasts)
+        ? globalCfg.broadcasts
+        : Array.isArray(globalCfg.banners)
+        ? globalCfg.banners
+        : Array.isArray(globalCfg.announcements)
+        ? globalCfg.announcements
+        : Array.isArray(globalCfg.broadcastBanners)
+        ? globalCfg.broadcastBanners
+        : null;
+      if (rawBroadcasts) {
+        setBroadcasts(
+          rawBroadcasts
+            .map((b: any) => normalizeOfferObj(b))
+            .filter(Boolean) as AppOfferBanner[]
+        );
+      }
+
+      // Sync Subscription Packages & Reflect Active Admin Discount Offers
+      const rawPackagesSource =
+        (Array.isArray(globalCfg.packages) && globalCfg.packages.length > 0 && globalCfg.packages) ||
+        (Array.isArray(globalCfg.subscriptionPackages) &&
+          globalCfg.subscriptionPackages.length > 0 &&
+          globalCfg.subscriptionPackages) ||
+        (Array.isArray(cfgMap.packages_v1) && cfgMap.packages_v1.length > 0 && cfgMap.packages_v1) ||
+        (Array.isArray(cfgMap.subscription_packages_v1) &&
+          cfgMap.subscription_packages_v1.length > 0 &&
+          cfgMap.subscription_packages_v1) ||
+        null;
+
+      const globalOfferPct =
+        normalizedOffer &&
+        normalizedOffer.isActive !== false &&
+        normalizedOffer.isVisible !== false &&
+        normalizedOffer.showBanner !== false &&
+        normalizedOffer.applyToAllPackages !== false
+          ? Number(normalizedOffer.discountPct || 0)
+          : Number(globalCfg.globalDiscountPct || 0);
+
+      const applyOfferDiscountToPackages = (pkgList: SubscriptionPackage[]): SubscriptionPackage[] =>
+        pkgList.map((p: any) => {
+          const baseOrig = Number(p.originalPriceRs || p.basePriceRs || p.priceRs || p.price || 0);
+          const curRawPrice = Number(p.priceRs ?? p.price ?? baseOrig);
+          const ownPct = Number(p.discountPct ?? p.discount_pct ?? p.discount ?? 0);
+          const effPct = ownPct > 0 ? ownPct : globalOfferPct > 0 ? globalOfferPct : 0;
+
+          if (effPct > 0 && baseOrig > 0) {
+            const computedDiscounted = Math.max(1, Math.round(baseOrig * (1 - effPct / 100)));
+            // Use explicit discounted price if Admin already lowered priceRs for ownPct, otherwise apply effPct to baseOrig
+            const finalPrice =
+              ownPct > 0 && curRawPrice > 0 && curRawPrice < baseOrig
+                ? curRawPrice
+                : computedDiscounted;
+            return {
+              ...p,
+              originalPriceRs: baseOrig,
+              priceRs: finalPrice,
+              price: finalPrice,
+              discountPct: effPct,
+              discountOfferText:
+                p.discountOfferText ||
+                (normalizedOffer?.title ? `${effPct}% OFF — ${normalizedOffer.title}` : `${effPct}% OFF`),
+            };
+          }
+          return {
+            ...p,
+            priceRs: curRawPrice,
+            price: curRawPrice,
+          };
+        });
+
+      if (rawPackagesSource) {
+        setPackages(applyOfferDiscountToPackages(rawPackagesSource));
+      } else if (hasOfferKeyInCloud) {
+        setPackages((prev) => applyOfferDiscountToPackages(prev));
       }
 
       const incomingLogo = String(
@@ -509,6 +726,12 @@ export default function App() {
       // 2. Complete Formulas Sync (Admin master_engine_config + formulas_v1 aliases)
       const winF = formulasCfg.windowFormula || globalCfg.windowFormula || globalCfg.winFormulas;
       if (winF) setWindowFormula(winF);
+      const dgWinF =
+        formulasCfg.dgWindowFormula ||
+        globalCfg.dgWindowFormula ||
+        globalCfg.dgWinFormulas ||
+        globalCfg.dgWindowFormulas;
+      if (dgWinF) setDgWindowFormula(dgWinF);
       const sdF =
         formulasCfg.slidingDoorFormula ||
         globalCfg.slidingDoorFormula ||
@@ -526,9 +749,15 @@ export default function App() {
       const fsF = formulasCfg.fSectionFormula || globalCfg.fSectionFormula;
       if (fsF) setFSectionFormula(fsF);
       const glF = formulasCfg.glassFormulas || globalCfg.glassFormulas;
-      if (glF && typeof glF === 'object') setGlassFormulas(glF);
+      if (glF && typeof glF === 'object') {
+        setGlassFormulas((prev) => ({
+          ...getDefaultGlassFormulas(),
+          ...prev,
+          ...glF,
+        }));
+      }
 
-      // 3. Sections, Colors & Blueprints
+      // 3. Sections & Colors
       const rawCustomSecs =
         sectionsCfg.customSections || globalCfg.customSections || [];
       if (Array.isArray(rawCustomSecs) && rawCustomSecs.length > 0) {
@@ -555,23 +784,46 @@ export default function App() {
       if (Array.isArray(incomingHidden)) {
         setHiddenSections(incomingHidden);
       }
-      const rawBps =
-        (Array.isArray(blueprintsCfg) ? blueprintsCfg : blueprintsCfg.blueprints) ||
-        globalCfg.dragDropBlueprints ||
-        globalCfg.blueprints;
-      if (Array.isArray(rawBps) && rawBps.length > 0) {
-        setBlueprints(rawBps);
-      }
 
-      // 4. Layout config (merge layout_config_v1 UI controls + master_engine_config security flags, preserve client shopLogoUrl)
+      // 4. Layout config (merge layout_config_v1 UI controls + master_engine_config lockedTabs & security flags, preserve client shopLogoUrl)
       const incomingLayout = {
         ...((layoutCfg?.layoutConfig || layoutCfg || {}) as Record<string, any>),
         ...((globalCfg?.layoutConfig || {}) as Record<string, any>),
       };
-      if (incomingLayout && typeof incomingLayout === 'object' && incomingLayout.enabledTabs) {
+      const incomingLockedTabs = {
+        ...((layoutCfg?.lockedTabs || {}) as Record<string, boolean>),
+        ...((layoutCfg?.layoutConfig?.lockedTabs || {}) as Record<string, boolean>),
+        ...((globalCfg?.lockedTabs || {}) as Record<string, boolean>),
+        ...((globalCfg?.layoutConfig?.lockedTabs || {}) as Record<string, boolean>),
+      };
+      if (
+        (incomingLayout && typeof incomingLayout === 'object' && incomingLayout.enabledTabs) ||
+        Object.keys(incomingLockedTabs).length > 0
+      ) {
         setLayoutConfig((prev) => ({
           ...prev,
           ...incomingLayout,
+          enabledTabs: {
+            ...(prev.enabledTabs || {}),
+            ...(incomingLayout.enabledTabs || {}),
+            DG_WINDOWS:
+              incomingLayout.enabledTabs && 'DG_WINDOWS' in incomingLayout.enabledTabs
+                ? incomingLayout.enabledTabs.DG_WINDOWS
+                : prev.enabledTabs?.DG_WINDOWS ?? true,
+          },
+          tabCustomTitles: {
+            ...(prev.tabCustomTitles || {}),
+            ...(incomingLayout.tabCustomTitles || {}),
+            DG_WINDOWS:
+              incomingLayout.tabCustomTitles?.DG_WINDOWS ||
+              prev.tabCustomTitles?.DG_WINDOWS ||
+              'DG.Windows',
+          },
+          lockedTabs: {
+            DG_WINDOWS: true,
+            ...(prev.lockedTabs || {}),
+            ...incomingLockedTabs,
+          },
           shopLogoUrl: prev.shopLogoUrl || incomingLayout.shopLogoUrl || '',
         }));
       }
@@ -670,17 +922,20 @@ export default function App() {
       );
       setIsSubscriptionExpired(isOwnerAccount ? false : evaluated.isExpired);
 
+      // Refresh Admin & Support messages alongside Sync
+      await loadSupportRequests(globalCfg, activeSession);
+
       if (!silent) {
         triggerGlobalToast(
           forceRates
-            ? '☁️ Rates, Plans & Formulas synced from Supabase Cloud!'
+            ? '☁️ Rates, Offers, Messages & Formulas synced from Supabase Cloud!'
             : '☁️ Supabase Cloud sync complete!'
         );
       }
       return true;
     } catch {
       if (!silent) {
-        triggerGlobalToast('⚠️ Could not reach Supabase Cloud (using local/device data).');
+        triggerGlobalToast('⚠️ Offline Mode — Running on saved device data.');
       }
       return false;
     } finally {
@@ -688,31 +943,206 @@ export default function App() {
     }
   };
 
-  const loadSupportRequests = async () => {
+  const loadSupportRequests = async (
+    masterCfgOverride?: Record<string, any>,
+    sessionOverride?: ClientAuthSession | null
+  ) => {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
     try {
+      const activeSess = sessionOverride !== undefined ? sessionOverride : authSession;
+      const myDevice = (activeSess?.deviceId || clientDeviceId || '').trim();
+      const myEmail = (activeSess?.email || '').trim().toLowerCase();
+      const myPhoneDigits = normalizePhoneDigits(activeSess?.phone || '');
+      const clearedIds = loadClearedSupportIds();
+
       const sbRes = await callSupabaseProxy({
         table: 'messages',
         method: 'GET',
-        query: `device_id=eq.${encodeURIComponent(clientDeviceId)}&order=created_at.desc&limit=50`,
+        query: 'select=*&order=created_at.desc&limit=150',
         timeoutMs: 8000,
       });
+
+      const mergedById = new Map<string, ClientSupportRequest>();
+
+      const processRawMsg = (m: any) => {
+        if (!m || typeof m !== 'object') return;
+        const msgId = String(m.id || m.message_id || '');
+        if (!msgId || clearedIds.has(msgId)) return;
+        if (m.deleted_by_client === true) return;
+
+        const targetDev = String(
+          m.target_device_id ||
+            m.recipient_device_id ||
+            m.device_id ||
+            m.user_id ||
+            ''
+        ).trim();
+        const targetDevUp = targetDev.toUpperCase();
+        const mEmail = String(m.email || m.target_email || '').trim().toLowerCase();
+        const mPhoneDigits = normalizePhoneDigits(String(m.phone || m.target_phone || ''));
+        const senderRaw = String(
+          m.sender || m.sender_role || m.role || m.direction || ''
+        ).toLowerCase();
+        const isFromAdmin = Boolean(
+          senderRaw.includes('admin') ||
+            senderRaw === 'outbound' ||
+            m.is_from_admin === true ||
+            m.from_admin === true ||
+            String(m.category || '').toLowerCase().includes('admin message') ||
+            String(m.type || '').toLowerCase() === 'admin_message'
+        );
+        const isGlobalBroadcast =
+          ['ALL', 'BROADCAST', 'PUBLIC', '*'].includes(targetDevUp) ||
+          m.is_broadcast === true ||
+          (isFromAdmin && !targetDev && !mEmail && !mPhoneDigits);
+
+        const belongsToClient =
+          isGlobalBroadcast ||
+          (myDevice && (targetDev === myDevice || String(m.device_id || '').trim() === myDevice)) ||
+          (myEmail && mEmail && mEmail === myEmail) ||
+          (myPhoneDigits.length >= 10 && mPhoneDigits && mPhoneDigits === myPhoneDigits);
+
+        if (!belongsToClient) return;
+
+        const rawReply = String(
+          m.admin_reply ||
+            m.reply ||
+            m.reply_message ||
+            m.reply_text ||
+            m.admin_response ||
+            m.response ||
+            m.admin_note ||
+            ''
+        ).trim();
+
+        const createdAt = m.created_at
+          ? new Date(m.created_at).getTime() || Date.now()
+          : Number(m.createdAt || Date.now());
+        const repliedAt =
+          m.replied_at || m.reply_at || (rawReply ? m.updated_at : 0)
+            ? new Date(m.replied_at || m.reply_at || m.updated_at).getTime() || createdAt
+            : rawReply
+            ? createdAt
+            : 0;
+
+        mergedById.set(msgId, {
+          id: msgId,
+          deviceId: targetDev || myDevice,
+          userName: String(m.user_name || m.userName || (isFromAdmin ? 'Boss Admin' : 'Client')),
+          userPhone: String(m.phone || m.userPhone || ''),
+          userEmail: String(m.email || m.userEmail || ''),
+          requestType: String(
+            m.category ||
+              m.subject ||
+              m.requestType ||
+              (isFromAdmin ? 'Admin Message' : 'Support Message')
+          ),
+          message: String(m.message || m.text || m.body || ''),
+          createdAt,
+          isResolved: Boolean(m.is_resolved || m.status === 'resolved' || rawReply),
+          resolvedBy: String(m.resolved_by || (rawReply ? 'Admin' : '')),
+          resolvedAt: repliedAt || undefined,
+          sender: isFromAdmin ? 'ADMIN' : 'CLIENT',
+          adminReply: !isFromAdmin && rawReply ? rawReply : undefined,
+          repliedAt: repliedAt || undefined,
+          isBroadcast: isGlobalBroadcast,
+        });
+      };
+
       if (sbRes.ok && Array.isArray(sbRes.data)) {
-        const loaded: ClientSupportRequest[] = sbRes.data.map((m: any) => ({
-          id: String(m.id || `msg-${Date.now()}`),
-          deviceId: String(m.device_id || clientDeviceId),
-          userName: String(m.user_name || 'Client'),
-          userPhone: String(m.phone || ''),
-          userEmail: String(m.email || ''),
-          requestType: String(m.category || m.subject || 'Support Message'),
-          message: String(m.message || m.text || ''),
-          createdAt: m.created_at ? new Date(m.created_at).getTime() || Date.now() : Date.now(),
-          isResolved: Boolean(m.is_resolved || m.status === 'resolved'),
-        }));
-        setSupportRequests(loaded);
+        sbRes.data.forEach(processRawMsg);
+      }
+
+      // Also check master_engine_config for any Admin-pushed direct/broadcast messages
+      const masterCfg =
+        masterCfgOverride && Object.keys(masterCfgOverride).length > 0
+          ? masterCfgOverride
+          : loadCachedMasterEngineConfig();
+      const cfgMsgArrays = [
+        masterCfg?.adminMessages,
+        masterCfg?.clientMessages,
+        masterCfg?.supportReplies,
+        masterCfg?.directMessages,
+      ];
+      cfgMsgArrays.forEach((arr) => {
+        if (Array.isArray(arr)) {
+          arr.forEach((item) =>
+            processRawMsg({
+              ...item,
+              sender: item?.sender || 'admin',
+            })
+          );
+        }
+      });
+
+      const sorted = Array.from(mergedById.values()).sort((a, b) => b.createdAt - a.createdAt);
+      if (sbRes.ok || sorted.length > 0) {
+        setSupportRequests(sorted);
       }
     } catch (err) {
       console.error('[SupportRequest] Supabase messages load error:', err);
     }
+  };
+
+  const handleDeleteSupportRequest = async (id: string) => {
+    addClearedSupportIds([id]);
+    const target = supportRequests.find((r) => r.id === id);
+    setSupportRequests((prev) => prev.filter((r) => r.id !== id));
+    if (
+      typeof navigator !== 'undefined' &&
+      navigator.onLine !== false &&
+      target &&
+      !target.isBroadcast &&
+      !id.startsWith('local-')
+    ) {
+      try {
+        const delRes = await callSupabaseProxy({
+          table: 'messages',
+          method: 'DELETE',
+          query: `id=eq.${encodeURIComponent(id)}`,
+          timeoutMs: 6000,
+        });
+        if (!delRes.ok) {
+          await callSupabaseProxy({
+            table: 'messages',
+            method: 'PATCH',
+            query: `id=eq.${encodeURIComponent(id)}`,
+            payload: { deleted_by_client: true },
+            timeoutMs: 6000,
+          }).catch(() => {});
+        }
+      } catch {
+        // non-fatal; local clearedIds keeps it removed
+      }
+    }
+    triggerGlobalToast('🗑️ Message cleared!');
+  };
+
+  const handleClearAllSupportRequests = async () => {
+    const ids = supportRequests.map((r) => r.id);
+    addClearedSupportIds(ids);
+    setSupportRequests([]);
+    saveLastSeenSupportMs(Date.now());
+    setLastSeenSupportMs(Date.now());
+    if (typeof navigator !== 'undefined' && navigator.onLine !== false && clientDeviceId) {
+      try {
+        await callSupabaseProxy({
+          table: 'messages',
+          method: 'DELETE',
+          query: `device_id=eq.${encodeURIComponent(clientDeviceId)}`,
+          timeoutMs: 6000,
+        });
+      } catch {
+        // non-fatal
+      }
+    }
+    triggerGlobalToast('🧹 All support messages cleared!');
+  };
+
+  const handleMarkSupportMessagesRead = () => {
+    const now = Date.now();
+    saveLastSeenSupportMs(now);
+    setLastSeenSupportMs(now);
   };
 
   const handleSubmitSupportRequest = async (payload: {
@@ -722,6 +1152,12 @@ export default function App() {
     requestType: string;
     message: string;
   }): Promise<{ ok: boolean; error?: string }> => {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      return {
+        ok: false,
+        error: 'Internet band hai (Offline). Support message send karne ke liye internet ON karein.',
+      };
+    }
     setIsSubmittingSupportRequest(true);
     try {
       const nowIso = new Date().toISOString();
@@ -735,6 +1171,7 @@ export default function App() {
         subject: payload.requestType || 'Support Request',
         message: payload.message,
         text: payload.message,
+        sender: 'client',
         status: 'pending',
         is_read: false,
         is_resolved: false,
@@ -784,6 +1221,7 @@ export default function App() {
         isResolved: Boolean(insertedRow?.is_resolved),
         resolvedBy: '',
         resolvedAt: 0,
+        sender: 'CLIENT',
       };
 
       setSupportRequests((prev) => [createdReq, ...prev]);
@@ -927,7 +1365,15 @@ export default function App() {
       if (raw) {
         const parsed = JSON.parse(raw);
         if (parsed.windowFormula) setWindowFormula(parsed.windowFormula);
+        if (parsed.dgWindowFormula) setDgWindowFormula(parsed.dgWindowFormula);
         if (parsed.slidingDoorFormula) setSlidingDoorFormula(parsed.slidingDoorFormula);
+        if (parsed.glassFormulas) {
+          setGlassFormulas((prev) => ({
+            ...getDefaultGlassFormulas(),
+            ...prev,
+            ...parsed.glassFormulas,
+          }));
+        }
         if (parsed.doorFormula) {
           const df = parsed.doorFormula as FormulaCategorySettings;
           if (df.acc?.D46 && df.acc.D46.qtyW === 2 && df.acc.D46.qtyH === 2) {
@@ -944,7 +1390,6 @@ export default function App() {
         if (parsed.fixFormula) setFixFormula(parsed.fixFormula);
         if (parsed.openwinFormula) setOpenwinFormula(parsed.openwinFormula);
         if (parsed.fSectionFormula) setFSectionFormula(parsed.fSectionFormula);
-        if (parsed.blueprints?.length) setBlueprints(parsed.blueprints);
         if (parsed.savedQuotations) setSavedQuotations(parsed.savedQuotations);
         if (parsed.rates) {
           setRates(parsed.rates);
@@ -960,11 +1405,31 @@ export default function App() {
           setMobileDownloadConfig(parsed.mobileDownloadConfig);
         }
         if (Array.isArray(parsed.supportRequests)) setSupportRequests(parsed.supportRequests);
-        if (parsed.layoutConfig) setLayoutConfig(parsed.layoutConfig);
+        if (parsed.layoutConfig) {
+          setLayoutConfig((prev) => ({
+            ...prev,
+            ...parsed.layoutConfig,
+            enabledTabs: {
+              ...(prev.enabledTabs || {}),
+              ...(parsed.layoutConfig.enabledTabs || {}),
+              DG_WINDOWS: parsed.layoutConfig.enabledTabs?.DG_WINDOWS ?? true,
+            },
+            tabCustomTitles: {
+              ...(prev.tabCustomTitles || {}),
+              ...(parsed.layoutConfig.tabCustomTitles || {}),
+              DG_WINDOWS: parsed.layoutConfig.tabCustomTitles?.DG_WINDOWS || 'DG.Windows',
+            },
+            lockedTabs: {
+              DG_WINDOWS: true,
+              ...(prev.lockedTabs || {}),
+              ...(parsed.layoutConfig.lockedTabs || {}),
+            },
+          }));
+        }
         if (parsed.letterheadBgUrl) setLetterheadBgUrl(parsed.letterheadBgUrl);
         if (parsed.currentTheme) setCurrentTheme(enforceReadableContrast(parsed.currentTheme));
         if (parsed.downloadedThemes) setDownloadedThemes(parsed.downloadedThemes);
-        if (parsed.deletedBackupVault) setDeletedBackupVault(parsed.deletedBackupVault);
+        setDeletedBackupVault([]);
         if (parsed.glassRates) setGlassRates(parsed.glassRates);
         if (parsed.availableColors?.length) setAvailableColors(parsed.availableColors);
         if (parsed.customSections) setCustomSections(parsed.customSections);
@@ -1032,17 +1497,27 @@ export default function App() {
     requestAndSaveGpsLocation(existingSession ? existingSession.deviceId : undefined);
 
     if (existingSession) {
-      collectAndSyncUserTelemetryToSupabase({
-        deviceId: existingSession.deviceId,
-        session: existingSession,
-        companyName: existingSession.companyName || companyName,
-        selfieUrl: existingSession.selfieUrl,
-        shopPhotoUrl: existingSession.shopPhotoUrl,
-        isOnline: true,
-      });
-      syncFromSupabase({ forceRates: false, silent: true });
-      loadSupportRequests();
+      if (typeof navigator === 'undefined' || navigator.onLine !== false) {
+        collectAndSyncUserTelemetryToSupabase({
+          deviceId: existingSession.deviceId,
+          session: existingSession,
+          companyName: existingSession.companyName || companyName,
+          selfieUrl: existingSession.selfieUrl,
+          shopPhotoUrl: existingSession.shopPhotoUrl,
+          isOnline: true,
+        });
+        syncFromSupabase({ forceRates: false, silent: true });
+      }
     }
+
+    const handleGoOnline = () => setIsOnline(true);
+    const handleGoOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleGoOnline);
+    window.addEventListener('offline', handleGoOffline);
+    return () => {
+      window.removeEventListener('online', handleGoOnline);
+      window.removeEventListener('offline', handleGoOffline);
+    };
   }, []);
 
   // Anti-Theft, Anti-Inspect & Formula/Rate Copy Protection (Right-click, DevTools shortcuts & Protected Copy Guard)
@@ -1263,13 +1738,13 @@ export default function App() {
         STORAGE_KEY,
         JSON.stringify({
           windowFormula,
+          dgWindowFormula,
           slidingDoorFormula,
           doorFormula,
           fixFormula,
           openwinFormula,
           fSectionFormula,
           glassFormulas,
-          blueprints,
           savedQuotations,
           rates,
           packages,
@@ -1300,13 +1775,13 @@ export default function App() {
     }
   }, [
     windowFormula,
+    dgWindowFormula,
     slidingDoorFormula,
     doorFormula,
     fixFormula,
     openwinFormula,
     fSectionFormula,
     glassFormulas,
-    blueprints,
     savedQuotations,
     rates,
     packages,
@@ -1481,39 +1956,17 @@ export default function App() {
     triggerGlobalToast('Factory Default Rate List restored & saved!');
   };
 
-  // Backup Vault Helper
+  // Backup Vault disabled in Client App (Client should not see Deleted Backup Restore vault)
   const handlePushBackupItem = (
-    item: Omit<DeletedBackupItem, 'id' | 'deletedAt'>
+    _item: Omit<DeletedBackupItem, 'id' | 'deletedAt'>
   ) => {
-    const entry: DeletedBackupItem = {
-      ...item,
-      id: `bkp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      deletedAt: Date.now(),
-    };
-    setDeletedBackupVault((prev) => [entry, ...prev]);
+    return;
   };
 
-  // Delete Section + Save to Backup Vault
+  // Delete Section
   const handleDeleteSection = (sec: string) => {
     const clean = sec.trim();
     if (!clean) return;
-    const savedRates: Record<string, Record<string, number>> = {};
-    GAUGES.forEach((g) => {
-      savedRates[g] = {};
-      availableColors.forEach((c) => {
-        savedRates[g][c] = rates[g]?.[c]?.[clean] || 0;
-      });
-    });
-    handlePushBackupItem({
-      category: 'SECTION',
-      title: `Aluminium Section: ${clean}`,
-      codeOrKey: clean,
-      payload: {
-        sectionCode: clean,
-        wasCustom: customSections.includes(clean),
-        savedRates,
-      },
-    });
 
     const nextRates = { ...rates };
     GAUGES.forEach((g) => {
@@ -1541,7 +1994,7 @@ export default function App() {
     };
     setLayoutConfig(nextLayout);
 
-    triggerGlobalToast(`Deleted Section "${clean}" (Saved in Backup Vault)`);
+    triggerGlobalToast(`Deleted Section "${clean}"`);
   };
 
   // Edit Finish Color
@@ -1595,7 +2048,7 @@ export default function App() {
     if (ctxColor === clean && nextCols.length > 0) {
       setCtxColor(nextCols[0]);
     }
-    triggerGlobalToast(`Deleted Color "${clean}" (Saved in Backup Vault for Restore)`);
+    triggerGlobalToast(`Deleted Color "${clean}"`);
   };
 
   // Add Separate 5mm or 8mm Glass Color
@@ -1612,7 +2065,7 @@ export default function App() {
     triggerGlobalToast(`Added ${gauge}mm Glass Color "${clean}" (Rs. ${rate}/sq.ft)`);
   };
 
-  // Delete Separate 5mm or 8mm Glass Color + Save to Backup Vault
+  // Delete Separate 5mm or 8mm Glass Color
   const handleDeleteGlassColor = (gauge: string, colorName: string) => {
     const clean = colorName.trim();
     const curMap = { ...(glassRates[gauge] || {}) };
@@ -1620,17 +2073,6 @@ export default function App() {
       triggerGlobalToast(`At least 1 glass color must remain in ${gauge}mm Glass.`);
       return;
     }
-    const oldRate = curMap[clean] ?? 0;
-    handlePushBackupItem({
-      category: gauge === '5' ? 'GLASS_5MM' : 'GLASS_8MM',
-      title: `${gauge}mm Glass Color: ${clean} (Rs. ${oldRate}/sq.ft)`,
-      codeOrKey: clean,
-      payload: {
-        gauge,
-        colorName: clean,
-        rate: oldRate,
-      },
-    });
     delete curMap[clean];
     setGlassRates((prev) => ({
       ...prev,
@@ -1640,9 +2082,7 @@ export default function App() {
     if (ctxGlassGauge === gauge && ctxGlassColor === clean && remainingKeys.length > 0) {
       setCtxGlassColor(remainingKeys[0]);
     }
-    triggerGlobalToast(
-      `Deleted ${gauge}mm Glass "${clean}" (Saved in Backup Vault for Restore)`
-    );
+    triggerGlobalToast(`Deleted ${gauge}mm Glass "${clean}"`);
   };
 
   // Restore any Deleted Item from Backup Vault
@@ -1709,28 +2149,6 @@ export default function App() {
         item.title?.replace(/^App Tab:\s*/, '').replace(/\s*\([^)]*\)$/, '') ||
         tabKey;
 
-      if (tabKey.startsWith('BP:') || p.blueprint) {
-        const bpId = tabKey.startsWith('BP:') ? tabKey.slice(3) : p.blueprint?.id;
-        const bpName = p.blueprint?.name || rawTitle;
-        const bpToRestore: DragDropBlueprint = p.blueprint || {
-          id: bpId,
-          name: bpName,
-          category: 'CUSTOM',
-          outerSectionCode: 'DC30C',
-          panelCount: 2,
-          hasNetJali: false,
-          lockType: 'LATCH',
-          layers: [],
-          formulaRules: [],
-          unit: 'INCH',
-          createdAt: Date.now(),
-        };
-        setBlueprints((prevBps) => {
-          if (prevBps.some((b) => b.id === bpToRestore.id)) return prevBps;
-          return [bpToRestore, ...prevBps];
-        });
-      }
-
       setLayoutConfig((prevCfg) => ({
         ...prevCfg,
         deletedTabs: (prevCfg.deletedTabs || []).filter((t) => t !== tabKey),
@@ -1749,14 +2167,6 @@ export default function App() {
         ...prev,
         [ctrlKey]: true,
       }));
-    } else if (item.category === 'BLUEPRINT') {
-      const bpData = p.blueprint || p;
-      if (bpData?.id) {
-        setBlueprints((prevBps) => {
-          if (prevBps.some((b) => b.id === bpData.id)) return prevBps;
-          return [bpData, ...prevBps];
-        });
-      }
     } else if (item.category === 'CALC_ITEM') {
       const kind = p.kind;
       const data = p.item;
@@ -1838,6 +2248,7 @@ export default function App() {
               clientDeviceId={clientDeviceId}
               packages={packages}
               bankAccounts={bankAccounts}
+              activeOffer={activeOffer}
               expiresAt={cloudAccessInfo.expiresAt}
               isSyncing={isSyncingCloud}
               onRefreshCloudStatus={() => syncFromSupabase({ forceRates: false, silent: false })}
@@ -1941,6 +2352,8 @@ export default function App() {
           }}
           windows={windows}
           onUpdateWindows={setWindows}
+          dgWindows={dgWindows}
+          onUpdateDgWindows={setDgWindows}
           doors={doors}
           onUpdateDoors={setDoors}
           fixframes={fixframes}
@@ -2013,6 +2426,7 @@ export default function App() {
           }}
           onUnhideAllSections={() => setHiddenSections([])}
           windowFormula={windowFormula}
+          dgWindowFormula={dgWindowFormula}
           slidingDoorFormula={slidingDoorFormula}
           doorFormula={doorFormula}
           fixFormula={fixFormula}
@@ -2062,6 +2476,8 @@ export default function App() {
           onRestoreQuotation={(q) => {
             try {
               if (q.windowsJson) setWindows(JSON.parse(q.windowsJson));
+              if (q.dgWindowsJson) setDgWindows(JSON.parse(q.dgWindowsJson));
+              else setDgWindows([]);
               if (q.doorsJson) setDoors(JSON.parse(q.doorsJson));
               if (q.fixframesJson) setFixFrames(JSON.parse(q.fixframesJson));
               if (q.openableWindowsJson) setOpenableWindows(JSON.parse(q.openableWindowsJson));
@@ -2073,12 +2489,6 @@ export default function App() {
             } catch {
               // ignore parse error
             }
-          }}
-          blueprints={blueprints}
-          onDeleteBlueprint={(id) => {
-            const bp = blueprints.find((b) => b.id === id);
-            setBlueprints((prev) => prev.filter((b) => b.id !== id));
-            triggerGlobalToast(`Preset "${bp?.name || id}" removed successfully!`);
           }}
           onClearAllRates={handleClearAllRates}
           onRestoreDefaultRates={handleRestoreDefaultRates}
@@ -2109,6 +2519,7 @@ export default function App() {
             try {
               const parsed = JSON.parse(jsonStr);
               if (parsed.windowFormula) setWindowFormula(parsed.windowFormula);
+              if (parsed.dgWindowFormula) setDgWindowFormula(parsed.dgWindowFormula);
               if (parsed.rates) setRates(parsed.rates);
               if (parsed.packages) setPackages(parsed.packages);
               if (parsed.layoutConfig) setLayoutConfig(parsed.layoutConfig);
@@ -2134,6 +2545,12 @@ export default function App() {
           supportRequests={supportRequests}
           isSubmittingSupportRequest={isSubmittingSupportRequest}
           onSubmitSupportRequest={handleSubmitSupportRequest}
+          onRefreshSupportRequests={() => loadSupportRequests()}
+          onDeleteSupportRequest={handleDeleteSupportRequest}
+          onClearAllSupportRequests={handleClearAllSupportRequests}
+          lastSeenSupportMs={lastSeenSupportMs}
+          onMarkSupportMessagesRead={handleMarkSupportMessagesRead}
+          isOnline={isOnline}
         />
         </main>
         );

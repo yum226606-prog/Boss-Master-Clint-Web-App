@@ -56,6 +56,14 @@ export default defineConfig(() => {
           navigateFallback: '/index.html',
           globPatterns: ['**/*.{js,css,html,ico,png,svg,jpg,woff2}'],
           maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
+          runtimeCaching: [
+            {
+              urlPattern: ({ url }) =>
+                url.hostname.includes('supabase.co') ||
+                url.hostname.includes('ipify.org'),
+              handler: 'NetworkOnly',
+            },
+          ],
         },
         devOptions: {
           enabled: true,

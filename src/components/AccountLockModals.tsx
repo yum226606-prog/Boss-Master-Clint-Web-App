@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import bossLionLogoImg from '../assets/images/boss_lion_logo_1791741005749.jpg';
 import {
+  AppOfferBanner,
   BankAccountConfig,
   SubscriptionPackageConfig,
 } from '../types/bossModels';
@@ -134,6 +135,7 @@ interface SubscriptionExpiredLockModalProps {
   clientDeviceId: string;
   packages: SubscriptionPackageConfig[];
   bankAccounts: BankAccountConfig[];
+  activeOffer?: AppOfferBanner | null;
   expiresAt: number | null;
   isSyncing: boolean;
   onRefreshCloudStatus: () => Promise<boolean>;
@@ -146,6 +148,7 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
   clientDeviceId,
   packages,
   bankAccounts,
+  activeOffer,
   expiresAt,
   isSyncing,
   onRefreshCloudStatus,
@@ -170,9 +173,16 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
   const [activeOrder, setActiveOrder] = useState<any>(null);
 
   useEffect(() => {
-    if (!selectedPkg && packages.length > 0) {
+    if (packages.length === 0) return;
+    if (!selectedPkg) {
       setSelectedPkg(packages[0]);
       setAmountInput(String(packages[0].priceRs ?? packages[0].price ?? 3000));
+    } else {
+      const updatedMatch = packages.find((p) => p.id === selectedPkg.id);
+      if (updatedMatch && (updatedMatch.priceRs ?? updatedMatch.price) !== (selectedPkg.priceRs ?? selectedPkg.price)) {
+        setSelectedPkg(updatedMatch);
+        setAmountInput(String(updatedMatch.priceRs ?? updatedMatch.price ?? 3000));
+      }
     }
   }, [packages, selectedPkg]);
 
@@ -432,11 +442,41 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
           </div>
         </div>
 
-        {/* Packages */}
+        {/* Active Discount Offer & Packages */}
         <div className="space-y-2 max-h-[68vh] overflow-y-auto pr-1">
+          {activeOffer &&
+            activeOffer.isActive !== false &&
+            activeOffer.isVisible !== false &&
+            activeOffer.showBanner !== false && (
+              <div className="p-3 rounded-xl bg-gradient-to-r from-amber-500/20 via-rose-500/20 to-amber-500/20 border border-amber-500/70 space-y-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-rose-600 text-white font-black uppercase">
+                    {activeOffer.badgeText || 'SPECIAL OFFER'}
+                  </span>
+                  <span className="text-xs font-black text-white">{activeOffer.title}</span>
+                  {activeOffer.discountPct && activeOffer.discountPct > 0 && (
+                    <span className="text-[10.5px] font-black text-amber-300 bg-amber-950/70 px-2 py-0.5 rounded border border-amber-500/40">
+                      Save {activeOffer.discountPct}% OFF
+                    </span>
+                  )}
+                </div>
+                {activeOffer.message && (
+                  <p className="text-[11px] text-slate-200">{activeOffer.message}</p>
+                )}
+              </div>
+            )}
+
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
             {packages.map((pkg, idx) => {
               const price = pkg.priceRs ?? pkg.price ?? 0;
+              const origPrice = pkg.originalPriceRs ?? price;
+              const discPct =
+                pkg.discountPct && pkg.discountPct > 0
+                  ? pkg.discountPct
+                  : origPrice > price
+                  ? Math.round(((origPrice - price) / origPrice) * 100)
+                  : 0;
+              const hasDiscount = discPct > 0 || origPrice > price;
               const selected = selectedPkg?.id === pkg.id;
               return (
                 <button
@@ -456,8 +496,20 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
                     <span className="text-xs font-black text-white truncate">{pkg.name}</span>
                     <Crown className="w-3.5 h-3.5 text-[#F5B738] shrink-0" />
                   </div>
-                  <div className="text-lg font-black text-[#F5B738]">
-                    Rs. {price.toLocaleString()}
+                  <div className="flex items-baseline gap-1.5 flex-wrap">
+                    <span className={`text-lg font-black ${hasDiscount ? 'text-emerald-400' : 'text-[#F5B738]'}`}>
+                      Rs. {price.toLocaleString()}
+                    </span>
+                    {hasDiscount && (
+                      <>
+                        <span className="text-[11px] line-through text-slate-400">
+                          Rs. {origPrice.toLocaleString()}
+                        </span>
+                        <span className="text-[9.5px] px-1.5 py-0.5 rounded bg-rose-600 text-white font-black">
+                          {discPct}% OFF
+                        </span>
+                      </>
+                    )}
                   </div>
                   <div className="text-[10px] text-slate-400">
                     {pkg.durationLabel || `${pkg.durationMonths} Month(s)`}

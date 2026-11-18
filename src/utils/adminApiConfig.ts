@@ -1180,6 +1180,125 @@ export async function syncGpsToSupabaseUser(
   }
 }
 
+export interface MandatoryGpsResult {
+  ok: boolean;
+  gps: StoredGpsLocation | null;
+  errorReason:
+    | 'UNSUPPORTED'
+    | 'PERMISSION_DENIED'
+    | 'POSITION_UNAVAILABLE'
+    | 'TIMEOUT'
+    | 'ERROR'
+    | '';
+  message: string;
+}
+
+export function requestMandatoryGpsLocation(deviceId?: string): Promise<MandatoryGpsResult> {
+  return new Promise((resolve) => {
+    if (typeof window === 'undefined' || !('geolocation' in navigator)) {
+      resolve({
+        ok: false,
+        gps: null,
+        errorReason: 'UNSUPPORTED',
+        message: 'Aapke device ya browser mein GPS Location supported nahi hai.',
+      });
+      return;
+    }
+
+    try {
+      navigator.geolocation.getCurrentPosition(
+        async (pos) => {
+          const latitude = Number(pos.coords.latitude.toFixed(6));
+          const longitude = Number(pos.coords.longitude.toFixed(6));
+          if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+            resolve({
+              ok: false,
+              gps: null,
+              errorReason: 'POSITION_UNAVAILABLE',
+              message: 'Sahih GPS coordinates nahi mil sakay. Apni Mobile Location ON karein.',
+            });
+            return;
+          }
+          const locationUrl = `https://maps.google.com/?q=${latitude},${longitude}`;
+          const gps: StoredGpsLocation = {
+            latitude,
+            longitude,
+            locationUrl,
+            updatedAt: Date.now(),
+          };
+          saveStoredGpsLocation(gps);
+          if (deviceId) {
+            await syncGpsToSupabaseUser(deviceId, gps);
+          }
+          resolve({
+            ok: true,
+            gps,
+            errorReason: '',
+            message: `GPS Location Verified (${latitude}, ${longitude})`,
+          });
+        },
+        (err) => {
+          if (err?.code === 1) {
+            resolve({
+              ok: false,
+              gps: null,
+              errorReason: 'PERMISSION_DENIED',
+              message:
+                'Account banane ke liye Location (GPS) ON karna aur Allow karna zaroori hai. Browser/Mobile Settings se Location Allow karke Retry karein.',
+            });
+          } else if (err?.code === 2) {
+            resolve({
+              ok: false,
+              gps: null,
+              errorReason: 'POSITION_UNAVAILABLE',
+              message:
+                'Mobile/Device ki GPS Location band hai. Baraye meharbani GPS Location ON karein aur Retry dabain.',
+            });
+          } else if (err?.code === 3) {
+            // If GPS permission is granted and we have a recent (<15 min) stored fix, accept it; otherwise ask retry
+            const cached = loadStoredGpsLocation();
+            if (cached && Date.now() - cached.updatedAt < 15 * 60 * 1000) {
+              resolve({
+                ok: true,
+                gps: cached,
+                errorReason: '',
+                message: `GPS Location Verified (${cached.latitude}, ${cached.longitude})`,
+              });
+              return;
+            }
+            resolve({
+              ok: false,
+              gps: null,
+              errorReason: 'TIMEOUT',
+              message:
+                'GPS Location signal hasil karne mein waqt lag raha hai. Apne device ki Location ON karke Retry dabain.',
+            });
+          } else {
+            resolve({
+              ok: false,
+              gps: null,
+              errorReason: 'ERROR',
+              message: 'Location ON karke permission Allow karein, phir account banayein.',
+            });
+          }
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 12000,
+          maximumAge: 60000,
+        }
+      );
+    } catch {
+      resolve({
+        ok: false,
+        gps: null,
+        errorReason: 'ERROR',
+        message: 'Location permission check karne mein error aaya. GPS ON karke Retry karein.',
+      });
+    }
+  });
+}
+
 export function requestAndSaveGpsLocation(deviceId?: string): Promise<StoredGpsLocation | null> {
   return new Promise((resolve) => {
     if (typeof window === 'undefined' || !('geolocation' in navigator)) {

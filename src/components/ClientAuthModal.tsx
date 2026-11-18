@@ -55,9 +55,11 @@ import {
   normalizePhoneDigits,
   parseTimestampMs,
   requestAndSaveGpsLocation,
+  requestMandatoryGpsLocation,
   saveAuthSession,
   saveBiometricBinding,
   sendSupabaseEmailOtp,
+  StoredGpsLocation,
   syncGpsToSupabaseUser,
   TWO_DAYS_MS,
   verifyBiometricPasskey,
@@ -119,6 +121,14 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
   // Google OAuth State
   const [isGoogleAuthenticating, setIsGoogleAuthenticating] = useState(false);
   const processedGoogleUserIdRef = useRef<string | null>(null);
+  const [pendingGoogleUser, setPendingGoogleUser] = useState<any | null>(null);
+
+  // Mandatory GPS Location State for New Account Creation
+  const [liveGps, setLiveGps] = useState<StoredGpsLocation | null>(() => loadStoredGpsLocation());
+  const [gpsStatus, setGpsStatus] = useState<'IDLE' | 'CHECKING' | 'READY' | 'ERROR'>(() =>
+    loadStoredGpsLocation() ? 'READY' : 'IDLE'
+  );
+  const [gpsStatusMsg, setGpsStatusMsg] = useState<string>('');
 
   // Create Account State
   const [regName, setRegName] = useState('');
@@ -148,6 +158,32 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
   );
   const [otpRowId, setOtpRowId] = useState<string | number | null>(null);
   const [resendCooldownSec, setResendCooldownSec] = useState<number>(0);
+
+  const ensureMandatoryGpsForNewAccount = async (
+    showErrorBanner = true
+  ): Promise<StoredGpsLocation | null> => {
+    setGpsStatus('CHECKING');
+    const res = await requestMandatoryGpsLocation();
+    if (res.ok && res.gps) {
+      setLiveGps(res.gps);
+      setGpsStatus('READY');
+      setGpsStatusMsg(res.message);
+      return res.gps;
+    }
+    setLiveGps(null);
+    setGpsStatus('ERROR');
+    setGpsStatusMsg(res.message);
+    if (showErrorBanner) {
+      setErrorMsg(res.message);
+    }
+    return null;
+  };
+
+  useEffect(() => {
+    if (activeTab === 'REGISTER') {
+      ensureMandatoryGpsForNewAccount(false);
+    }
+  }, [activeTab]);
 
   useEffect(() => {
     if (externalNotice) {
@@ -449,10 +485,10 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
   // =========================================================================
   // RULE 1: HANDLE RETURN FROM GOOGLE OAUTH (AUTO-VERIFIED ACCOUNT / LOGIN)
   // =========================================================================
-  const finalizeGoogleOAuthUser = async (supaUser: any) => {
+  const finalizeGoogleOAuthUser = async (supaUser: any, forceRetry = false) => {
     const gEmail = String(supaUser?.email || '').trim().toLowerCase();
     if (!gEmail) return;
-    if (processedGoogleUserIdRef.current === `${supaUser.id || gEmail}`) return;
+    if (!forceRetry && processedGoogleUserIdRef.current === `${supaUser.id || gEmail}`) return;
     processedGoogleUserIdRef.current = `${supaUser.id || gEmail}`;
 
     const gName =
@@ -472,7 +508,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       const macAddress = getOrCreateDeviceMacFingerprint();
       const deviceModel = getDeviceModelName();
 
-      const [allUsersRes, subsRes, masterCfg, gps, publicIp, serverNowMs] = await Promise.all([
+      const [allUsersRes, subsRes, masterCfg, gpsRes, publicIp, serverNowMs] = await Promise.all([
         callSupabaseProxy({
           table: 'users',
           method: 'GET',
@@ -486,12 +522,17 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           timeoutMs: 8000,
         }),
         fetchMasterEngineConfigFromSupabase(),
-        Promise.resolve(loadStoredGpsLocation()).then((existing) =>
-          existing ? existing : requestAndSaveGpsLocation()
-        ),
+        requestMandatoryGpsLocation(),
         getClientPublicIpAddress(),
         fetchSupabaseServerTimeMs(),
       ]);
+
+      const gps = gpsRes.ok ? gpsRes.gps : loadStoredGpsLocation();
+      if (gpsRes.ok && gpsRes.gps) {
+        setLiveGps(gpsRes.gps);
+        setGpsStatus('READY');
+        setGpsStatusMsg(gpsRes.message);
+      }
 
       const usersList = Array.isArray(allUsersRes.data) ? allUsersRes.data : [];
       const subsList = Array.isArray(subsRes.data) ? subsRes.data : [];
@@ -514,6 +555,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       });
 
       if (comboMatch.matchedUser || comboMatch.matchedSub || comboMatch.matchedUac) {
+        setPendingGoogleUser(null);
         await loginIntoMatchedExistingRecord({
           matchedUser: comboMatch.matchedUser,
           matchedSub: comboMatch.matchedSub,
@@ -531,6 +573,19 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         });
         return;
       }
+
+      // Mandatory GPS Location check for creating ANY brand-new Google account
+      if (!gpsRes.ok || !gpsRes.gps) {
+        setPendingGoogleUser(supaUser);
+        setGpsStatus('ERROR');
+        setGpsStatusMsg(gpsRes.message);
+        setInfoMsg(null);
+        setErrorMsg(
+          `📍 Location ON Karna Zaroori Hai: ${gpsRes.message}`
+        );
+        return;
+      }
+      setPendingGoogleUser(null);
 
       const now = serverNowMs > 0 ? serverNowMs : getEffectiveServerNowMs() || Date.now();
       const nowIso = new Date(now).toISOString();
@@ -749,6 +804,16 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     setInfoMsg(null);
     setShowSwitchToRegisterHint(false);
     setShowSwitchToLoginHint(false);
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      setErrorMsg('Internet band hai (Offline). Pehli baar Google Login ke liye Internet ON karein.');
+      return;
+    }
+    if (activeTab === 'REGISTER') {
+      const gpsCheck = await ensureMandatoryGpsForNewAccount(true);
+      if (!gpsCheck) {
+        return;
+      }
+    }
     setIsGoogleAuthenticating(true);
     try {
       const redirectTo =
@@ -1242,6 +1307,10 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     setInfoMsg(null);
     setShowSwitchToRegisterHint(false);
     setShowSwitchToLoginHint(false);
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      setErrorMsg('Internet band hai (Offline). Account login karne ke liye internet ON karein; login ke baad app offline bhi chale gi.');
+      return;
+    }
 
     setIsLoggingIn(true);
     try {
@@ -1449,7 +1518,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       const macAddress = getOrCreateDeviceMacFingerprint();
       const deviceModel = getDeviceModelName();
 
-      const [usersRes, subsRes, masterCfg, publicIp, gps, serverNowMs] = await Promise.all([
+      const [usersRes, subsRes, masterCfg, publicIp, gpsRes, serverNowMs] = await Promise.all([
         callSupabaseProxy({
           table: 'users',
           method: 'GET',
@@ -1464,11 +1533,16 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         }),
         fetchMasterEngineConfigFromSupabase(),
         getClientPublicIpAddress(),
-        Promise.resolve(loadStoredGpsLocation()).then((existing) =>
-          existing ? existing : requestAndSaveGpsLocation()
-        ),
+        requestMandatoryGpsLocation(),
         fetchSupabaseServerTimeMs(),
       ]);
+
+      const gps = gpsRes.ok ? gpsRes.gps : loadStoredGpsLocation();
+      if (gpsRes.ok && gpsRes.gps) {
+        setLiveGps(gpsRes.gps);
+        setGpsStatus('READY');
+        setGpsStatusMsg(gpsRes.message);
+      }
 
       const usersList = Array.isArray(usersRes.data) ? usersRes.data : [];
       const subsList = Array.isArray(subsRes.data) ? subsRes.data : [];
@@ -1516,6 +1590,15 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           fallbackCnic: cleanCnic,
           fallbackAddress: cleanAddress,
         });
+        return;
+      }
+
+      // Mandatory GPS Location enforcement for ANY brand-new account creation
+      if (!gpsRes.ok || !gpsRes.gps) {
+        setLiveGps(null);
+        setGpsStatus('ERROR');
+        setGpsStatusMsg(gpsRes.message);
+        setErrorMsg(`📍 Location ON Karna Zaroori Hai: ${gpsRes.message}`);
         return;
       }
 
@@ -1639,7 +1722,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       const macAddress = getOrCreateDeviceMacFingerprint();
       const deviceModel = getDeviceModelName();
 
-      const [usersRes, subsRes, masterCfg, gps, publicIp, serverNowMs] = await Promise.all([
+      const [usersRes, subsRes, masterCfg, gpsRes, publicIp, serverNowMs] = await Promise.all([
         callSupabaseProxy({
           table: 'users',
           method: 'GET',
@@ -1653,10 +1736,17 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           timeoutMs: 8000,
         }),
         fetchMasterEngineConfigFromSupabase(),
-        Promise.resolve(loadStoredGpsLocation()).then((g) => (g ? g : requestAndSaveGpsLocation())),
+        requestMandatoryGpsLocation(),
         getClientPublicIpAddress(),
         fetchSupabaseServerTimeMs(),
       ]);
+
+      const gps = gpsRes.ok ? gpsRes.gps : loadStoredGpsLocation();
+      if (gpsRes.ok && gpsRes.gps) {
+        setLiveGps(gpsRes.gps);
+        setGpsStatus('READY');
+        setGpsStatusMsg(gpsRes.message);
+      }
 
       const usersList = Array.isArray(usersRes.data) ? usersRes.data : [];
       const subsList = Array.isArray(subsRes.data) ? subsRes.data : [];
@@ -1714,6 +1804,14 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           fallbackCnic: cleanCnic,
           fallbackAddress: cleanAddress,
         });
+        return;
+      }
+
+      if (!gpsRes.ok || !gpsRes.gps) {
+        setLiveGps(null);
+        setGpsStatus('ERROR');
+        setGpsStatusMsg(gpsRes.message);
+        setErrorMsg(`📍 Location ON Karna Zaroori Hai: ${gpsRes.message}`);
         return;
       }
 
@@ -1974,6 +2072,17 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                 <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
                 <span>{errorMsg}</span>
               </div>
+              {pendingGoogleUser && (
+                <button
+                  type="button"
+                  onClick={() => finalizeGoogleOAuthUser(pendingGoogleUser, true)}
+                  disabled={isGoogleAuthenticating}
+                  className="boss-flat-btn px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black font-black text-[11px] flex items-center gap-1.5 cursor-pointer"
+                >
+                  <MapPin className="w-3.5 h-3.5" />
+                  <span>Enable GPS Location &amp; Complete Google Signup</span>
+                </button>
+              )}
               {showSwitchToRegisterHint && (
                 <button
                   type="button"
@@ -2443,6 +2552,49 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                     </>
                   )}
                 </label>
+              </div>
+
+              {/* Mandatory GPS Location Requirement Indicator */}
+              <div
+                className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 text-[11px] ${
+                  gpsStatus === 'READY' && liveGps
+                    ? 'bg-emerald-950/35 border-emerald-500/60 text-emerald-200'
+                    : 'bg-amber-950/35 border-amber-500/70 text-amber-200'
+                }`}
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <MapPin
+                    className={`w-4 h-4 shrink-0 ${
+                      gpsStatus === 'READY' && liveGps ? 'text-emerald-400' : 'text-amber-400'
+                    }`}
+                  />
+                  <div className="min-w-0">
+                    <div className="font-bold truncate">
+                      {gpsStatus === 'READY' && liveGps
+                        ? `GPS Location Active (${liveGps.latitude}, ${liveGps.longitude})`
+                        : gpsStatus === 'CHECKING'
+                        ? 'Checking GPS Location...'
+                        : 'GPS Location Required (Must Be ON)'}
+                    </div>
+                    <div className="text-[10px] opacity-85 truncate">
+                      {gpsStatus === 'READY' && liveGps
+                        ? 'Account create karte waqt aapki location save hogi'
+                        : gpsStatusMsg || 'Account banane ke liye Mobile/Browser Location ON karein'}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => ensureMandatoryGpsForNewAccount(true)}
+                  disabled={gpsStatus === 'CHECKING'}
+                  className={`boss-flat-btn px-2.5 py-1 rounded-lg text-[10px] font-black shrink-0 cursor-pointer ${
+                    gpsStatus === 'READY' && liveGps
+                      ? 'bg-emerald-500/20 border border-emerald-500/60 text-emerald-200 hover:bg-emerald-500 hover:text-black'
+                      : 'bg-[#F5B738] text-black hover:bg-amber-400'
+                  }`}
+                >
+                  {gpsStatus === 'CHECKING' ? 'Checking...' : gpsStatus === 'READY' ? 'Refresh GPS' : 'Turn On GPS'}
+                </button>
               </div>
 
               <button

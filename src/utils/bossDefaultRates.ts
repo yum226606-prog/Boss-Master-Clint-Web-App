@@ -1,7 +1,6 @@
 import {
   BankAccountConfig,
   ClientAppLayoutControlConfig,
-  DragDropBlueprint,
   DynamicMasterSection,
   FSectionFormula,
   FormulaCategorySettings,
@@ -518,6 +517,56 @@ export function getDefaultWindowFormula(): WindowFormulaSettings {
   };
 }
 
+export function getDefaultDgWindowFormula(): WindowFormulaSettings {
+  return {
+    m23HeightDeduction: { inch: 1, sutar: 6 }, // DG.23 H deduction
+    m24WidthDeduction: { inch: 0, sutar: 0 }, // 2-Palay + x
+    m24Panels: 2,
+    d29HeightDeduction: { inch: 1, sutar: 6 },
+    d29WidthDeduction: { inch: 0, sutar: 0 },
+    d29WidthOverlap: { inch: 0, sutar: 0 },
+    d29Panels: 2,
+    m23ApplyTo: 'H',
+    m23Qty: 4,
+    m28ApplyTo: 'H',
+    m28Qty: 2,
+    m24ApplyTo: 'W',
+    m24Qty: 4,
+    d29ApplyTo: 'both',
+    d29HeightQty: 2,
+    d29WidthQty: 2,
+    // 3-Palay (+ formula)
+    m24WidthCenterDeduction3: { inch: 0, sutar: 0 },
+    m24WidthSidesDeduction3: { inch: 0, sutar: 0 },
+    m24WidthDeduction3: { inch: 0, sutar: 0 },
+    m24WidthOverlap3: { inch: 0, sutar: 0 },
+    m23Qty3: 6,
+    m28Qty3: 4,
+    m24Qty3: 6,
+    d29WidthDeduction3: { inch: 0, sutar: 0 },
+    d29WidthOverlap3: { inch: 0, sutar: 0 },
+    d29Panels3: 3,
+    d29HeightQty3: 4,
+    d29WidthQty3: 4,
+    d29HeightDeduction3: { inch: 1, sutar: 6 },
+    // 4-Palay (+ formula)
+    m24WidthDeduction4: { inch: 0, sutar: 0 },
+    m23Qty4: 8,
+    m28Qty4: 4,
+    m24Qty4: 8,
+    d29WidthDeduction4: { inch: 0, sutar: 0 },
+    d29WidthOverlap4: { inch: 0, sutar: 0 },
+    d29Panels4: 4,
+    d29HeightQty4: 4,
+    d29WidthQty4: 4,
+    d29HeightDeduction4: { inch: 1, sutar: 6 },
+    // Jali & Push Handle & DG.31
+    d29ExtraWidthAdd: { inch: 0, sutar: 0 },
+    d29PushHandleDeduction: { inch: 1, sutar: 2 },
+    d31HeightDeduction4: { inch: 1, sutar: 6 },
+  };
+}
+
 export function getDefaultSlidingDoorFormula(): SlidingDoorFormulaSettings {
   return {
     m23HeightDeduction: { inch: 1, sutar: 6 },
@@ -640,6 +689,7 @@ export function getDefaultGlassFormulas(): Record<string, GlassFormula> {
   };
   return {
     window: { ...base, panels: 2 },
+    dgwindow: { ...base, panels: 2 },
     door: { ...base, panels: 1 },
     fix: { ...base, panels: 1 },
     openwin: { ...base, panels: 1 },
@@ -882,7 +932,7 @@ export function getStarterPackages(): SubscriptionPackage[] {
       features: [
         '180 Days Full Unlocked Access',
         'Custom Company Letterhead & Logo',
-        'All Drag & Drop Custom Window Setups',
+        'DG.Windows & Multi-Panel Fabrication Support',
       ],
     },
     {
@@ -924,6 +974,7 @@ export function getDefaultLayoutControlConfig(): ClientAppLayoutControlConfig {
   return {
     enabledTabs: {
       WINDOWS: true,
+      DG_WINDOWS: true,
       DOORS: true,
       EXTRA_PIECES: true,
       CUTTING: true,
@@ -933,8 +984,12 @@ export function getDefaultLayoutControlConfig(): ClientAppLayoutControlConfig {
       HISTORY: true,
       RATES: true,
     },
+    lockedTabs: {
+      DG_WINDOWS: true,
+    },
     tabCustomTitles: {
       WINDOWS: 'Windows',
+      DG_WINDOWS: 'DG.Windows',
       DOORS: 'Doors & Frames',
       EXTRA_PIECES: 'Extra Pieces',
       CUTTING: 'Cutting Chart',
@@ -1016,150 +1071,6 @@ export function getStarterBankAccounts(): BankAccountConfig[] {
       quarterlyFee: 8000,
       autoVerifyEnabled: true,
       isActive: true,
-    },
-  ];
-}
-
-export function getStarterBlueprints(): DragDropBlueprint[] {
-  return [
-    {
-      id: 'bp-sliding-2p',
-      name: 'Standard 2-Palay Sliding Window + Jali Setup',
-      category: 'Windows',
-      panelCount: 2,
-      hasNetJali: true,
-      hasArchTop: false,
-      outerSectionCode: 'DC30C / DC26C',
-      sashSectionCode: 'M23 + M24',
-      interlockSectionCode: 'M28',
-      createdAt: Date.now() - 86400000 * 3,
-      items: [
-        {
-          id: 'w-1',
-          type: 'PANEL_SELECTOR_CHIPS',
-          label: 'Panels Selector (2 Palay / 3 Palay / 4 Palay)',
-          sectionCode: 'UI_PANELS',
-          formulaExpression: 'panels = 2 | 3 | 4',
-          qtyFormula: '1',
-          applyTo: 'UI',
-          defaultGauge: '1.6',
-          options: ['2 Palay', '3 Palay', '4 Palay'],
-          defaultValue: '2 Palay',
-          isEnabled: true,
-        },
-        {
-          id: 'w-2',
-          type: 'LOCK_HANDLE_CHIPS',
-          label: 'Lock / Handle Selector (Latch / Push Handle)',
-          sectionCode: 'UI_LOCK',
-          formulaExpression: 'Push Handle -> D29W - 1" 2s',
-          qtyFormula: '1',
-          applyTo: 'UI',
-          defaultGauge: '1.6',
-          options: ['Latch', 'Push Handle'],
-          defaultValue: 'Latch',
-          isEnabled: true,
-        },
-        {
-          id: 'w-3',
-          type: 'DIMENSION_INPUTS_ROW',
-          label: 'Width, Height & Quantity Input Row',
-          sectionCode: 'UI_DIMS',
-          formulaExpression: 'W × H × Qty (in.sut / cm / mm)',
-          qtyFormula: '1',
-          applyTo: 'UI',
-          defaultGauge: '1.6',
-          isEnabled: true,
-        },
-        {
-          id: 'w-4',
-          type: 'OUTER_FRAME',
-          label: 'Outer Frame (DC30C Top/Side + DC26C Bottom)',
-          sectionCode: 'DC30C',
-          formulaExpression: '2H (DC30C) + 1W (DC30C) + 1W (DC26C)',
-          qtyFormula: '4',
-          applyTo: 'both',
-          defaultGauge: '1.6',
-          isEnabled: true,
-        },
-        {
-          id: 'w-5',
-          type: 'SLIDING_SASH',
-          label: 'Sliding Sash Handle Verticals (M23)',
-          sectionCode: 'M23',
-          formulaExpression: 'H - 1.75',
-          qtyFormula: '2',
-          applyTo: 'H',
-          defaultGauge: '1.6',
-          isEnabled: true,
-        },
-        {
-          id: 'w-5b',
-          type: 'INTERLOCK_M28',
-          label: 'Sliding Sash Interlock Verticals (M28)',
-          sectionCode: 'M28',
-          formulaExpression: 'H - 1.75',
-          qtyFormula: '2',
-          applyTo: 'H',
-          defaultGauge: '1.6',
-          isEnabled: true,
-        },
-        {
-          id: 'w-6',
-          type: 'PARAMETRIC_FORMULA_BOX',
-          label: 'M24 Sash Width Formula',
-          sectionCode: 'M24',
-          formulaExpression: '(W - 6.25) / 2',
-          qtyFormula: '4',
-          applyTo: 'W',
-          defaultGauge: '1.6',
-          isEnabled: true,
-        },
-        {
-          id: 'w-7',
-          type: 'D29_NET_JALI',
-          label: 'D29 Net / Jali Screen (1.2mm)',
-          sectionCode: 'D29',
-          formulaExpression: 'H: (H - 1.75) | W: M24 + 3.25',
-          qtyFormula: '2H + 2W',
-          applyTo: 'both',
-          defaultGauge: '1.2',
-          isEnabled: true,
-        },
-        {
-          id: 'w-8',
-          type: 'FIXED_GLASS_PANEL',
-          label: 'Sliding Glass Panes (5mm / 8mm)',
-          sectionCode: 'GLASS',
-          formulaExpression: 'H: (H - 5.625) | W: (M24 + 0.625)',
-          qtyFormula: '2',
-          applyTo: 'both',
-          defaultGauge: '5',
-          isEnabled: true,
-        },
-        {
-          id: 'w-9',
-          type: 'PIECE_COUNTER_STEPPER',
-          label: 'Piece Steppers (M24, M24A, D29 H, D29 W)',
-          sectionCode: 'UI_COUNTERS',
-          formulaExpression: 'Interactive - / + piece counters',
-          qtyFormula: '1',
-          applyTo: 'UI',
-          defaultGauge: '1.6',
-          isEnabled: true,
-        },
-        {
-          id: 'w-10',
-          type: 'CUTTING_TABLE_WIDGET',
-          label: 'Live Bar Packing & Cutting Schedule Table',
-          sectionCode: 'UI_CUTTING_TABLE',
-          formulaExpression: '14/16/18ft Optimal Bar Packing',
-          qtyFormula: '1',
-          applyTo: 'UI',
-          defaultGauge: '1.6',
-          isEnabled: true,
-        },
-      ],
     },
   ];
 }

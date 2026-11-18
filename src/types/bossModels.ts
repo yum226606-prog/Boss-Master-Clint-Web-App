@@ -1,5 +1,6 @@
 export type BossTab =
   | 'WINDOWS'
+  | 'DG_WINDOWS'
   | 'DOORS'
   | 'EXTRA_PIECES'
   | 'CUTTING'
@@ -10,7 +11,7 @@ export type BossTab =
   | 'RATES'
   | (string & {});
 
-export type MainAppSystem = 'HUB' | 'DASHBOARD' | 'DRAG_DROP' | 'SETTINGS' | 'LAYOUT';
+export type MainAppSystem = 'HUB' | 'DASHBOARD' | 'SETTINGS' | 'LAYOUT';
 
 export type MeasurementUnit = 'INCH_SUTAR' | 'CM' | 'MM';
 
@@ -40,8 +41,25 @@ export interface WindowItem {
   outerSection: string;
   panelCount: number; // 2, 3, or 4
   lockType: 'LATCH' | 'PUSH_HANDLE';
-  blueprintId?: string;
-  blueprintName?: string;
+}
+
+export interface DgWindowItem {
+  id: string;
+  width: number; // in inches
+  height: number; // in inches
+  qty: number;
+  frameType: 'C' | 'F' | string; // "C" (DG.26) | "F" (DG.26F)
+  sectionGauge: string;
+  glassGauge: string;
+  glassColor: string;
+  glassEnabled: boolean;
+  panelCount: number; // 2, 3, or 4
+  lockType: 'LATCH' | 'PUSH_HANDLE';
+  dg23aHQty: number;
+  dg23aWQty: number;
+  dg24aHQty: number;
+  dg24aWQty: number;
+  extras: ExtraPiece[];
 }
 
 export interface DoorItem {
@@ -333,6 +351,7 @@ export interface SavedQuotation {
   totalUnits: number;
   itemsSummary: string;
   windowsJson: string;
+  dgWindowsJson?: string;
   doorsJson: string;
   fixframesJson: string;
   openableWindowsJson: string;
@@ -401,7 +420,6 @@ export interface DeletedBackupItem {
     | 'GLASS_8MM'
     | 'CALC_TAB'
     | 'UI_CONTROL'
-    | 'BLUEPRINT'
     | 'CALC_ITEM';
   title: string;
   codeOrKey: string;
@@ -411,6 +429,7 @@ export interface DeletedBackupItem {
 
 export interface ClientAppLayoutControlConfig {
   enabledTabs: Record<string, boolean>;
+  lockedTabs?: Record<string, boolean>;
   tabCustomTitles: Record<string, string>;
   customControlLabels?: Record<string, string>;
   deletedSections?: string[];
@@ -453,7 +472,6 @@ export interface SubAdminPermissions {
   canViewOtherUsersData: boolean;
   canViewUploadedUserPhotos: boolean;
   canViewEditFormulas: boolean;
-  canUseDragDropStudio: boolean;
   canEditAppLayoutElements: boolean;
   canCreateNewSections: boolean;
   canEditGlobalRates: boolean;
@@ -493,6 +511,10 @@ export interface ClientSupportRequest {
   isResolved: boolean;
   resolvedBy?: string;
   resolvedAt?: number;
+  sender?: 'CLIENT' | 'ADMIN';
+  adminReply?: string;
+  repliedAt?: number;
+  isBroadcast?: boolean;
 }
 
 export interface AppOfferBanner {
@@ -504,9 +526,11 @@ export interface AppOfferBanner {
   isVisible?: boolean;
   showBanner?: boolean;
   createdAt: number;
+  updatedAt?: number;
   createdBy: string;
   discountPct?: number;
   discountCode?: string;
+  applyToAllPackages?: boolean;
   expiresAt?: number;
   imageUrl?: string;
 }
@@ -634,73 +658,4 @@ export interface PaymentWebhookConfig {
   lastPingAt?: number;
   totalAlertsReceived: number;
   autoApprovedCount: number;
-}
-
-
-// ============================================================================
-// DRAG & DROP VISUAL BUILDER MODELS (CAD + APP UI TOOLBOX)
-// ============================================================================
-export type BuilderWidgetType =
-  | 'OUTER_FRAME'
-  | 'SLIDING_SASH'
-  | 'INTERLOCK_M28'
-  | 'OPENABLE_SASH'
-  | 'GLASS_PANEL'
-  | 'FIXED_GLASS_PANEL'
-  | 'MULLION_VERTICAL'
-  | 'TRANSOM_HORIZONTAL'
-  | 'D29_NET_JALI'
-  | 'ARCH_VENTILATOR'
-  | 'PANEL_SELECTOR_CHIPS'
-  | 'LOCK_HANDLE_CHIPS'
-  | 'DIMENSION_INPUTS_ROW'
-  | 'SECTION_FRAME_DROPDOWN'
-  | 'GAUGE_GLASS_CHIPS'
-  | 'PIECE_COUNTER_STEPPER'
-  | 'PARAMETRIC_FORMULA_BOX'
-  | 'CUTTING_TABLE_WIDGET'
-  | 'QUOTATION_TABLE_WIDGET'
-  | 'ACTION_BUTTONS_BAR'
-  | 'ACTION_BUTTON'
-  | 'PRINT_BUTTON'
-  | 'SAVE_BUTTON'
-  | 'WHATSAPP_BUTTON'
-  | 'RESET_BUTTON';
-
-export interface BuilderCanvasItem {
-  id: string;
-  type?: BuilderWidgetType;
-  label: string;
-  sectionCode: string;
-  formulaExpression?: string;
-  qtyFormula?: string;
-  applyTo?: 'H' | 'W' | 'both' | 'UI';
-  defaultGauge?: string;
-  options?: string[];
-  defaultValue?: string;
-  isEnabled?: boolean;
-  role?: string;
-  customLengthExpr?: string;
-  formulaType?: string;
-  pricePerFoot?: number;
-  qty?: number;
-  sashWidthFraction?: number;
-  glassColor?: string;
-  glassGauge?: string;
-}
-
-export interface DragDropBlueprint {
-  id: string;
-  name: string;
-  category: 'Windows' | 'Doors' | 'Sliding' | 'Fix Partition' | 'Curtain Wall' | 'Kitchen' | 'Custom';
-  panelCount: number;
-  hasNetJali: boolean;
-  hasArchTop: boolean;
-  outerSectionCode: string;
-  sashSectionCode: string;
-  interlockSectionCode: string;
-  items: BuilderCanvasItem[];
-  createdAt: number;
-  isActive?: boolean;
-  isHidden?: boolean;
 }

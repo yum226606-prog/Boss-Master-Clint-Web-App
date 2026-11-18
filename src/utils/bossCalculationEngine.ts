@@ -2,8 +2,8 @@ import {
   AluminiumCostRow,
   CutPiece,
   DeductionDim,
+  DgWindowItem,
   DoorItem,
-  DragDropBlueprint,
   ExtraPiece,
   FixFrameItem,
   FormulaCategorySettings,
@@ -102,7 +102,17 @@ export function barLengthsFor(section: string): number[] {
 
 export function pricingGaugeForSection(section: string, fallbackGauge: string): string {
   const k = section.toUpperCase().replace(/\s+/g, '');
-  if (k === 'D29' || k === 'D41' || k === 'D31') return '1.2';
+  if (
+    k === 'D29' ||
+    k === 'D41' ||
+    k === 'D31' ||
+    k === 'DG.29' ||
+    k === 'DG29' ||
+    k === 'DG.31' ||
+    k === 'DG31'
+  ) {
+    return '1.2';
+  }
   return fallbackGauge && fallbackGauge.trim() ? fallbackGauge.trim() : '1.2';
 }
 
@@ -516,115 +526,330 @@ export function computeSlidingWindowPieces(
   return pieces;
 }
 
-export function computeBlueprintWindowPieces(
-  w: WindowItem,
-  bp: DragDropBlueprint,
-  formula: WindowFormulaSettings
+export function computeDgWindowPieces(
+  w: DgWindowItem,
+  overrideFrameType: string | null,
+  formula: WindowFormulaSettings,
+  fFormula: FSectionFormula
 ): CutPiece[] {
-  const pieces: CutPiece[] = [];
-  const width = w.width;
+  const ft = (overrideFrameType ?? (w.frameType?.trim() ? w.frameType : 'C')).trim().toUpperCase();
+  const isF = ft === 'F' || ft.endsWith('F');
+  const outerSec = isF ? 'DG.26F' : 'DG.26';
   const h = w.height;
+  const width = w.width;
   const q = Math.max(1, w.qty);
-  const panels = Math.min(4, Math.max(2, w.panelCount || bp.panelCount || 2));
   const g = w.sectionGauge || '1.6';
-  const src = `${bp.name} (${panels}P)`;
+  const src = 'DG.Window';
+  const pieces: CutPiece[] = [];
 
-  const m24Val =
+  // 1. Outer Frame (2H + 2W): DG.26 (Normal C) or DG.26F (F-Section with F formula)
+  if (isF && fFormula.enabled) {
+    const hLen = calcFHeight(fFormula, h);
+    const wLen = calcFWidth(fFormula, width);
+    pieces.push({
+      section: outerSec,
+      length: hLen,
+      qty: Math.max(1, fFormula.qtyH || 2) * q,
+      source: src,
+      label: 'Outer frame F (Height)',
+      gauge: g,
+    });
+    pieces.push({
+      section: outerSec,
+      length: wLen,
+      qty: Math.max(1, fFormula.qtyW || 2) * q,
+      source: src,
+      label: 'Outer frame F (Width)',
+      gauge: g,
+    });
+  } else {
+    pieces.push({
+      section: outerSec,
+      length: h,
+      qty: 2 * q,
+      source: src,
+      label: 'Outer frame (Height)',
+      gauge: g,
+    });
+    pieces.push({
+      section: outerSec,
+      length: width,
+      qty: 2 * q,
+      source: src,
+      label: 'Outer frame (Width)',
+      gauge: g,
+    });
+  }
+
+  const panels = Math.min(4, Math.max(2, w.panelCount || 2));
+  const dg23H = Math.max(0, h - dimToInches(formula.m23HeightDeduction));
+
+  // 2. Palay Height (DG.23): 2P = 4 pcs, 3P = 6 pcs, 4P = 8 pcs
+  const dg23HPcs =
     panels === 3
-      ? Math.max(0, (width - dimToInches(formula.m24WidthSidesDeduction3)) / 4.0)
+      ? formula.m23Qty3 > 0
+        ? formula.m23Qty3
+        : 6
       : panels === 4
-      ? Math.max(0, (width - dimToInches(formula.m24WidthDeduction4)) / 4.0)
-      : Math.max(0, (width - dimToInches(formula.m24WidthDeduction)) / 2.0);
+      ? formula.m23Qty4 > 0
+        ? formula.m23Qty4
+        : 8
+      : formula.m23Qty > 0
+      ? formula.m23Qty
+      : 4;
+  if (dg23HPcs > 0) {
+    pieces.push({
+      section: 'DG.23',
+      length: dg23H,
+      qty: dg23HPcs * q,
+      source: src,
+      label: 'Palay height (DG.23)',
+      gauge: g,
+    });
+  }
 
-  bp.items
-    .filter((it) => it.isEnabled && it.applyTo !== 'UI' && it.sectionCode !== 'GLASS')
-    .forEach((it) => {
-      if (it.type === 'OUTER_FRAME') {
-        const pairStr = it.sectionCode.includes('/') ? it.sectionCode : bp.outerSectionCode || it.sectionCode || 'DC30C';
-        const pairParts = pairStr.split('/').map((s) => s.trim()).filter(Boolean);
-        const topSec = pairParts[0] || it.sectionCode || 'DC30C';
-        const botSec = pairParts[1] || topSec;
-        const effG = it.defaultGauge || g;
+  // 3. Interlock (DG.28): 2P = 2 pcs, 3P/4P = 4 pcs, length = DG.23 H
+  const dg28Pcs =
+    panels === 3
+      ? formula.m28Qty3 > 0
+        ? formula.m28Qty3
+        : 4
+      : panels === 4
+      ? formula.m28Qty4 > 0
+        ? formula.m28Qty4
+        : 4
+      : formula.m28Qty > 0
+      ? formula.m28Qty
+      : 2;
+  if (dg28Pcs > 0) {
+    pieces.push({
+      section: 'DG.28',
+      length: dg23H,
+      qty: dg28Pcs * q,
+      source: src,
+      label: 'Interlock height (DG.28)',
+      gauge: g,
+    });
+  }
+
+  // 4. Palay Width (DG.23 W) using + (plus) formula:
+  //    2P: (W + x) / 2 x 4 pcs
+  //    3P: Center (W + x) / 2 x 2 pcs & Sides (W + x) / 4 x 4 pcs
+  //    4P: (W + x) / 4 x 8 pcs
+  let dg23WCenter = 0;
+  let dg23WSides = 0;
+  let dg23WSingle = 0;
+
+  if (panels === 3) {
+    const addCenter = dimToInches(formula.m24WidthCenterDeduction3);
+    const addSides = dimToInches(formula.m24WidthSidesDeduction3);
+    dg23WCenter = Math.max(0, (width + addCenter) / 2.0);
+    dg23WSides = Math.max(0, (width + addSides) / 4.0);
+    const dg23WPcs = formula.m24Qty3 > 0 ? formula.m24Qty3 : 6;
+    const centerPcs = dg23WPcs === 6 ? 2 : Math.max(1, Math.floor(dg23WPcs / 3));
+    const sidesPcs = dg23WPcs === 6 ? 4 : Math.max(0, dg23WPcs - centerPcs);
+    if (centerPcs > 0) {
+      pieces.push({
+        section: 'DG.23',
+        length: dg23WCenter,
+        qty: centerPcs * q,
+        source: src,
+        label: 'DG.23 Center width',
+        gauge: g,
+      });
+    }
+    if (sidesPcs > 0) {
+      pieces.push({
+        section: 'DG.23',
+        length: dg23WSides,
+        qty: sidesPcs * q,
+        source: src,
+        label: 'DG.23 Sides width',
+        gauge: g,
+      });
+    }
+  } else {
+    const addW =
+      panels === 4
+        ? dimToInches(formula.m24WidthDeduction4)
+        : dimToInches(formula.m24WidthDeduction);
+    dg23WSingle = Math.max(0, (width + addW) / panels);
+    const dg23WPcs =
+      panels === 4
+        ? formula.m24Qty4 > 0
+          ? formula.m24Qty4
+          : 8
+        : formula.m24Qty > 0
+        ? formula.m24Qty
+        : 4;
+    if (dg23WPcs > 0) {
+      pieces.push({
+        section: 'DG.23',
+        length: dg23WSingle,
+        qty: dg23WPcs * q,
+        source: src,
+        label: 'Palay width (DG.23)',
+        gauge: g,
+      });
+    }
+  }
+
+  // 5. Jali Palay (DG.29): Height = DG.23 H, Width = DG.23 W (2H+2W for 2P, 4H+4W for 3P/4P)
+  const dg29HPcs = panels >= 3 ? 4 : 2;
+  const dg29WPcs = panels >= 3 ? 4 : 2;
+  const dg29BaseW = panels === 3 ? dg23WSides : dg23WSingle;
+  const dg29W =
+    w.lockType === 'PUSH_HANDLE'
+      ? Math.max(0, dg29BaseW - dimToInches(formula.d29PushHandleDeduction))
+      : dg29BaseW;
+
+  pieces.push({
+    section: 'DG.29',
+    length: dg23H,
+    qty: dg29HPcs * q,
+    source: src,
+    label: 'Jali height (DG.29)',
+    gauge: '1.2',
+  });
+  pieces.push({
+    section: 'DG.29',
+    length: dg29W,
+    qty: dg29WPcs * q,
+    source: src,
+    label: w.lockType === 'PUSH_HANDLE' ? 'Jali width (DG.29) [Push Handle]' : 'Jali width (DG.29)',
+    gauge: '1.2',
+  });
+
+  // 6. 4-Palay DG.31: 1 pc equal to DG.23 H
+  if (panels === 4) {
+    pieces.push({
+      section: 'DG.31',
+      length: dg23H,
+      qty: 1 * q,
+      source: src,
+      label: 'DG.31 Height (4-Palay)',
+      gauge: '1.2',
+    });
+  }
+
+  // 7. Optional + / - piece steppers starting at 0 (DG.23A H, DG.23A W, DG.24A H, DG.24A W)
+  const addOptionalWidth = (secName: 'DG.23A' | 'DG.24A', qtyVal: number) => {
+    if (qtyVal <= 0) return;
+    if (panels === 3) {
+      const centerPcs = qtyVal === 6 ? 2 : Math.max(1, Math.floor(qtyVal / 3));
+      const sidesPcs = qtyVal === 6 ? 4 : Math.max(0, qtyVal - centerPcs);
+      if (centerPcs > 0) {
         pieces.push({
-          section: topSec,
-          length: h,
-          qty: 2 * q,
+          section: secName,
+          length: dg23WCenter,
+          qty: centerPcs * q,
           source: src,
-          label: `${it.label} Side (H)`,
-          gauge: effG,
+          label: `${secName} Center width`,
+          gauge: g,
         });
+      }
+      if (sidesPcs > 0) {
         pieces.push({
-          section: topSec,
-          length: width,
-          qty: 1 * q,
+          section: secName,
+          length: dg23WSides,
+          qty: sidesPcs * q,
           source: src,
-          label: `${it.label} Top (W)`,
-          gauge: effG,
+          label: `${secName} Sides width`,
+          gauge: g,
         });
-        pieces.push({
-          section: botSec,
-          length: width,
-          qty: 1 * q,
-          source: src,
-          label: `${it.label} Bottom (W)`,
-          gauge: effG,
-        });
-      } else if (it.type === 'D29_NET_JALI') {
-        const jaliH = Math.max(0, h - dimToInches(formula.m23HeightDeduction));
-        const d29ExtraW = dimToInches(formula.d29ExtraWidthAdd || { inch: 3, sutar: 2 });
-        let jaliW = Math.max(0, m24Val + d29ExtraW);
-        if (w.lockType === 'PUSH_HANDLE') {
-          jaliW = Math.max(0, jaliW - dimToInches(formula.d29PushHandleDeduction));
-        }
-        const hPcs = w.d29HeightQty > 0 ? w.d29HeightQty : panels >= 3 ? 4 : 2;
-        const wPcs = w.d29WidthQty > 0 ? w.d29WidthQty : panels >= 3 ? 4 : 2;
-        const secCode = it.sectionCode || 'D29';
-        const effG = it.defaultGauge || '1.2';
-        if (hPcs > 0) {
+      }
+    } else {
+      pieces.push({
+        section: secName,
+        length: dg23WSingle,
+        qty: qtyVal * q,
+        source: src,
+        label: `${secName} width`,
+        gauge: g,
+      });
+    }
+  };
+
+  if ((w.dg23aHQty || 0) > 0) {
+    pieces.push({
+      section: 'DG.23A',
+      length: dg23H,
+      qty: w.dg23aHQty * q,
+      source: src,
+      label: 'DG.23A height',
+      gauge: g,
+    });
+  }
+  addOptionalWidth('DG.23A', w.dg23aWQty || 0);
+
+  if ((w.dg24aHQty || 0) > 0) {
+    pieces.push({
+      section: 'DG.24A',
+      length: dg23H,
+      qty: w.dg24aHQty * q,
+      source: src,
+      label: 'DG.24A height',
+      gauge: g,
+    });
+  }
+  addOptionalWidth('DG.24A', w.dg24aWQty || 0);
+
+  // 8. Custom per-section rules attached to dgWindowFormula
+  const coreDgSecs = new Set([
+    'DG.26',
+    'DG.26F',
+    'DG.23',
+    'DG.28',
+    'DG.29',
+    'DG.31',
+    'DG.23A',
+    'DG.24A',
+  ]);
+  if (formula.customSectionRules && formula.customSectionRules.acc) {
+    Object.entries(formula.customSectionRules.acc).forEach(([key, accCfg]) => {
+      if (!accCfg.enabled) return;
+      const targetSec = accCfg.which && accCfg.which !== 'none' ? accCfg.which : key;
+      if (coreDgSecs.has(key.toUpperCase()) || coreDgSecs.has(targetSec.toUpperCase())) return;
+      const f = formula.customSectionRules?.formulas?.[key] || {
+        h: { inch: 0, sutar: 0 },
+        w: { inch: 0, sutar: 0 },
+      };
+      const qH = accCfg.qtyH ?? accCfg.qty ?? 0;
+      const qW = accCfg.qtyW ?? accCfg.qty ?? 0;
+      const divW = accCfg.wDivisor || 1;
+      if ((accCfg.applyTo === 'H' || accCfg.applyTo === 'both') && qH > 0) {
+        const dedH = dimToInches(f.h);
+        const lenH = Math.max(0, accCfg.hOp === 'PLUS' ? h + dedH : h - dedH);
+        if (lenH > 0) {
           pieces.push({
-            section: secCode,
-            length: jaliH,
-            qty: hPcs * q,
+            section: targetSec,
+            length: lenH,
+            qty: qH * q,
             source: src,
-            label: `${secCode} Jali Height`,
-            gauge: effG,
+            label: `${targetSec} height`,
+            gauge: g,
           });
         }
-        if (wPcs > 0) {
+      }
+      if ((accCfg.applyTo === 'W' || accCfg.applyTo === 'both') && qW > 0) {
+        const dedW = dimToInches(f.w);
+        const rawW = accCfg.wOp === 'PLUS' ? width + dedW : width - dedW;
+        const lenW = Math.max(0, rawW / divW);
+        if (lenW > 0) {
           pieces.push({
-            section: secCode,
-            length: jaliW,
-            qty: wPcs * q,
+            section: targetSec,
+            length: lenW,
+            qty: qW * q,
             source: src,
-            label: `${secCode} Jali Width (${w.lockType})`,
-            gauge: effG,
-          });
-        }
-      } else {
-        const len =
-          evaluateParametricFormula(it.formulaExpression, width, h, panels, m24Val) ||
-          (it.applyTo === 'H' ? Math.max(0, h - 1.75) : m24Val);
-        const rawQty = parseInt(it.qtyFormula, 10);
-        const pcs =
-          it.sectionCode === 'M24' && w.m24Qty > 0
-            ? w.m24Qty
-            : !isNaN(rawQty) && rawQty > 0
-            ? rawQty
-            : panels * 2;
-        if (len > 0 && pcs > 0) {
-          pieces.push({
-            section: it.sectionCode,
-            length: len,
-            qty: pcs * q,
-            source: src,
-            label: it.label,
-            gauge: it.defaultGauge || g,
+            label: `${targetSec} width`,
+            gauge: g,
           });
         }
       }
     });
+  }
 
-  w.extras.forEach((ex) => {
+  (w.extras || []).forEach((ex) => {
     if (ex.lengthFt > 0 && ex.qty > 0) {
       pieces.push({
         section: ex.section,
@@ -950,12 +1175,14 @@ export function computeOpenablePieces(
 
 export function computeGlassCutsForState(params: {
   windows: WindowItem[];
+  dgWindows?: DgWindowItem[];
   doors: DoorItem[];
   fixframes: FixFrameItem[];
   openableWindows: OpenableWindowItem[];
   slidingDoors: SlidingDoorItem[];
   glassFormulas: Record<string, GlassFormula>;
   windowFormula: WindowFormulaSettings;
+  dgWindowFormula?: WindowFormulaSettings;
   slidingDoorFormula?: WindowFormulaSettings;
   glassFittingOption: 'FIX_RUBBER' | 'U_PVC';
   measurementUnit: MeasurementUnit;
@@ -1023,26 +1250,31 @@ export function computeGlassCutsForState(params: {
     const panels = panelOverride ?? Math.max(1, f.panels);
     const actualQty = Math.max(1, qty);
 
-    if (kind === 'window' || kind === 'slidingdoor') {
+    if (kind === 'window' || kind === 'slidingdoor' || kind === 'dgwindow') {
       const effMarginH = (f.slidingHeightDeductionInch ?? 5) + (f.slidingHeightDeductionSutar ?? 5) / 8.0;
       const gH = Math.max(0, h - effMarginH);
       const glassExtraW = (f.slidingWidthAddToM24Inch ?? 0) + (f.slidingWidthAddToM24Sutar ?? 5) / 8.0;
 
       const slidingForm =
-        kind === 'slidingdoor' && params.slidingDoorFormula ? params.slidingDoorFormula : params.windowFormula;
+        kind === 'slidingdoor' && params.slidingDoorFormula
+          ? params.slidingDoorFormula
+          : kind === 'dgwindow' && params.dgWindowFormula
+          ? params.dgWindowFormula
+          : params.windowFormula;
+      const widthSign = kind === 'dgwindow' ? 1.0 : -1.0;
 
       if (panels === 3) {
-        const m24Center = Math.max(0, (w - dimToInches(slidingForm.m24WidthCenterDeduction3)) / 2.0);
-        const m24Sides = Math.max(0, (w - dimToInches(slidingForm.m24WidthSidesDeduction3)) / 4.0);
+        const m24Center = Math.max(0, (w + widthSign * dimToInches(slidingForm.m24WidthCenterDeduction3)) / 2.0);
+        const m24Sides = Math.max(0, (w + widthSign * dimToInches(slidingForm.m24WidthSidesDeduction3)) / 4.0);
         addCut(`${label} (Center 1 Pc)`, w, h, gH, m24Center + glassExtraW, 1 * actualQty, effGauge, effColor);
         addCut(`${label} (Sides 2 Pcs)`, w, h, gH, m24Sides + glassExtraW, 2 * actualQty, effGauge, effColor);
       } else {
         const m24Size =
           panels === 2
-            ? Math.max(0, (w - dimToInches(slidingForm.m24WidthDeduction)) / 2.0)
+            ? Math.max(0, (w + widthSign * dimToInches(slidingForm.m24WidthDeduction)) / 2.0)
             : panels === 4
-            ? Math.max(0, (w - dimToInches(slidingForm.m24WidthDeduction4)) / 4.0)
-            : Math.max(0, (w - dimToInches(slidingForm.m24WidthDeduction)) / panels);
+            ? Math.max(0, (w + widthSign * dimToInches(slidingForm.m24WidthDeduction4)) / 4.0)
+            : Math.max(0, (w + widthSign * dimToInches(slidingForm.m24WidthDeduction)) / panels);
         addCut(label, w, h, gH, m24Size + glassExtraW, panels * actualQty, effGauge, effColor);
       }
     } else {
@@ -1056,6 +1288,9 @@ export function computeGlassCutsForState(params: {
 
   params.windows.forEach((it, i) =>
     processItem(it.width, it.height, it.qty, 'window', `Window #${i + 1} (${it.panelCount} Palay)`, it.glassEnabled, it.glassGauge, it.glassColor, it.panelCount)
+  );
+  (params.dgWindows || []).forEach((it, i) =>
+    processItem(it.width, it.height, it.qty, 'dgwindow', `DG.Window #${i + 1} (${it.panelCount} Palay)`, it.glassEnabled, it.glassGauge, it.glassColor, it.panelCount)
   );
   params.doors.forEach((it, i) =>
     processItem(it.width, it.height, it.qty, 'door', `Door #${i + 1}`, it.glassEnabled, it.glassGauge, it.glassColor)
