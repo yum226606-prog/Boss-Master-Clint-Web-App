@@ -25,7 +25,7 @@ jobs:
       - name: Generate Windows .ico from BOSS Logo
         run: |
           npm install png-to-ico --no-save
-          node -e "const fs=require('fs'), pngToIco=require('png-to-ico'); fs.mkdirSync('build',{recursive:true}); const src=fs.existsSync('public/pwa-512x512.png')?'public/pwa-512x512.png':'public/favicon.ico'; pngToIco(src).then(buf=>fs.writeFileSync('build/icon.ico',buf));"
+          node -e "const fs=require('fs'), mod=require('png-to-ico'), fn=mod.default||mod; fs.mkdirSync('build',{recursive:true}); const src=fs.existsSync('public/pwa-512x512.png')?'public/pwa-512x512.png':'public/favicon.ico'; fn(src).then(buf=>fs.writeFileSync('build/icon.ico',buf));"
 
       - name: Build Windows NSIS Setup (.exe)
         run: |
