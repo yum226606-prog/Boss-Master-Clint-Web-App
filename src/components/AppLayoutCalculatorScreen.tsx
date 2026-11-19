@@ -2082,13 +2082,75 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   };
 
   const isTabLocked = (tabId: BossTab): boolean => {
-    const lt = layoutConfig.lockedTabs || {};
-    if (tabId === 'DG_WINDOWS') {
-      return lt.DG_WINDOWS !== false;
+    const rawMap = (layoutConfig.lockedTabs || {}) as Record<string, unknown>;
+    const normalizedMap: Record<string, boolean> = {};
+    const keyAliases: Record<string, string> = {
+      WINDOWS: 'WINDOWS',
+      WINDOW: 'WINDOWS',
+      SLIDING_WINDOWS: 'WINDOWS',
+      DG_WINDOWS: 'DG_WINDOWS',
+      DGWINDOWS: 'DG_WINDOWS',
+      DG_WINDOW: 'DG_WINDOWS',
+      DGWINDOW: 'DG_WINDOWS',
+      DOORS: 'DOORS',
+      DOOR: 'DOORS',
+      DOORS_FRAMES: 'DOORS',
+      DOORS_AND_FRAMES: 'DOORS',
+      SLIDING_DOORS: 'DOORS',
+      EXTRA: 'EXTRA_PIECES',
+      EXTRA_PIECES: 'EXTRA_PIECES',
+      EXTRAS: 'EXTRA_PIECES',
+      EXTRA_PIECE: 'EXTRA_PIECES',
+      CUTTING: 'CUTTING',
+      CUTTING_CHART: 'CUTTING',
+      LENGTH: 'LENGTH',
+      LENGTH_CHART: 'LENGTH',
+      GLASS: 'GLASS',
+      GLASS_CHART: 'GLASS',
+      QUOTATION: 'QUOTATION',
+      QUOTE: 'QUOTATION',
+      HISTORY: 'HISTORY',
+      SAVED_HISTORY: 'HISTORY',
+      RATES: 'RATES',
+      RATES_SETTINGS: 'RATES',
+      SETTINGS: 'RATES',
+    };
+    const toLockBool = (val: unknown): boolean => {
+      if (val === false || val === 0 || val === null || val === undefined) return false;
+      if (typeof val === 'string') {
+        const s = val.trim().toLowerCase();
+        if (
+          !s ||
+          s === 'false' ||
+          s === '0' ||
+          s === 'no' ||
+          s === 'off' ||
+          s === 'unlocked' ||
+          s === 'unlock' ||
+          s === 'open'
+        ) {
+          return false;
+        }
+        return true;
+      }
+      return Boolean(val);
+    };
+    Object.entries(rawMap).forEach(([k, v]) => {
+      const cleaned = String(k || '')
+        .trim()
+        .toUpperCase()
+        .replace(/[\s.-]+/g, '_');
+      const canon = keyAliases[cleaned] || cleaned;
+      if (canon) normalizedMap[canon] = toLockBool(v);
+    });
+    const reqCanon =
+      keyAliases[String(tabId || '').trim().toUpperCase().replace(/[\s.-]+/g, '_')] ||
+      String(tabId || '').trim().toUpperCase();
+    if (reqCanon === 'DG_WINDOWS') {
+      return 'DG_WINDOWS' in normalizedMap ? normalizedMap.DG_WINDOWS : true;
     }
-    return Boolean(lt[tabId]);
+    return Boolean(normalizedMap[reqCanon]);
   };
-  const isDgWindowsLocked = isTabLocked('DG_WINDOWS');
 
   const TABS: { id: BossTab; title: string; iconKey: string; isLocked?: boolean }[] = (
     [
@@ -2578,7 +2640,13 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               >
                 {renderTabIcon(tab.iconKey)}
                 <span>{tab.title}</span>
-                {tab.isLocked && <Lock className="w-3 h-3 shrink-0 opacity-80" />}
+                {tab.isLocked && (
+                  <Lock
+                    className={`w-3 h-3 shrink-0 ${
+                      isSelected ? 'text-black' : 'text-amber-400'
+                    }`}
+                  />
+                )}
               </button>
             );
           })}
@@ -3070,33 +3138,6 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
           };
           onUpdateDgWindows([...dgWindows, newDw]);
         };
-
-        if (isDgWindowsLocked) {
-          return (
-            <div className="p-6 sm:p-10 rounded-2xl bg-[#14181F] border border-amber-500/40 text-center space-y-3">
-              <div className="w-12 h-12 mx-auto rounded-2xl bg-amber-500/15 border border-amber-500/50 text-[#F5B738] flex items-center justify-center">
-                <Lock className="w-6 h-6" />
-              </div>
-              <div className="space-y-1">
-                <h3 className="text-sm sm:text-base font-black text-[#F5B738]">
-                  {layoutConfig.tabCustomTitles.DG_WINDOWS || 'DG.Windows'} Locked
-                </h3>
-                <p className="text-xs text-slate-300 max-w-md mx-auto">
-                  This module is currently locked from the Admin Panel. Once the Admin unlocks DG.Windows, tap Sync to activate it.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => onSyncFromSupabase?.({ forceRates: false, silent: false })}
-                disabled={isSyncingCloud}
-                className="boss-flat-btn px-4 py-2 rounded-xl bg-[#F5B738] hover:bg-amber-400 text-black text-xs font-extrabold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${isSyncingCloud ? 'animate-spin' : ''}`} />
-                <span>{isSyncingCloud ? 'Syncing...' : 'Sync / Check Updates'}</span>
-              </button>
-            </div>
-          );
-        }
 
         return (
           <div className="space-y-2">

@@ -94,6 +94,7 @@ const DEVICE_RATES_KEY = 'boss_client_device_rates_v1';
 const CLEARED_SUPPORT_MSG_IDS_KEY = 'boss_cleared_support_msg_ids_v1';
 const LAST_SEEN_SUPPORT_MS_KEY = 'boss_last_seen_support_ms_v1';
 const INITIAL_CLOUD_SYNC_KEY = 'boss_initial_cloud_sync_done_v1';
+const USER_LOCKED_TABS_KEY = 'boss_user_locked_tabs_v1';
 
 function hasInitialSyncCompletedForDevice(deviceId: string): boolean {
   if (typeof window === 'undefined' || !deviceId) return false;
@@ -154,19 +155,64 @@ const TAB_KEY_ALIASES: Record<string, string> = {
   SETTINGS: 'RATES',
 };
 
+function canonicalizeTabKey(rawKey: string): string {
+  const cleaned = String(rawKey || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[\s.-]+/g, '_');
+  if (!cleaned) return '';
+  return TAB_KEY_ALIASES[cleaned] || cleaned;
+}
+
+function parseLockBoolean(val: unknown): boolean {
+  if (val === false || val === 0 || val === null || val === undefined) return false;
+  if (typeof val === 'string') {
+    const s = val.trim().toLowerCase();
+    if (
+      !s ||
+      s === 'false' ||
+      s === '0' ||
+      s === 'no' ||
+      s === 'off' ||
+      s === 'unlocked' ||
+      s === 'unlock' ||
+      s === 'open'
+    ) {
+      return false;
+    }
+    return true;
+  }
+  return Boolean(val);
+}
+
 function normalizeLockedTabsMap(...sources: any[]): Record<string, boolean> {
   const out: Record<string, boolean> = {};
-  sources.forEach((src) => {
-    if (!src || typeof src !== 'object' || Array.isArray(src)) return;
-    Object.entries(src).forEach(([rawKey, val]) => {
-      const cleaned = String(rawKey || '')
-        .trim()
-        .toUpperCase()
-        .replace(/[\s.-]+/g, '_');
-      const canonical = TAB_KEY_ALIASES[cleaned] || String(rawKey || '').trim().toUpperCase();
-      if (!canonical) return;
-      out[canonical] = Boolean(val);
-    });
+  sources.forEach((rawSrc) => {
+    let src = rawSrc;
+    if (typeof src === 'string') {
+      const trimmed = src.trim();
+      if (!trimmed) return;
+      try {
+        src = JSON.parse(trimmed);
+      } catch {
+        return;
+      }
+    }
+    if (!src) return;
+    if (Array.isArray(src)) {
+      src.forEach((item) => {
+        const canonical = canonicalizeTabKey(String(item || ''));
+        if (canonical) out[canonical] = true;
+      });
+      return;
+    }
+    if (typeof src === 'object') {
+      Object.entries(src).forEach(([rawKey, val]) => {
+        const canonical = canonicalizeTabKey(rawKey);
+        if (!canonical) return;
+        out[canonical] = parseLockBoolean(val);
+      });
+    }
   });
   return out;
 }
@@ -1022,6 +1068,47 @@ export default function App() {
         serverNowMs,
       });
 
+      // Also apply per-user locked_tabs from users / client_users / subscriptions / userAccessControl (without Owner VIP bypass)
+      const userLevelLockedTabs = normalizeLockedTabsMap(
+        evaluated.matchedSub?.locked_tabs,
+        evaluated.matchedSub?.lockedTabs,
+        evaluated.matchedUac?.locked_tabs,
+        evaluated.matchedUac?.lockedTabs,
+        evaluated.matchedUser?.locked_tabs,
+        evaluated.matchedUser?.lockedTabs,
+        evaluated.matchedUser?.layout_config?.lockedTabs
+      );
+      try {
+        localStorage.setItem(USER_LOCKED_TABS_KEY, JSON.stringify(userLevelLockedTabs));
+      } catch {
+        // ignore storage errors
+      }
+      if (Object.keys(userLevelLockedTabs).length > 0) {
+        setLayoutConfig((prev) => {
+          const baseLocked = hasLockedTabsPayload
+            ? {
+                ...incomingLockedTabs,
+                DG_WINDOWS:
+                  'DG_WINDOWS' in incomingLockedTabs ? incomingLockedTabs.DG_WINDOWS : true,
+              }
+            : {
+                DG_WINDOWS: true,
+                ...(prev.lockedTabs || {}),
+              };
+          const mergedLocked = {
+            ...baseLocked,
+            ...userLevelLockedTabs,
+          };
+          return {
+            ...prev,
+            lockedTabs: {
+              ...mergedLocked,
+              DG_WINDOWS: 'DG_WINDOWS' in mergedLocked ? mergedLocked.DG_WINDOWS : true,
+            },
+          };
+        });
+      }
+
       const isOwnerAccount = Boolean(
         activeSession &&
           isOwnerIdentity({
@@ -1462,6 +1549,9 @@ export default function App() {
     markUserOfflineInSupabase(clientDeviceId);
     clearAuthSession();
     clearInitialSyncCompletedFlag();
+    try {
+      localStorage.removeItem(USER_LOCKED_TABS_KEY);
+    } catch {}
     supabase.auth.signOut().catch(() => {});
     setAuthSession(null);
     setIsSubscriptionExpired(false);
@@ -1625,12 +1715,18 @@ export default function App() {
         }
         if (Array.isArray(parsed.supportRequests)) setSupportRequests(parsed.supportRequests);
         if (parsed.layoutConfig || cachedM?.layoutConfig || cachedM?.lockedTabs || cachedM?.tabLocks || cachedM?.lockedPages) {
+          let storedUserLocks: any = {};
+          try {
+            const rawUl = localStorage.getItem(USER_LOCKED_TABS_KEY);
+            if (rawUl) storedUserLocks = JSON.parse(rawUl);
+          } catch {}
           const cachedLockedMerged = normalizeLockedTabsMap(
             parsed.layoutConfig?.lockedTabs,
             cachedM?.tabLocks,
             cachedM?.lockedPages,
             cachedM?.lockedTabs,
-            cachedM?.layoutConfig?.lockedTabs
+            cachedM?.layoutConfig?.lockedTabs,
+            storedUserLocks
           );
           setLayoutConfig((prev) => ({
             ...prev,
@@ -3073,39 +3169,6 @@ export default function App() {
                 </div>
               );
             })()}
-
-            {/* Clear Device Instructions */}
-            <div className="space-y-2 text-[11px]">
-              <div className="p-2.5 rounded-xl bg-[#14181F] border border-slate-800 space-y-0.5">
-                <div className="font-bold text-[#F5B738] flex items-center gap-1.5">
-                  <Monitor className="w-3.5 h-3.5" />
-                  <span>Windows PC / Laptop (Chrome ya Edge)</span>
-                </div>
-                <p className="text-slate-300 leading-snug">
-                  New tab mein open karein aur address bar ke right side par <strong>Install App</strong> icon par click karein — bilkul software ki tarah Desktop par install ho jaye gi.
-                </p>
-              </div>
-
-              <div className="p-2.5 rounded-xl bg-[#14181F] border border-slate-800 space-y-0.5">
-                <div className="font-bold text-emerald-400 flex items-center gap-1.5">
-                  <Smartphone className="w-3.5 h-3.5" />
-                  <span>Android Mobile (Chrome)</span>
-                </div>
-                <p className="text-slate-300 leading-snug">
-                  Browser menu (<strong>⋮</strong>) par tap karke <strong>&quot;Install App&quot;</strong> / <strong>&quot;Add to Home Screen&quot;</strong> select karein.
-                </p>
-              </div>
-
-              <div className="p-2.5 rounded-xl bg-[#14181F] border border-slate-800 space-y-0.5">
-                <div className="font-bold text-sky-400 flex items-center gap-1.5">
-                  <Smartphone className="w-3.5 h-3.5" />
-                  <span>Apple iPhone / iPad (Safari)</span>
-                </div>
-                <p className="text-slate-300 leading-snug">
-                  Safari mein neechay <strong>Share</strong> button dabain aur <strong>&quot;Add to Home Screen&quot;</strong> par tap karein.
-                </p>
-              </div>
-            </div>
 
             <button
               type="button"
