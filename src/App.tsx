@@ -93,6 +93,83 @@ const STORAGE_KEY = 'boss_aluminium_master_web_state_v1';
 const DEVICE_RATES_KEY = 'boss_client_device_rates_v1';
 const CLEARED_SUPPORT_MSG_IDS_KEY = 'boss_cleared_support_msg_ids_v1';
 const LAST_SEEN_SUPPORT_MS_KEY = 'boss_last_seen_support_ms_v1';
+const INITIAL_CLOUD_SYNC_KEY = 'boss_initial_cloud_sync_done_v1';
+
+function hasInitialSyncCompletedForDevice(deviceId: string): boolean {
+  if (typeof window === 'undefined' || !deviceId) return false;
+  try {
+    return localStorage.getItem(INITIAL_CLOUD_SYNC_KEY) === deviceId;
+  } catch {
+    return false;
+  }
+}
+
+function markInitialSyncCompletedForDevice(deviceId: string): void {
+  if (typeof window === 'undefined' || !deviceId) return;
+  try {
+    localStorage.setItem(INITIAL_CLOUD_SYNC_KEY, deviceId);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function clearInitialSyncCompletedFlag(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.removeItem(INITIAL_CLOUD_SYNC_KEY);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+const TAB_KEY_ALIASES: Record<string, string> = {
+  WINDOWS: 'WINDOWS',
+  WINDOW: 'WINDOWS',
+  SLIDING_WINDOWS: 'WINDOWS',
+  DG_WINDOWS: 'DG_WINDOWS',
+  DGWINDOWS: 'DG_WINDOWS',
+  DG_WINDOW: 'DG_WINDOWS',
+  DGWINDOW: 'DG_WINDOWS',
+  DOORS: 'DOORS',
+  DOOR: 'DOORS',
+  DOORS_FRAMES: 'DOORS',
+  DOORS_AND_FRAMES: 'DOORS',
+  SLIDING_DOORS: 'DOORS',
+  EXTRA_PIECES: 'EXTRA_PIECES',
+  EXTRA: 'EXTRA_PIECES',
+  EXTRAS: 'EXTRA_PIECES',
+  EXTRA_PIECE: 'EXTRA_PIECES',
+  CUTTING: 'CUTTING',
+  CUTTING_CHART: 'CUTTING',
+  LENGTH: 'LENGTH',
+  LENGTH_CHART: 'LENGTH',
+  GLASS: 'GLASS',
+  GLASS_CHART: 'GLASS',
+  QUOTATION: 'QUOTATION',
+  QUOTE: 'QUOTATION',
+  HISTORY: 'HISTORY',
+  SAVED_HISTORY: 'HISTORY',
+  RATES: 'RATES',
+  RATES_SETTINGS: 'RATES',
+  SETTINGS: 'RATES',
+};
+
+function normalizeLockedTabsMap(...sources: any[]): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  sources.forEach((src) => {
+    if (!src || typeof src !== 'object' || Array.isArray(src)) return;
+    Object.entries(src).forEach(([rawKey, val]) => {
+      const cleaned = String(rawKey || '')
+        .trim()
+        .toUpperCase()
+        .replace(/[\s.-]+/g, '_');
+      const canonical = TAB_KEY_ALIASES[cleaned] || String(rawKey || '').trim().toUpperCase();
+      if (!canonical) return;
+      out[canonical] = Boolean(val);
+    });
+  });
+  return out;
+}
 
 function loadClearedSupportIds(): Set<string> {
   if (typeof window === 'undefined') return new Set();
@@ -665,21 +742,46 @@ export default function App() {
       }
 
       const rawMob =
+        globalCfg.mobileDownloadConfig ||
         globalCfg.mobileAppConfig ||
         globalCfg.appDownloads ||
-        globalCfg.mobileDownloadConfig ||
         {};
-      const androidApkUrl = String(
-        rawMob.androidApkUrl || rawMob.apkUrl || globalCfg.androidApkUrl || globalCfg.apkUrl || ''
+      const androidUrl = String(
+        rawMob.androidUrl ||
+          rawMob.androidApkUrl ||
+          rawMob.apkUrl ||
+          globalCfg.androidUrl ||
+          globalCfg.androidApkUrl ||
+          globalCfg.apkUrl ||
+          ''
       ).trim();
-      const iosAppUrl = String(
-        rawMob.iosAppUrl || rawMob.iosUrl || rawMob.ipaUrl || globalCfg.iosAppUrl || globalCfg.iosUrl || ''
+      const windowsUrl = String(
+        rawMob.windowsUrl ||
+          rawMob.windowsExeUrl ||
+          rawMob.exeUrl ||
+          rawMob.desktopUrl ||
+          globalCfg.windowsUrl ||
+          globalCfg.windowsExeUrl ||
+          globalCfg.exeUrl ||
+          ''
       ).trim();
-      if (androidApkUrl || iosAppUrl) {
+      const iosUrl = String(
+        rawMob.iosUrl ||
+          rawMob.iosAppUrl ||
+          rawMob.ipaUrl ||
+          globalCfg.iosUrl ||
+          globalCfg.iosAppUrl ||
+          ''
+      ).trim();
+      if (androidUrl || windowsUrl || iosUrl || rawMob.releaseNotes || globalCfg.releaseNotes) {
         setMobileDownloadConfig({
-          androidApkUrl,
-          iosAppUrl,
+          androidUrl,
+          androidApkUrl: androidUrl,
+          windowsUrl,
+          iosUrl,
+          iosAppUrl: iosUrl,
           androidVersion: String(rawMob.androidVersion || globalCfg.androidVersion || '').trim(),
+          windowsVersion: String(rawMob.windowsVersion || globalCfg.windowsVersion || '').trim(),
           iosVersion: String(rawMob.iosVersion || globalCfg.iosVersion || '').trim(),
           releaseNotes: String(rawMob.releaseNotes || globalCfg.releaseNotes || '').trim(),
         });
@@ -725,36 +827,56 @@ export default function App() {
 
       // 2. Complete Formulas Sync (Admin master_engine_config + formulas_v1 aliases)
       const winF = formulasCfg.windowFormula || globalCfg.windowFormula || globalCfg.winFormulas;
-      if (winF) setWindowFormula(winF);
+      if (winF && typeof winF === 'object') {
+        setWindowFormula({ ...getDefaultWindowFormula(), ...winF });
+      }
       const dgWinF =
         formulasCfg.dgWindowFormula ||
+        formulasCfg.dgWindowsFormula ||
         globalCfg.dgWindowFormula ||
+        globalCfg.dgWindowsFormula ||
         globalCfg.dgWinFormulas ||
         globalCfg.dgWindowFormulas;
-      if (dgWinF) setDgWindowFormula(dgWinF);
+      if (dgWinF && typeof dgWinF === 'object') {
+        setDgWindowFormula({ ...getDefaultDgWindowFormula(), ...dgWinF });
+      }
       const sdF =
         formulasCfg.slidingDoorFormula ||
         globalCfg.slidingDoorFormula ||
         globalCfg.slidingDoorFormulas;
-      if (sdF) setSlidingDoorFormula(sdF);
+      if (sdF && typeof sdF === 'object') {
+        setSlidingDoorFormula({ ...getDefaultSlidingDoorFormula(), ...sdF });
+      }
       const dF = formulasCfg.doorFormula || globalCfg.doorFormula || globalCfg.doorFormulas;
-      if (dF) setDoorFormula(dF);
+      if (dF && typeof dF === 'object') setDoorFormula(dF);
       const fF = formulasCfg.fixFormula || globalCfg.fixFormula || globalCfg.fixFormulas;
-      if (fF) setFixFormula(fF);
+      if (fF && typeof fF === 'object') setFixFormula(fF);
       const opF =
         formulasCfg.openwinFormula ||
         globalCfg.openwinFormula ||
         globalCfg.openableWinFormulas;
-      if (opF) setOpenwinFormula(opF);
-      const fsF = formulasCfg.fSectionFormula || globalCfg.fSectionFormula;
-      if (fsF) setFSectionFormula(fsF);
+      if (opF && typeof opF === 'object') setOpenwinFormula(opF);
+      const fsF =
+        formulasCfg.fSectionFormula ||
+        formulasCfg.fsectionFormula ||
+        globalCfg.fSectionFormula ||
+        globalCfg.fsectionFormula;
+      if (fsF && typeof fsF === 'object') {
+        setFSectionFormula({ ...getDefaultFSectionFormula(), ...fsF });
+      }
       const glF = formulasCfg.glassFormulas || globalCfg.glassFormulas;
       if (glF && typeof glF === 'object') {
-        setGlassFormulas((prev) => ({
-          ...getDefaultGlassFormulas(),
-          ...prev,
-          ...glF,
-        }));
+        const defGl = getDefaultGlassFormulas();
+        const mergedGl: Record<string, GlassFormula> = { ...defGl };
+        Object.entries(glF).forEach(([k, v]: [string, any]) => {
+          if (v && typeof v === 'object') {
+            mergedGl[k] = {
+              ...(defGl[k] || defGl.window),
+              ...v,
+            };
+          }
+        });
+        setGlassFormulas(mergedGl);
       }
 
       // 3. Sections & Colors
@@ -790,14 +912,24 @@ export default function App() {
         ...((layoutCfg?.layoutConfig || layoutCfg || {}) as Record<string, any>),
         ...((globalCfg?.layoutConfig || {}) as Record<string, any>),
       };
-      const incomingLockedTabs = {
-        ...((layoutCfg?.lockedTabs || {}) as Record<string, boolean>),
-        ...((layoutCfg?.layoutConfig?.lockedTabs || {}) as Record<string, boolean>),
-        ...((globalCfg?.lockedTabs || {}) as Record<string, boolean>),
-        ...((globalCfg?.layoutConfig?.lockedTabs || {}) as Record<string, boolean>),
-      };
+      const hasLockedTabsPayload =
+        layoutCfg?.lockedTabs !== undefined ||
+        layoutCfg?.layoutConfig?.lockedTabs !== undefined ||
+        globalCfg?.tabLocks !== undefined ||
+        globalCfg?.lockedPages !== undefined ||
+        globalCfg?.lockedTabs !== undefined ||
+        globalCfg?.layoutConfig?.lockedTabs !== undefined;
+      const incomingLockedTabs = normalizeLockedTabsMap(
+        layoutCfg?.lockedTabs,
+        layoutCfg?.layoutConfig?.lockedTabs,
+        globalCfg?.tabLocks,
+        globalCfg?.lockedPages,
+        globalCfg?.lockedTabs,
+        globalCfg?.layoutConfig?.lockedTabs
+      );
       if (
         (incomingLayout && typeof incomingLayout === 'object' && incomingLayout.enabledTabs) ||
+        hasLockedTabsPayload ||
         Object.keys(incomingLockedTabs).length > 0
       ) {
         setLayoutConfig((prev) => ({
@@ -819,11 +951,16 @@ export default function App() {
               prev.tabCustomTitles?.DG_WINDOWS ||
               'DG.Windows',
           },
-          lockedTabs: {
-            DG_WINDOWS: true,
-            ...(prev.lockedTabs || {}),
-            ...incomingLockedTabs,
-          },
+          lockedTabs: hasLockedTabsPayload
+            ? {
+                ...incomingLockedTabs,
+                DG_WINDOWS:
+                  'DG_WINDOWS' in incomingLockedTabs ? incomingLockedTabs.DG_WINDOWS : true,
+              }
+            : {
+                DG_WINDOWS: true,
+                ...(prev.lockedTabs || {}),
+              },
           shopLogoUrl: prev.shopLogoUrl || incomingLayout.shopLogoUrl || '',
         }));
       }
@@ -924,6 +1061,7 @@ export default function App() {
 
       // Refresh Admin & Support messages alongside Sync
       await loadSupportRequests(globalCfg, activeSession);
+      markInitialSyncCompletedForDevice(activeSession?.deviceId || clientDeviceId);
 
       if (!silent) {
         triggerGlobalToast(
@@ -1015,6 +1153,14 @@ export default function App() {
             ''
         ).trim();
 
+        const statusLower = String(m.status || '').trim().toLowerCase();
+        const isResolvedFlag = Boolean(
+          m.is_resolved ||
+            statusLower === 'resolved' ||
+            statusLower === 'replied' ||
+            rawReply
+        );
+
         const createdAt = m.created_at
           ? new Date(m.created_at).getTime() || Date.now()
           : Number(m.createdAt || Date.now());
@@ -1039,11 +1185,11 @@ export default function App() {
           ),
           message: String(m.message || m.text || m.body || ''),
           createdAt,
-          isResolved: Boolean(m.is_resolved || m.status === 'resolved' || rawReply),
+          isResolved: isResolvedFlag,
           resolvedBy: String(m.resolved_by || (rawReply ? 'Admin' : '')),
           resolvedAt: repliedAt || undefined,
           sender: isFromAdmin ? 'ADMIN' : 'CLIENT',
-          adminReply: !isFromAdmin && rawReply ? rawReply : undefined,
+          adminReply: rawReply ? rawReply : undefined,
           repliedAt: repliedAt || undefined,
           isBroadcast: isGlobalBroadcast,
         });
@@ -1300,12 +1446,14 @@ export default function App() {
       isOnline: true,
     });
     await syncFromSupabase({ forceRates: false, silent: true, sessionOverride: session });
-    loadSupportRequests();
+    loadSupportRequests(undefined, session);
+    markInitialSyncCompletedForDevice(session.deviceId);
   };
 
   const handleLogout = () => {
     markUserOfflineInSupabase(clientDeviceId);
     clearAuthSession();
+    clearInitialSyncCompletedFlag();
     supabase.auth.signOut().catch(() => {});
     setAuthSession(null);
     setIsSubscriptionExpired(false);
@@ -1360,19 +1508,43 @@ export default function App() {
 
   // Load saved state from localStorage on mount
   useEffect(() => {
+    const cachedM = loadCachedMasterEngineConfig();
+    const cachedMobSrc =
+      cachedM?.mobileDownloadConfig ||
+      cachedM?.mobileAppConfig ||
+      cachedM?.appDownloads;
+    let hasLocalSyncEvidence = false;
+
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (parsed.windowFormula) setWindowFormula(parsed.windowFormula);
-        if (parsed.dgWindowFormula) setDgWindowFormula(parsed.dgWindowFormula);
-        if (parsed.slidingDoorFormula) setSlidingDoorFormula(parsed.slidingDoorFormula);
-        if (parsed.glassFormulas) {
-          setGlassFormulas((prev) => ({
-            ...getDefaultGlassFormulas(),
-            ...prev,
-            ...parsed.glassFormulas,
-          }));
+      const parsed = raw ? JSON.parse(raw) : null;
+      if (parsed) {
+        hasLocalSyncEvidence = Boolean(
+          parsed?.cloudAccessInfo?.lastSyncedAt ||
+            (cachedM && Object.keys(cachedM).length > 0)
+        );
+        const winSrc = cachedM?.windowFormula || cachedM?.winFormulas || parsed.windowFormula;
+        if (winSrc) setWindowFormula({ ...getDefaultWindowFormula(), ...winSrc });
+        const dgWinSrc =
+          cachedM?.dgWindowFormula ||
+          cachedM?.dgWindowsFormula ||
+          cachedM?.dgWinFormulas ||
+          cachedM?.dgWindowFormulas ||
+          parsed.dgWindowFormula;
+        if (dgWinSrc) setDgWindowFormula({ ...getDefaultDgWindowFormula(), ...dgWinSrc });
+        const sdSrc =
+          cachedM?.slidingDoorFormula || cachedM?.slidingDoorFormulas || parsed.slidingDoorFormula;
+        if (sdSrc) setSlidingDoorFormula({ ...getDefaultSlidingDoorFormula(), ...sdSrc });
+        const glSrc = cachedM?.glassFormulas || parsed.glassFormulas;
+        if (glSrc && typeof glSrc === 'object') {
+          const defGl = getDefaultGlassFormulas();
+          const mergedGl: Record<string, GlassFormula> = { ...defGl };
+          Object.entries(glSrc).forEach(([k, v]: [string, any]) => {
+            if (v && typeof v === 'object') {
+              mergedGl[k] = { ...(defGl[k] || defGl.window), ...v };
+            }
+          });
+          setGlassFormulas(mergedGl);
         }
         if (parsed.doorFormula) {
           const df = parsed.doorFormula as FormulaCategorySettings;
@@ -1389,7 +1561,9 @@ export default function App() {
         }
         if (parsed.fixFormula) setFixFormula(parsed.fixFormula);
         if (parsed.openwinFormula) setOpenwinFormula(parsed.openwinFormula);
-        if (parsed.fSectionFormula) setFSectionFormula(parsed.fSectionFormula);
+        const fsSrc =
+          cachedM?.fSectionFormula || cachedM?.fsectionFormula || parsed.fSectionFormula;
+        if (fsSrc) setFSectionFormula({ ...getDefaultFSectionFormula(), ...fsSrc });
         if (parsed.savedQuotations) setSavedQuotations(parsed.savedQuotations);
         if (parsed.rates) {
           setRates(parsed.rates);
@@ -1401,28 +1575,62 @@ export default function App() {
         if (parsed.activeOffer !== undefined) setActiveOffer(parsed.activeOffer);
         if (Array.isArray(parsed.broadcasts)) setBroadcasts(parsed.broadcasts);
         if (parsed.mainLogoUrl) setMainLogoUrl(parsed.mainLogoUrl);
-        if (parsed.mobileDownloadConfig !== undefined) {
+        if (cachedMobSrc && typeof cachedMobSrc === 'object') {
+          const cAnd = String(cachedMobSrc.androidUrl || cachedMobSrc.androidApkUrl || cachedMobSrc.apkUrl || '').trim();
+          const cWin = String(cachedMobSrc.windowsUrl || cachedMobSrc.windowsExeUrl || cachedMobSrc.exeUrl || '').trim();
+          const cIos = String(cachedMobSrc.iosUrl || cachedMobSrc.iosAppUrl || cachedMobSrc.ipaUrl || '').trim();
+          if (cAnd || cWin || cIos || parsed.mobileDownloadConfig) {
+            setMobileDownloadConfig({
+              ...(parsed.mobileDownloadConfig || {}),
+              androidUrl: cAnd || parsed.mobileDownloadConfig?.androidUrl || parsed.mobileDownloadConfig?.androidApkUrl || '',
+              androidApkUrl: cAnd || parsed.mobileDownloadConfig?.androidApkUrl || parsed.mobileDownloadConfig?.androidUrl || '',
+              windowsUrl: cWin || parsed.mobileDownloadConfig?.windowsUrl || '',
+              iosUrl: cIos || parsed.mobileDownloadConfig?.iosUrl || parsed.mobileDownloadConfig?.iosAppUrl || '',
+              iosAppUrl: cIos || parsed.mobileDownloadConfig?.iosAppUrl || parsed.mobileDownloadConfig?.iosUrl || '',
+              androidVersion: String(cachedMobSrc.androidVersion || parsed.mobileDownloadConfig?.androidVersion || '').trim(),
+              windowsVersion: String(cachedMobSrc.windowsVersion || parsed.mobileDownloadConfig?.windowsVersion || '').trim(),
+              iosVersion: String(cachedMobSrc.iosVersion || parsed.mobileDownloadConfig?.iosVersion || '').trim(),
+              releaseNotes: String(cachedMobSrc.releaseNotes || parsed.mobileDownloadConfig?.releaseNotes || '').trim(),
+            });
+          }
+        } else if (parsed.mobileDownloadConfig !== undefined) {
           setMobileDownloadConfig(parsed.mobileDownloadConfig);
         }
         if (Array.isArray(parsed.supportRequests)) setSupportRequests(parsed.supportRequests);
-        if (parsed.layoutConfig) {
+        if (parsed.layoutConfig || cachedM?.layoutConfig || cachedM?.lockedTabs || cachedM?.tabLocks || cachedM?.lockedPages) {
+          const cachedLockedMerged = normalizeLockedTabsMap(
+            parsed.layoutConfig?.lockedTabs,
+            cachedM?.tabLocks,
+            cachedM?.lockedPages,
+            cachedM?.lockedTabs,
+            cachedM?.layoutConfig?.lockedTabs
+          );
           setLayoutConfig((prev) => ({
             ...prev,
-            ...parsed.layoutConfig,
+            ...(parsed.layoutConfig || {}),
+            ...(cachedM?.layoutConfig || {}),
             enabledTabs: {
               ...(prev.enabledTabs || {}),
-              ...(parsed.layoutConfig.enabledTabs || {}),
-              DG_WINDOWS: parsed.layoutConfig.enabledTabs?.DG_WINDOWS ?? true,
+              ...(parsed.layoutConfig?.enabledTabs || {}),
+              ...(cachedM?.layoutConfig?.enabledTabs || {}),
+              DG_WINDOWS:
+                cachedM?.layoutConfig?.enabledTabs?.DG_WINDOWS ??
+                parsed.layoutConfig?.enabledTabs?.DG_WINDOWS ??
+                true,
             },
             tabCustomTitles: {
               ...(prev.tabCustomTitles || {}),
-              ...(parsed.layoutConfig.tabCustomTitles || {}),
-              DG_WINDOWS: parsed.layoutConfig.tabCustomTitles?.DG_WINDOWS || 'DG.Windows',
+              ...(parsed.layoutConfig?.tabCustomTitles || {}),
+              ...(cachedM?.layoutConfig?.tabCustomTitles || {}),
+              DG_WINDOWS:
+                cachedM?.layoutConfig?.tabCustomTitles?.DG_WINDOWS ||
+                parsed.layoutConfig?.tabCustomTitles?.DG_WINDOWS ||
+                'DG.Windows',
             },
             lockedTabs: {
-              DG_WINDOWS: true,
-              ...(prev.lockedTabs || {}),
-              ...(parsed.layoutConfig.lockedTabs || {}),
+              ...cachedLockedMerged,
+              DG_WINDOWS:
+                'DG_WINDOWS' in cachedLockedMerged ? cachedLockedMerged.DG_WINDOWS : true,
             },
           }));
         }
@@ -1440,7 +1648,6 @@ export default function App() {
         if (typeof parsed.labourCost === 'number') setLabourCost(parsed.labourCost);
 
         const initialSess = loadAuthSession();
-        const cachedM = loadCachedMasterEngineConfig();
         const isOwner = Boolean(
           initialSess &&
             isOwnerIdentity({
@@ -1475,6 +1682,53 @@ export default function App() {
             setIsSubscriptionExpired(true);
           }
         }
+      } else if (cachedM && Object.keys(cachedM).length > 0) {
+        hasLocalSyncEvidence = true;
+        if (cachedM.layoutConfig || cachedM.lockedTabs || cachedM.tabLocks || cachedM.lockedPages) {
+          const cachedLockedMerged = normalizeLockedTabsMap(
+            cachedM.tabLocks,
+            cachedM.lockedPages,
+            cachedM.lockedTabs,
+            cachedM.layoutConfig?.lockedTabs
+          );
+          setLayoutConfig((prev) => ({
+            ...prev,
+            ...(cachedM.layoutConfig || {}),
+            enabledTabs: {
+              ...(prev.enabledTabs || {}),
+              ...(cachedM.layoutConfig?.enabledTabs || {}),
+              DG_WINDOWS: cachedM.layoutConfig?.enabledTabs?.DG_WINDOWS ?? true,
+            },
+            tabCustomTitles: {
+              ...(prev.tabCustomTitles || {}),
+              ...(cachedM.layoutConfig?.tabCustomTitles || {}),
+              DG_WINDOWS: cachedM.layoutConfig?.tabCustomTitles?.DG_WINDOWS || 'DG.Windows',
+            },
+            lockedTabs: {
+              ...cachedLockedMerged,
+              DG_WINDOWS:
+                'DG_WINDOWS' in cachedLockedMerged ? cachedLockedMerged.DG_WINDOWS : true,
+            },
+          }));
+        }
+        if (cachedMobSrc && typeof cachedMobSrc === 'object') {
+          const cAnd = String(cachedMobSrc.androidUrl || cachedMobSrc.androidApkUrl || cachedMobSrc.apkUrl || '').trim();
+          const cWin = String(cachedMobSrc.windowsUrl || cachedMobSrc.windowsExeUrl || cachedMobSrc.exeUrl || '').trim();
+          const cIos = String(cachedMobSrc.iosUrl || cachedMobSrc.iosAppUrl || cachedMobSrc.ipaUrl || '').trim();
+          if (cAnd || cWin || cIos) {
+            setMobileDownloadConfig({
+              androidUrl: cAnd,
+              androidApkUrl: cAnd,
+              windowsUrl: cWin,
+              iosUrl: cIos,
+              iosAppUrl: cIos,
+              androidVersion: String(cachedMobSrc.androidVersion || '').trim(),
+              windowsVersion: String(cachedMobSrc.windowsVersion || '').trim(),
+              iosVersion: String(cachedMobSrc.iosVersion || '').trim(),
+              releaseNotes: String(cachedMobSrc.releaseNotes || '').trim(),
+            });
+          }
+        }
       }
 
       // Also check dedicated device rate list snapshot if main storage lacked rates
@@ -1492,12 +1746,16 @@ export default function App() {
       // ignore storage errors
     }
 
-    // Request GPS permission on app startup & sync ONCE on load (zero background polling)
+    // Strict Offline-First: Run from localStorage with ZERO automatic Supabase calls on routine app open.
+    // Only auto-sync ONCE if the device has never synced yet for this authenticated session.
     const existingSession = loadAuthSession();
-    requestAndSaveGpsLocation(existingSession ? existingSession.deviceId : undefined);
-
-    if (existingSession) {
+    const alreadySyncedForSession = Boolean(
+      existingSession &&
+        (hasInitialSyncCompletedForDevice(existingSession.deviceId) || hasLocalSyncEvidence)
+    );
+    if (existingSession && !alreadySyncedForSession) {
       if (typeof navigator === 'undefined' || navigator.onLine !== false) {
+        requestAndSaveGpsLocation(existingSession.deviceId);
         collectAndSyncUserTelemetryToSupabase({
           deviceId: existingSession.deviceId,
           session: existingSession,
@@ -1508,6 +1766,9 @@ export default function App() {
         });
         syncFromSupabase({ forceRates: false, silent: true });
       }
+    } else {
+      // Keep local GPS fresh without hitting Supabase on startup
+      requestAndSaveGpsLocation(undefined);
     }
 
     const handleGoOnline = () => setIsOnline(true);
@@ -2610,117 +2871,147 @@ export default function App() {
               </button>
             </div>
 
-            {/* Action Buttons: Admin Android APK / iOS Links + Native Install + Open Browser + Quick Launcher */}
-            <div className="space-y-2">
-              {mobileDownloadConfig?.androidApkUrl && (
-                <a
-                  href={mobileDownloadConfig.androidApkUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-black font-black text-xs flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  <Smartphone className="w-4 h-4" />
-                  <span>
-                    Download Android App (APK)
-                    {mobileDownloadConfig.androidVersion
-                      ? ` · v${mobileDownloadConfig.androidVersion}`
-                      : ''}
-                  </span>
-                </a>
-              )}
+            {/* Action Buttons: 1-Click Browser Install + Admin Android APK / Windows EXE / iOS Links */}
+            {(() => {
+              const androidDownloadUrl =
+                mobileDownloadConfig?.androidUrl || mobileDownloadConfig?.androidApkUrl || '';
+              const windowsDownloadUrl = mobileDownloadConfig?.windowsUrl || '';
+              const iosDownloadUrl =
+                mobileDownloadConfig?.iosUrl || mobileDownloadConfig?.iosAppUrl || '';
 
-              {mobileDownloadConfig?.iosAppUrl && (
-                <a
-                  href={mobileDownloadConfig.iosAppUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-sky-500 hover:bg-sky-400 text-black font-black text-xs flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  <Smartphone className="w-4 h-4" />
-                  <span>
-                    Install iPhone / iOS App
-                    {mobileDownloadConfig.iosVersion
-                      ? ` · v${mobileDownloadConfig.iosVersion}`
-                      : ''}
-                  </span>
-                </a>
-              )}
+              return (
+                <div className="space-y-2">
+                  {/* Top: 1-Click Native Browser Install App Button */}
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const out = await install();
+                      if (out === 'installed') {
+                        setShowInstallModal(false);
+                        triggerGlobalToast('✅ App installed on your device!');
+                      } else if (out === 'ios-share' || out === 'ios-manual') {
+                        triggerGlobalToast(
+                          '📱 iPhone/iPad: Safari mein Share button daba kar "Add to Home Screen" select karein.'
+                        );
+                      } else if (out === 'manual') {
+                        triggerGlobalToast(
+                          '💡 Browser address bar ke "Install App" icon ya menu (⋮ -> Install App) se install karein.'
+                        );
+                      }
+                    }}
+                    className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-[#F5B738] hover:bg-amber-400 text-black font-black text-xs flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>
+                      {isInstallable
+                        ? 'Install App Now (1-Click)'
+                        : isInstalled
+                        ? 'App Already Installed'
+                        : 'Install App Now'}
+                    </span>
+                  </button>
 
-              {mobileDownloadConfig?.releaseNotes && (
-                <div className="p-2 rounded-lg bg-[#14181F] border border-slate-800 text-[10.5px] text-slate-300">
-                  <strong className="text-[#F5B738]">Update Notes:</strong>{' '}
-                  {mobileDownloadConfig.releaseNotes}
+                  {/* Android APK Download Button */}
+                  {androidDownloadUrl ? (
+                    <a
+                      href={androidDownloadUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      download
+                      className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-black font-black text-xs flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                      <Smartphone className="w-4 h-4" />
+                      <span>
+                        Download Android App (.apk)
+                        {mobileDownloadConfig?.androidVersion
+                          ? ` · v${mobileDownloadConfig.androidVersion}`
+                          : ''}
+                      </span>
+                    </a>
+                  ) : (
+                    <div className="w-full py-2 px-3 rounded-xl bg-[#14181F] border border-emerald-500/30 text-emerald-300/80 font-bold text-[11px] flex items-center justify-between gap-2">
+                      <span className="flex items-center gap-2">
+                        <Smartphone className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                        <span>Download Android App (.apk)</span>
+                      </span>
+                      <span className="text-[10px] text-slate-400">Admin Sync Pending</span>
+                    </div>
+                  )}
+
+                  {/* Windows Setup (.exe) Download Button */}
+                  {windowsDownloadUrl ? (
+                    <a
+                      href={windowsDownloadUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      download
+                      className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-indigo-500 hover:bg-indigo-400 text-white font-black text-xs flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                      <Monitor className="w-4 h-4" />
+                      <span>
+                        Download Windows Setup (.exe)
+                        {mobileDownloadConfig?.windowsVersion
+                          ? ` · v${mobileDownloadConfig.windowsVersion}`
+                          : ''}
+                      </span>
+                    </a>
+                  ) : (
+                    <div className="w-full py-2 px-3 rounded-xl bg-[#14181F] border border-indigo-500/30 text-indigo-300/80 font-bold text-[11px] flex items-center justify-between gap-2">
+                      <span className="flex items-center gap-2">
+                        <Monitor className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                        <span>Download Windows Setup (.exe)</span>
+                      </span>
+                      <span className="text-[10px] text-slate-400">Admin Sync Pending</span>
+                    </div>
+                  )}
+
+                  {/* Apple iPhone / iPad (iOS) Install Link / Guide */}
+                  {iosDownloadUrl ? (
+                    <a
+                      href={iosDownloadUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-sky-500 hover:bg-sky-400 text-black font-black text-xs flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                      <Smartphone className="w-4 h-4" />
+                      <span>
+                        Apple iPhone / iPad (iOS) Install Link
+                        {mobileDownloadConfig?.iosVersion
+                          ? ` · v${mobileDownloadConfig.iosVersion}`
+                          : ''}
+                      </span>
+                    </a>
+                  ) : (
+                    <div className="w-full py-2 px-3 rounded-xl bg-[#14181F] border border-sky-500/30 text-sky-300 font-bold text-[11px] flex items-center justify-between gap-2">
+                      <span className="flex items-center gap-2">
+                        <Smartphone className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                        <span>Apple iPhone / iPad (iOS) Guide</span>
+                      </span>
+                      <span className="text-[10px] text-slate-400">Safari → Share → Add</span>
+                    </div>
+                  )}
+
+                  {mobileDownloadConfig?.releaseNotes && (
+                    <div className="p-2 rounded-lg bg-[#14181F] border border-slate-800 text-[10.5px] text-slate-300">
+                      <strong className="text-[#F5B738]">Update Notes:</strong>{' '}
+                      {mobileDownloadConfig.releaseNotes}
+                    </div>
+                  )}
+
+                  {typeof window !== 'undefined' && window.self !== window.top && (
+                    <a
+                      href={window.location.href}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-emerald-500/20 border border-emerald-500/60 hover:bg-emerald-500 hover:text-black text-emerald-300 font-black text-xs flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                      <ExternalLink className="w-4 h-4" />
+                      <span>Open Full Screen in Browser to Install</span>
+                    </a>
+                  )}
                 </div>
-              )}
-
-              {isInstallable && (
-                <button
-                  type="button"
-                  onClick={async () => {
-                    const out = await install();
-                    if (out === 'installed') {
-                      setShowInstallModal(false);
-                      triggerGlobalToast('✅ App installed on your device!');
-                    }
-                  }}
-                  className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-[#F5B738] hover:bg-amber-400 text-black font-black text-xs flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  <Download className="w-4 h-4" />
-                  <span>Install Now on This Device</span>
-                </button>
-              )}
-
-              {typeof window !== 'undefined' && window.self !== window.top && (
-                <a
-                  href={window.location.href}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-emerald-500/20 border border-emerald-500/60 hover:bg-emerald-500 hover:text-black text-emerald-300 font-black text-xs flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  <ExternalLink className="w-4 h-4" />
-                  <span>Open Full Screen in Browser to Install</span>
-                </a>
-              )}
-
-              <button
-                type="button"
-                onClick={() => {
-                  const appUrl = typeof window !== 'undefined' ? window.location.origin : '';
-                  const launcherHtml = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Boss Aluminium & Glass App</title>
-<meta http-equiv="refresh" content="0;url=${appUrl}" />
-<style>body{margin:0;background:#0C0F14;color:#F5B738;font-family:sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;text-align:center}a{color:#000;background:#F5B738;padding:12px 22px;border-radius:10px;text-decoration:none;font-weight:bold;display:inline-block;margin-top:12px}</style>
-</head>
-<body>
-<div>
-<h2>Boss Aluminium &amp; Glass</h2>
-<p>Opening application...</p>
-<a href="${appUrl}">Launch App</a>
-</div>
-<script>location.replace(${JSON.stringify(appUrl)});</script>
-</body>
-</html>`;
-                  const blob = new Blob([launcherHtml], { type: 'text/html;charset=utf-8' });
-                  const url = URL.createObjectURL(blob);
-                  const a = document.createElement('a');
-                  a.href = url;
-                  a.download = 'Boss-Aluminium-App-Launcher.html';
-                  document.body.appendChild(a);
-                  a.click();
-                  document.body.removeChild(a);
-                  setTimeout(() => URL.revokeObjectURL(url), 5000);
-                  triggerGlobalToast('✅ App Launcher downloaded! Double-click file to open App anytime.');
-                }}
-                className="boss-flat-btn w-full py-2 px-3 rounded-xl bg-[#14181F] border border-[#F5B738]/70 text-[#F5B738] hover:bg-[#F5B738] hover:text-black font-bold text-xs flex items-center justify-center gap-2 cursor-pointer transition-colors"
-              >
-                <Download className="w-4 h-4" />
-                <span>Download Quick App Launcher File (.html)</span>
-              </button>
-            </div>
+              );
+            })()}
 
             {/* Clear Device Instructions */}
             <div className="space-y-2 text-[11px]">

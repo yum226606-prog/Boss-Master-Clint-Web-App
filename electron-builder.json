@@ -1,0 +1,34 @@
+{
+  "appId": "com.bossaluminium.app",
+  "productName": "BOSS Aluminium",
+  "directories": {
+    "output": "dist-electron"
+  },
+  "files": [
+    "electron/main.cjs",
+    "dist/**/*",
+    "public/pwa-512x512.png"
+  ],
+  "extraMetadata": {
+    "main": "electron/main.cjs"
+  },
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": ["x64"]
+      }
+    ],
+    "icon": "public/pwa-512x512.png",
+    "artifactName": "BOSS-Aluminium-Setup.exe"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "BOSS Aluminium",
+    "installerIcon": "public/pwa-512x512.png",
+    "uninstallerIcon": "public/pwa-512x512.png"
+  }
+}

@@ -536,9 +536,13 @@ export interface AppOfferBanner {
 }
 
 export interface MobileDownloadConfig {
-  androidApkUrl: string;
-  iosAppUrl: string;
+  androidApkUrl?: string;
+  androidUrl?: string;
+  windowsUrl?: string;
+  iosAppUrl?: string;
+  iosUrl?: string;
   androidVersion?: string;
+  windowsVersion?: string;
   iosVersion?: string;
   releaseNotes?: string;
 }

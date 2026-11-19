@@ -1330,6 +1330,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     glassFormulas,
     windowFormula,
     dgWindowFormula,
+    slidingDoorFormula,
     glassFittingOption,
     measurementUnit,
     ctxGlassMode,
@@ -2080,7 +2081,14 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     return `https://wa.me/?text=${encodeURIComponent(msg)}`;
   };
 
-  const isDgWindowsLocked = layoutConfig.lockedTabs?.DG_WINDOWS !== false;
+  const isTabLocked = (tabId: BossTab): boolean => {
+    const lt = layoutConfig.lockedTabs || {};
+    if (tabId === 'DG_WINDOWS') {
+      return lt.DG_WINDOWS !== false;
+    }
+    return Boolean(lt[tabId]);
+  };
+  const isDgWindowsLocked = isTabLocked('DG_WINDOWS');
 
   const TABS: { id: BossTab; title: string; iconKey: string; isLocked?: boolean }[] = (
     [
@@ -2093,7 +2101,6 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
         id: 'DG_WINDOWS' as BossTab,
         title: layoutConfig.tabCustomTitles.DG_WINDOWS || 'DG.Windows',
         iconKey: 'DG_WINDOWS',
-        isLocked: isDgWindowsLocked,
       },
       {
         id: 'DOORS' as BossTab,
@@ -2116,11 +2123,13 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
       },
       { id: 'RATES' as BossTab, title: layoutConfig.tabCustomTitles.RATES || 'Rates & Settings', iconKey: 'RATES' },
     ]
-  ).filter(
-    (t) =>
-      !(layoutConfig.deletedTabs || []).includes(t.id) &&
-      layoutConfig.enabledTabs[t.id] !== false
-  );
+  )
+    .map((t) => ({ ...t, isLocked: isTabLocked(t.id) }))
+    .filter(
+      (t) =>
+        !(layoutConfig.deletedTabs || []).includes(t.id) &&
+        layoutConfig.enabledTabs[t.id] !== false
+    );
 
   const renderTabIcon = (iconKey: string) => {
     switch (iconKey) {
@@ -2280,7 +2289,13 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
             )}
 
             {(!isInstalled ||
-              Boolean(mobileDownloadConfig?.androidApkUrl || mobileDownloadConfig?.iosAppUrl)) && (
+              Boolean(
+                mobileDownloadConfig?.androidUrl ||
+                  mobileDownloadConfig?.androidApkUrl ||
+                  mobileDownloadConfig?.windowsUrl ||
+                  mobileDownloadConfig?.iosUrl ||
+                  mobileDownloadConfig?.iosAppUrl
+              )) && (
               <button
                 type="button"
                 onClick={onTriggerInstall}
@@ -2569,6 +2584,34 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
         </div>
       </div>
 
+      {isTabLocked(currentTab) ? (
+        <div className="p-6 sm:p-10 rounded-2xl bg-[#14181F] border border-amber-500/40 text-center space-y-3">
+          <div className="w-12 h-12 mx-auto rounded-2xl bg-amber-500/15 border border-amber-500/50 text-[#F5B738] flex items-center justify-center">
+            <Lock className="w-6 h-6" />
+          </div>
+          <div className="space-y-1">
+            <h3 className="text-sm sm:text-base font-black text-[#F5B738]">
+              {TABS.find((t) => t.id === currentTab)?.title ||
+                layoutConfig.tabCustomTitles[currentTab] ||
+                currentTab}{' '}
+              Locked
+            </h3>
+            <p className="text-xs text-slate-300 max-w-md mx-auto">
+              This module is currently locked from the Admin Panel. Once the Admin unlocks it, tap Sync to activate it.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => onSyncFromSupabase?.({ forceRates: false, silent: false })}
+            disabled={isSyncingCloud}
+            className="boss-flat-btn px-4 py-2 rounded-xl bg-[#F5B738] hover:bg-amber-400 text-black text-xs font-extrabold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isSyncingCloud ? 'animate-spin' : ''}`} />
+            <span>{isSyncingCloud ? 'Syncing...' : 'Sync / Check Updates'}</span>
+          </button>
+        </div>
+      ) : (
+        <>
       {/* =================================================================== */}
       {/* TAB 1: SLIDING WINDOWS SCREEN                                       */}
       {/* =================================================================== */}
@@ -2586,10 +2629,10 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
             glassGauge: ctxGlassMode === 'ON' ? ctxGlassGauge : '5',
             glassColor: ctxGlassMode === 'ON' ? ctxGlassColor : 'CLEAR',
             glassEnabled: true,
-            m24Qty: 4,
+            m24Qty: windowFormula.m24Qty ?? 4,
             m24aQty: 0,
-            d29HeightQty: 2,
-            d29WidthQty: 2,
+            d29HeightQty: windowFormula.d29HeightQty ?? 2,
+            d29WidthQty: windowFormula.d29WidthQty ?? 2,
             extras: [],
             outerSection: ft === 'F' ? 'DC30F' : 'DC30C',
             panelCount: 2,
@@ -2679,9 +2722,24 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                                       ? {
                                           ...w,
                                           panelCount: count,
-                                          m24Qty: count * 2,
-                                          d29HeightQty: count >= 3 ? 4 : 2,
-                                          d29WidthQty: count >= 3 ? 4 : 2,
+                                          m24Qty:
+                                            count === 3
+                                              ? (windowFormula.m24Qty3 ?? 6)
+                                              : count === 4
+                                              ? (windowFormula.m24Qty4 ?? 8)
+                                              : (windowFormula.m24Qty ?? 4),
+                                          d29HeightQty:
+                                            count === 3
+                                              ? (windowFormula.d29HeightQty3 ?? 4)
+                                              : count === 4
+                                              ? (windowFormula.d29HeightQty4 ?? 4)
+                                              : (windowFormula.d29HeightQty ?? 2),
+                                          d29WidthQty:
+                                            count === 3
+                                              ? (windowFormula.d29WidthQty3 ?? 4)
+                                              : count === 4
+                                              ? (windowFormula.d29WidthQty4 ?? 4)
+                                              : (windowFormula.d29WidthQty ?? 2),
                                         }
                                       : w
                                   )
@@ -8080,6 +8138,8 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
           )}
         </div>
       )}
+        </>
+      )}
 
       {/* Add Section Pair Modal (2 in 1: 2H+1W & 1W) */}
       {showAddPairModal && (
@@ -8714,7 +8774,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                     <option value="Rate List / Section Request">Rate List / Section Request</option>
                     <option value="Account Activation / TID Help">Account Activation / TID Help</option>
                     <option value="Formula / Cutting Chart Help">Formula / Cutting Chart Help</option>
-                    <option value="Custom Design / Blueprint">Custom Design / Blueprint</option>
+                    <option value="Custom Section / Formula Help">Custom Section / Formula Help</option>
                     <option value="Technical Support / Bug">Technical Support / Bug</option>
                   </select>
                 </div>
@@ -8864,11 +8924,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                               <span
                                 className={`px-1.5 py-0.5 rounded text-[9.5px] font-bold ${
                                   req.adminReply || req.isResolved
-                                    ? 'bg-emerald-500/20 text-emerald-300'
+                                    ? 'bg-emerald-500/20 border border-emerald-500/50 text-emerald-300'
                                     : 'bg-amber-500/20 text-amber-300'
                                 }`}
                               >
-                                {req.adminReply ? 'Replied' : req.isResolved ? 'Resolved' : 'Pending'}
+                                {req.adminReply || req.isResolved ? 'Resolved / Replied' : 'Pending'}
                               </span>
                             )}
                             {onDeleteSupportRequest && (
