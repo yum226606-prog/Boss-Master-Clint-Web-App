@@ -2,37 +2,33 @@ name: Build Windows Setup EXE (BOSS Aluminium)
 
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
-  build-windows-exe:
+  build-exe:
     runs-on: windows-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
 
-      - name: Install dependencies & build web bundle
+      - name: Install dependencies & build web
         run: |
-          npm ci
+          npm install --legacy-peer-deps
           npm run build
 
-      - name: Install Electron Builder & Build NSIS Setup EXE
+      - name: Build Windows NSIS Setup (.exe)
         run: |
-          npm install --no-save electron electron-builder
-          npx electron-builder --config electron-builder.json --win --publish never
+          npm install electron electron-builder --save-dev --legacy-peer-deps
+          npx electron-builder --win nsis --publish never
 
-      - name: Upload BOSS-Aluminium-Setup.exe Artifact
+      - name: Upload BOSS-Aluminium-Setup.exe
         uses: actions/upload-artifact@v4
         with:
           name: BOSS-Aluminium-Windows-Setup
-          path: dist-electron/BOSS-Aluminium-Setup.exe
-          if-no-files-found: error
+          path: release/*.exe
