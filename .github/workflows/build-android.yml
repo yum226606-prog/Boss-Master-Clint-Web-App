@@ -2,23 +2,20 @@ name: Build Android APK (BOSS Aluminium)
 
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
-  build-android-apk:
+  build-apk:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -26,44 +23,23 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Install dependencies & build web bundle
+      - name: Install dependencies & build web
         run: |
-          npm ci
+          npm install --legacy-peer-deps
           npm run build
 
-      - name: Install Capacitor Android & Generate Native Project
+      - name: Initialize Capacitor Android & build APK
         run: |
-          npm install --no-save @capacitor/core @capacitor/cli @capacitor/android
-          if [ ! -d "android" ]; then
-            npx cap add android
-          fi
+          npm install @capacitor/core @capacitor/cli @capacitor/android --legacy-peer-deps
+          rm -rf android
+          npx cap add android
           npx cap sync android
-
-      - name: Configure Android Permissions & Launcher Icon
-        run: |
-          MANIFEST="android/app/src/main/AndroidManifest.xml"
-          if [ -f "$MANIFEST" ] && ! grep -q "ACCESS_FINE_LOCATION" "$MANIFEST"; then
-            sed -i 's|<uses-permission android:name="android.permission.INTERNET" />|<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />|' "$MANIFEST"
-          fi
-          if [ -f "public/pwa-512x512.png" ]; then
-            for dir in mipmap-mdpi mipmap-hdpi mipmap-xhdpi mipmap-xxhdpi mipmap-xxxhdpi; do
-              mkdir -p "android/app/src/main/res/$dir"
-              cp "public/pwa-512x512.png" "android/app/src/main/res/$dir/ic_launcher.png"
-              cp "public/pwa-512x512.png" "android/app/src/main/res/$dir/ic_launcher_round.png"
-            done
-          fi
-
-      - name: Build Android APK
-        run: |
           cd android
           chmod +x gradlew
           ./gradlew assembleDebug
-          mkdir -p ../release-apk
-          cp app/build/outputs/apk/debug/app-debug.apk ../release-apk/BOSS-Aluminium.apk
 
-      - name: Upload BOSS-Aluminium.apk Artifact
+      - name: Upload BOSS-Aluminium.apk
         uses: actions/upload-artifact@v4
         with:
           name: BOSS-Aluminium-APK
-          path: release-apk/BOSS-Aluminium.apk
-          if-no-files-found: error
+          path: android/app/build/outputs/apk/debug/app-debug.apk
