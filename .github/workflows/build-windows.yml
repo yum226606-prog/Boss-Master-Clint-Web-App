@@ -15,7 +15,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install dependencies & build web
         run: |
@@ -25,10 +25,10 @@ jobs:
       - name: Build Windows NSIS Setup (.exe)
         run: |
           npm install electron electron-builder --save-dev --legacy-peer-deps
-          npx electron-builder --win nsis --publish never
+          npx electron-builder --win nsis --publish never --config.win.icon=null --config.nsis.installerIcon=null --config.nsis.uninstallerIcon=null
 
       - name: Upload BOSS-Aluminium-Setup.exe
         uses: actions/upload-artifact@v4
         with:
           name: BOSS-Aluminium-Windows-Setup
-          path: release/*.exe
+          path: dist-electron/*.exe
