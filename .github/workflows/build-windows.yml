@@ -22,10 +22,15 @@ jobs:
           npm install --legacy-peer-deps
           npm run build
 
+      - name: Generate Windows .ico from BOSS Logo
+        run: |
+          npm install png-to-ico --no-save
+          node -e "const fs=require('fs'), pngToIco=require('png-to-ico'); fs.mkdirSync('build',{recursive:true}); const src=fs.existsSync('public/pwa-512x512.png')?'public/pwa-512x512.png':'public/favicon.ico'; pngToIco(src).then(buf=>fs.writeFileSync('build/icon.ico',buf));"
+
       - name: Build Windows NSIS Setup (.exe)
         run: |
           npm install electron electron-builder --save-dev --legacy-peer-deps
-          npx electron-builder --win nsis --publish never --config.win.icon=null --config.nsis.installerIcon=null --config.nsis.uninstallerIcon=null
+          npx electron-builder --win nsis --publish never --config.win.icon=build/icon.ico --config.nsis.installerIcon=build/icon.ico --config.nsis.uninstallerIcon=build/icon.ico
 
       - name: Upload BOSS-Aluminium-Setup.exe
         uses: actions/upload-artifact@v4
