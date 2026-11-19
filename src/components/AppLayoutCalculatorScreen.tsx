@@ -2294,6 +2294,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   mobileDownloadConfig?.androidApkUrl ||
                   mobileDownloadConfig?.windowsUrl ||
                   mobileDownloadConfig?.iosUrl ||
+                  mobileDownloadConfig?.iosDownloadUrl ||
                   mobileDownloadConfig?.iosAppUrl
               )) && (
               <button

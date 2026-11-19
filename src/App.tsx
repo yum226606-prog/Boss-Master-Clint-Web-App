@@ -421,6 +421,9 @@ export default function App() {
   // PWA Install & Mobile Theme Studio State
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const isPromptingInstallRef = useRef(false);
+  const wasOfflineRef = useRef(
+    typeof navigator !== 'undefined' && navigator.onLine === false
+  );
   const [showInstallModal, setShowInstallModal] = useState(false);
   const [showThemeStudio, setShowThemeStudio] = useState(false);
   const [currentTheme, setCurrentTheme] = useState<AppThemeConfig>(() => {
@@ -749,6 +752,7 @@ export default function App() {
       const androidUrl = String(
         rawMob.androidUrl ||
           rawMob.androidApkUrl ||
+          rawMob.androidDownloadUrl ||
           rawMob.apkUrl ||
           globalCfg.androidUrl ||
           globalCfg.androidApkUrl ||
@@ -757,6 +761,7 @@ export default function App() {
       ).trim();
       const windowsUrl = String(
         rawMob.windowsUrl ||
+          rawMob.windowsDownloadUrl ||
           rawMob.windowsExeUrl ||
           rawMob.exeUrl ||
           rawMob.desktopUrl ||
@@ -767,9 +772,11 @@ export default function App() {
       ).trim();
       const iosUrl = String(
         rawMob.iosUrl ||
+          rawMob.iosDownloadUrl ||
           rawMob.iosAppUrl ||
           rawMob.ipaUrl ||
           globalCfg.iosUrl ||
+          globalCfg.iosDownloadUrl ||
           globalCfg.iosAppUrl ||
           ''
       ).trim();
@@ -779,6 +786,7 @@ export default function App() {
           androidApkUrl: androidUrl,
           windowsUrl,
           iosUrl,
+          iosDownloadUrl: iosUrl,
           iosAppUrl: iosUrl,
           androidVersion: String(rawMob.androidVersion || globalCfg.androidVersion || '').trim(),
           windowsVersion: String(rawMob.windowsVersion || globalCfg.windowsVersion || '').trim(),
@@ -1576,16 +1584,35 @@ export default function App() {
         if (Array.isArray(parsed.broadcasts)) setBroadcasts(parsed.broadcasts);
         if (parsed.mainLogoUrl) setMainLogoUrl(parsed.mainLogoUrl);
         if (cachedMobSrc && typeof cachedMobSrc === 'object') {
-          const cAnd = String(cachedMobSrc.androidUrl || cachedMobSrc.androidApkUrl || cachedMobSrc.apkUrl || '').trim();
-          const cWin = String(cachedMobSrc.windowsUrl || cachedMobSrc.windowsExeUrl || cachedMobSrc.exeUrl || '').trim();
-          const cIos = String(cachedMobSrc.iosUrl || cachedMobSrc.iosAppUrl || cachedMobSrc.ipaUrl || '').trim();
+          const cAnd = String(
+            cachedMobSrc.androidUrl ||
+              cachedMobSrc.androidApkUrl ||
+              cachedMobSrc.androidDownloadUrl ||
+              cachedMobSrc.apkUrl ||
+              ''
+          ).trim();
+          const cWin = String(
+            cachedMobSrc.windowsUrl ||
+              cachedMobSrc.windowsDownloadUrl ||
+              cachedMobSrc.windowsExeUrl ||
+              cachedMobSrc.exeUrl ||
+              ''
+          ).trim();
+          const cIos = String(
+            cachedMobSrc.iosUrl ||
+              cachedMobSrc.iosDownloadUrl ||
+              cachedMobSrc.iosAppUrl ||
+              cachedMobSrc.ipaUrl ||
+              ''
+          ).trim();
           if (cAnd || cWin || cIos || parsed.mobileDownloadConfig) {
             setMobileDownloadConfig({
               ...(parsed.mobileDownloadConfig || {}),
               androidUrl: cAnd || parsed.mobileDownloadConfig?.androidUrl || parsed.mobileDownloadConfig?.androidApkUrl || '',
               androidApkUrl: cAnd || parsed.mobileDownloadConfig?.androidApkUrl || parsed.mobileDownloadConfig?.androidUrl || '',
               windowsUrl: cWin || parsed.mobileDownloadConfig?.windowsUrl || '',
-              iosUrl: cIos || parsed.mobileDownloadConfig?.iosUrl || parsed.mobileDownloadConfig?.iosAppUrl || '',
+              iosUrl: cIos || parsed.mobileDownloadConfig?.iosUrl || parsed.mobileDownloadConfig?.iosDownloadUrl || parsed.mobileDownloadConfig?.iosAppUrl || '',
+              iosDownloadUrl: cIos || parsed.mobileDownloadConfig?.iosDownloadUrl || parsed.mobileDownloadConfig?.iosUrl || parsed.mobileDownloadConfig?.iosAppUrl || '',
               iosAppUrl: cIos || parsed.mobileDownloadConfig?.iosAppUrl || parsed.mobileDownloadConfig?.iosUrl || '',
               androidVersion: String(cachedMobSrc.androidVersion || parsed.mobileDownloadConfig?.androidVersion || '').trim(),
               windowsVersion: String(cachedMobSrc.windowsVersion || parsed.mobileDownloadConfig?.windowsVersion || '').trim(),
@@ -1712,15 +1739,34 @@ export default function App() {
           }));
         }
         if (cachedMobSrc && typeof cachedMobSrc === 'object') {
-          const cAnd = String(cachedMobSrc.androidUrl || cachedMobSrc.androidApkUrl || cachedMobSrc.apkUrl || '').trim();
-          const cWin = String(cachedMobSrc.windowsUrl || cachedMobSrc.windowsExeUrl || cachedMobSrc.exeUrl || '').trim();
-          const cIos = String(cachedMobSrc.iosUrl || cachedMobSrc.iosAppUrl || cachedMobSrc.ipaUrl || '').trim();
+          const cAnd = String(
+            cachedMobSrc.androidUrl ||
+              cachedMobSrc.androidApkUrl ||
+              cachedMobSrc.androidDownloadUrl ||
+              cachedMobSrc.apkUrl ||
+              ''
+          ).trim();
+          const cWin = String(
+            cachedMobSrc.windowsUrl ||
+              cachedMobSrc.windowsDownloadUrl ||
+              cachedMobSrc.windowsExeUrl ||
+              cachedMobSrc.exeUrl ||
+              ''
+          ).trim();
+          const cIos = String(
+            cachedMobSrc.iosUrl ||
+              cachedMobSrc.iosDownloadUrl ||
+              cachedMobSrc.iosAppUrl ||
+              cachedMobSrc.ipaUrl ||
+              ''
+          ).trim();
           if (cAnd || cWin || cIos) {
             setMobileDownloadConfig({
               androidUrl: cAnd,
               androidApkUrl: cAnd,
               windowsUrl: cWin,
               iosUrl: cIos,
+              iosDownloadUrl: cIos,
               iosAppUrl: cIos,
               androidVersion: String(cachedMobSrc.androidVersion || '').trim(),
               windowsVersion: String(cachedMobSrc.windowsVersion || '').trim(),
@@ -1771,8 +1817,20 @@ export default function App() {
       requestAndSaveGpsLocation(undefined);
     }
 
-    const handleGoOnline = () => setIsOnline(true);
-    const handleGoOffline = () => setIsOnline(false);
+    const handleGoOnline = () => {
+      setIsOnline(true);
+      if (wasOfflineRef.current) {
+        wasOfflineRef.current = false;
+        const curSess = loadAuthSession();
+        if (curSess?.verified) {
+          syncFromSupabase({ forceRates: false, silent: true, sessionOverride: curSess });
+        }
+      }
+    };
+    const handleGoOffline = () => {
+      wasOfflineRef.current = true;
+      setIsOnline(false);
+    };
     window.addEventListener('online', handleGoOnline);
     window.addEventListener('offline', handleGoOffline);
     return () => {
@@ -2877,7 +2935,10 @@ export default function App() {
                 mobileDownloadConfig?.androidUrl || mobileDownloadConfig?.androidApkUrl || '';
               const windowsDownloadUrl = mobileDownloadConfig?.windowsUrl || '';
               const iosDownloadUrl =
-                mobileDownloadConfig?.iosUrl || mobileDownloadConfig?.iosAppUrl || '';
+                mobileDownloadConfig?.iosUrl ||
+                mobileDownloadConfig?.iosDownloadUrl ||
+                mobileDownloadConfig?.iosAppUrl ||
+                '';
 
               return (
                 <div className="space-y-2">

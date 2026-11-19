@@ -541,6 +541,7 @@ export interface MobileDownloadConfig {
   windowsUrl?: string;
   iosAppUrl?: string;
   iosUrl?: string;
+  iosDownloadUrl?: string;
   androidVersion?: string;
   windowsVersion?: string;
   iosVersion?: string;
