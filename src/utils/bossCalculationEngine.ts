@@ -1272,10 +1272,12 @@ export function computeGlassCutsForState(params: {
     rawGW: number,
     pcs: number,
     effGauge: string,
-    effColor: string
+    effColor: string,
+    skipFittingDeduction: boolean = false
   ) => {
-    const finalGH = Math.max(0, rawGH - fittingDeduction);
-    const finalGW = Math.max(0, rawGW - fittingDeduction);
+    const appliedDeduction = skipFittingDeduction ? 0.0 : fittingDeduction;
+    const finalGH = Math.max(0, rawGH - appliedDeduction);
+    const finalGW = Math.max(0, rawGW - appliedDeduction);
     const bH = billFeet(finalGH);
     const bW = billFeet(finalGW);
     cuts.push({
@@ -1304,8 +1306,14 @@ export function computeGlassCutsForState(params: {
     panelOverride?: number
   ) => {
     if (!enabled) return;
-    const effGauge = masterGlassActive ? params.ctxGlassGauge : gGauge;
-    const effColor = masterGlassActive ? params.ctxGlassColor : gColor;
+    const isDgWindow = kind === 'dgwindow';
+    const skipFittingDeduction = kind !== 'window' && kind !== 'slidingdoor';
+    const effGauge = isDgWindow ? 'DG' : masterGlassActive ? params.ctxGlassGauge : gGauge;
+    const effColor = isDgWindow
+      ? gColor || 'CLEAR'
+      : masterGlassActive
+      ? params.ctxGlassColor
+      : gColor;
     const f = params.glassFormulas[kind] || {
       marginH: 0,
       marginW: 0,
@@ -1336,8 +1344,8 @@ export function computeGlassCutsForState(params: {
       if (panels === 3) {
         const m24Center = Math.max(0, (w + widthSign * dimToInches(slidingForm.m24WidthCenterDeduction3)) / 2.0);
         const m24Sides = Math.max(0, (w + widthSign * dimToInches(slidingForm.m24WidthSidesDeduction3)) / 4.0);
-        addCut(`${label} (Center 1 Pc)`, w, h, gH, m24Center + glassExtraW, 1 * actualQty, effGauge, effColor);
-        addCut(`${label} (Sides 2 Pcs)`, w, h, gH, m24Sides + glassExtraW, 2 * actualQty, effGauge, effColor);
+        addCut(`${label} (Center 1 Pc)`, w, h, gH, m24Center + glassExtraW, 1 * actualQty, effGauge, effColor, skipFittingDeduction);
+        addCut(`${label} (Sides 2 Pcs)`, w, h, gH, m24Sides + glassExtraW, 2 * actualQty, effGauge, effColor, skipFittingDeduction);
       } else {
         const m24Size =
           panels === 2
@@ -1345,14 +1353,14 @@ export function computeGlassCutsForState(params: {
             : panels === 4
             ? Math.max(0, (w + widthSign * dimToInches(slidingForm.m24WidthDeduction4)) / 4.0)
             : Math.max(0, (w + widthSign * dimToInches(slidingForm.m24WidthDeduction)) / panels);
-        addCut(label, w, h, gH, m24Size + glassExtraW, panels * actualQty, effGauge, effColor);
+        addCut(label, w, h, gH, m24Size + glassExtraW, panels * actualQty, effGauge, effColor, skipFittingDeduction);
       }
     } else {
       const effMarginH = (f.marginH ?? 0) + (f.marginHSutar ?? 0) / 8.0;
       const effMarginW = (f.marginW ?? 0) + (f.marginWSutar ?? 0) / 8.0;
       const gH = Math.max(0, h - effMarginH);
       const gWpanel = Math.max(0, w - effMarginW) / panels;
-      addCut(label, w, h, gH, gWpanel, panels * actualQty, effGauge, effColor);
+      addCut(label, w, h, gH, gWpanel, panels * actualQty, effGauge, effColor, skipFittingDeduction);
     }
   };
 

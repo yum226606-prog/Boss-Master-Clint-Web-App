@@ -58,7 +58,13 @@ import {
   MessageSquarePlus,
   WifiOff,
 } from 'lucide-react';
-import { ClientAuthSession, fetchAdminServer } from '../utils/adminApiConfig';
+import {
+  BossUserRole,
+  ClientAuthSession,
+  fetchAdminServer,
+  isOwnerIdentity,
+  loadCachedMasterEngineConfig,
+} from '../utils/adminApiConfig';
 import {
   callSupabaseProxy,
   getEffectiveServerNowMs,
@@ -112,11 +118,13 @@ import {
 import {
   DEFAULT_GLASS_COLORS_5MM,
   DEFAULT_GLASS_COLORS_8MM,
+  DEFAULT_GLASS_COLORS_DG,
   DEFAULT_SECTIONS,
   GAUGES,
   SECTION_LABELS,
   DG_SERIES_SCANNED_RATES,
   mergeDgSeriesRates,
+  resolveSectionRate,
 } from '../utils/bossDefaultRates';
 import {
   canvasToPdfBlob,
@@ -227,6 +235,7 @@ interface AppLayoutCalculatorScreenProps {
   ) => { updated: number; inserted: number };
   onBulkAdjustRatesPct?: (pct: number, gaugeFilter?: string, colorFilter?: string) => void;
   layoutConfig: ClientAppLayoutControlConfig;
+  userLockedTabs?: Record<string, boolean>;
   onUpdateLayoutConfig?: (cfg: ClientAppLayoutControlConfig) => void;
   onExportFullBackup?: () => void;
   onImportFullBackup?: (jsonStr: string) => boolean;
@@ -242,6 +251,7 @@ interface AppLayoutCalculatorScreenProps {
   cloudAccessInfo?: {
     status: 'ACTIVE' | 'TRIAL' | 'BLOCKED' | 'FREE';
     tier: string;
+    role?: BossUserRole;
     expiresAt: number | null;
     serverNowMs?: number;
     reason: string;
@@ -368,6 +378,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     onApplyRateListRows,
     onBulkAdjustRatesPct,
     layoutConfig,
+    userLockedTabs = {},
     onUpdateLayoutConfig = () => {},
     onExportFullBackup = () => {},
     onImportFullBackup = () => false,
@@ -440,6 +451,99 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     }
   };
   const [showBackgroundAdjustments, setShowBackgroundAdjustments] = useState(false);
+  const [draftHardwareStr, setDraftHardwareStr] = useState<string>(() =>
+    hardwareRate > 0 ? String(hardwareRate) : ''
+  );
+  const [draftDiscountStr, setDraftDiscountStr] = useState<string>(() =>
+    markupPct > 0 ? String(markupPct) : ''
+  );
+  const [draftLabourStr, setDraftLabourStr] = useState<string>(() =>
+    labourCost > 0 ? String(labourCost) : ''
+  );
+  const [draftTransportStr, setDraftTransportStr] = useState<string>(() =>
+    transportRent > 0 ? String(transportRent) : ''
+  );
+
+  useEffect(() => {
+    setDraftHardwareStr((prev) => {
+      const parsed = parseFloat(prev);
+      if ((prev === '' && hardwareRate === 0) || (!Number.isNaN(parsed) && parsed === hardwareRate)) {
+        return prev;
+      }
+      return hardwareRate > 0 ? String(hardwareRate) : '';
+    });
+  }, [hardwareRate]);
+
+  useEffect(() => {
+    setDraftDiscountStr((prev) => {
+      const parsed = parseFloat(prev);
+      if ((prev === '' && markupPct === 0) || (!Number.isNaN(parsed) && parsed === markupPct)) {
+        return prev;
+      }
+      return markupPct > 0 ? String(markupPct) : '';
+    });
+  }, [markupPct]);
+
+  useEffect(() => {
+    setDraftLabourStr((prev) => {
+      const parsed = parseFloat(prev);
+      if ((prev === '' && labourCost === 0) || (!Number.isNaN(parsed) && parsed === labourCost)) {
+        return prev;
+      }
+      return labourCost > 0 ? String(labourCost) : '';
+    });
+  }, [labourCost]);
+
+  useEffect(() => {
+    setDraftTransportStr((prev) => {
+      const parsed = parseFloat(prev);
+      if (
+        (prev === '' && transportRent === 0) ||
+        (!Number.isNaN(parsed) && parsed === transportRent)
+      ) {
+        return prev;
+      }
+      return transportRent > 0 ? String(transportRent) : '';
+    });
+  }, [transportRent]);
+
+  const sanitizeDecimalText = (raw: string) =>
+    raw.replace(/[^0-9.]/g, '').replace(/(\..*)\./g, '$1');
+
+  const handleDiscountTextChange = (raw: string) => {
+    const cleaned = sanitizeDecimalText(raw);
+    if (cleaned === '') {
+      setDraftDiscountStr('');
+      onUpdateDefaults(hardwareRate, 0, transportRent, labourCost);
+      return;
+    }
+    const num = parseFloat(cleaned);
+    const clamped = Number.isNaN(num) ? 0 : Math.min(100, Math.max(0, num));
+    setDraftDiscountStr(!Number.isNaN(num) && num > 100 ? '100' : cleaned);
+    onUpdateDefaults(hardwareRate, clamped, transportRent, labourCost);
+  };
+
+  const handleHardwareTextChange = (raw: string) => {
+    const cleaned = sanitizeDecimalText(raw);
+    setDraftHardwareStr(cleaned);
+    const num = parseFloat(cleaned);
+    onUpdateDefaults(Number.isNaN(num) ? 0 : Math.max(0, num), markupPct, transportRent, labourCost);
+  };
+
+  const handleLabourTextChange = (raw: string) => {
+    const cleaned = sanitizeDecimalText(raw);
+    setDraftLabourStr(cleaned);
+    const num = parseFloat(cleaned);
+    onUpdateDefaults(hardwareRate, markupPct, transportRent, Number.isNaN(num) ? 0 : Math.max(0, num));
+  };
+
+  const handleTransportTextChange = (raw: string) => {
+    const cleaned = sanitizeDecimalText(raw);
+    setDraftTransportStr(cleaned);
+    const num = parseFloat(cleaned);
+    onUpdateDefaults(hardwareRate, markupPct, Number.isNaN(num) ? 0 : Math.max(0, num), labourCost);
+  };
+
   const [shareModalTarget, setShareModalTarget] = useState<
     | { kind: 'CHART'; chartType: 'CUTTING' | 'LENGTH' | 'GLASS' | 'QUOTATION' }
     | { kind: 'HISTORY'; item: SavedQuotation }
@@ -756,6 +860,10 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     Object.keys(glassRates['8'] || {}).length > 0
       ? Object.keys(glassRates['8'])
       : DEFAULT_GLASS_COLORS_8MM;
+  const glassColorsDg =
+    Object.keys(glassRates['DG'] || {}).length > 0
+      ? Object.keys(glassRates['DG'])
+      : DEFAULT_GLASS_COLORS_DG;
   const deletedSecs = layoutConfig.deletedSections || [];
 
   // Compact 3-Chip Per-Frame Spec Strip ([Sec: 1.6mm] [Glass: 5mm] [CLEAR]) matching Mobile UI
@@ -767,20 +875,39 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     glassGauge: string;
     glassColor: string;
     onChangeGlassSpec: (g: string, col: string) => void;
+    isDgMode?: boolean;
   }) => {
+    const isDgMode = Boolean(params.isDgMode);
     const isGaugeLocked = ctxGaugeMode === 'ON';
-    const isGlassLocked = ctxGlassMode === 'ON';
+    const isGlassLocked = !isDgMode && ctxGlassMode === 'ON';
     const activeGauge = isGaugeLocked ? ctxGauge : params.sectionGauge || '1.6';
-    const activeGlassGauge = isGlassLocked ? ctxGlassGauge : params.glassGauge || '5';
-    const activeGlassColor = isGlassLocked ? ctxGlassColor : params.glassColor || 'CLEAR';
+    const activeGlassGauge = isDgMode
+      ? 'DG'
+      : isGlassLocked
+      ? ctxGlassGauge
+      : params.glassGauge && params.glassGauge.toUpperCase() !== 'DG'
+      ? params.glassGauge
+      : '5';
+    const rawAvailableGlassGauges = Object.keys(glassRates || {}).filter(
+      (g) => g.toUpperCase() !== 'DG'
+    );
     const availableGlassGauges =
-      Object.keys(glassRates || {}).length > 0 ? Object.keys(glassRates) : ['5', '8'];
-    const glassColorList =
-      Object.keys(glassRates[activeGlassGauge] || {}).length > 0
-        ? Object.keys(glassRates[activeGlassGauge])
-        : activeGlassGauge === '8'
-        ? glassColors8mm
-        : glassColors5mm;
+      rawAvailableGlassGauges.length > 0 ? rawAvailableGlassGauges : ['5', '8'];
+    const glassColorList = isDgMode
+      ? glassColorsDg
+      : Object.keys(glassRates[activeGlassGauge] || {}).length > 0
+      ? Object.keys(glassRates[activeGlassGauge])
+      : activeGlassGauge === '8'
+      ? glassColors8mm
+      : glassColors5mm;
+    const rawGlassColor = isDgMode
+      ? params.glassColor || glassColorList[0] || 'CLEAR'
+      : isGlassLocked
+      ? ctxGlassColor
+      : params.glassColor || 'CLEAR';
+    const activeGlassColor = glassColorList.includes(rawGlassColor)
+      ? rawGlassColor
+      : glassColorList[0] || 'CLEAR';
 
     return (
       <div className="grid grid-cols-3 gap-1.5 pt-0.5">
@@ -832,6 +959,8 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
           className={`px-2 py-1 rounded-full border text-[11px] flex items-center justify-between gap-1 min-w-0 ${
             !params.glassEnabled
               ? 'bg-[#0C0F14]/60 border-rose-900/60 text-rose-400'
+              : isDgMode
+              ? 'bg-[#0C0F14] border-[#F5B738]/70 text-[#F5B738]'
               : isGlassLocked
               ? 'bg-[#0C0F14] border-slate-700/80 text-slate-200'
               : 'bg-[#0C0F14] border-sky-500/80 text-sky-300'
@@ -845,6 +974,10 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
             >
               No Glass
             </button>
+          ) : isDgMode ? (
+            <div className="w-full text-center text-[11px] font-extrabold text-[#F5B738] truncate">
+              DG Glass
+            </div>
           ) : isGlassLocked ? (
             <button
               type="button"
@@ -1363,7 +1496,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
         totalBars += info.count;
         totalFt += info.count * Number(lenStr);
       });
-      const rate = rates[g]?.[ctxColor]?.[sec] ?? rates['1.2']?.['DULL']?.[sec] ?? 0;
+      const rate = resolveSectionRate(rates, g, ctxColor, sec);
       const cost = totalFt * rate;
       if (totalBars > 0) {
         alumRows.push({
@@ -1394,8 +1527,13 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
 
     const glassGroupMap: Record<string, { sqft: number; rate: number }> = {};
     glassCuts.forEach((cut) => {
-      const key = `${cut.glassGauge}mm ${cut.glassColor}`;
-      const rate = glassRates[cut.glassGauge]?.[cut.glassColor] ?? 240;
+      const key =
+        cut.glassGauge === 'DG'
+          ? `DG Glass ${cut.glassColor}`
+          : `${cut.glassGauge}mm ${cut.glassColor}`;
+      const rate =
+        glassRates[cut.glassGauge]?.[cut.glassColor] ??
+        (cut.glassGauge === 'DG' ? glassRates['DG']?.['CLEAR'] ?? 450 : 240);
       const cur = glassGroupMap[key] || { sqft: 0, rate };
       glassGroupMap[key] = { sqft: cur.sqft + cut.sqft, rate };
     });
@@ -1534,7 +1672,9 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
       title = 'GLASS CUTTING SCHEDULE & TOTAL BILL';
       glassCuts.forEach((g) => {
         lines.push({
-          left: `${g.frameLabel} (${g.glassGauge}mm ${g.glassColor})`,
+          left: `${g.frameLabel} (${
+            g.glassGauge === 'DG' ? `DG Glass ${g.glassColor}` : `${g.glassGauge}mm ${g.glassColor}`
+          })`,
           mid: `Cut: ${formatDim(g.gWpanel, measurementUnit)} x ${formatDim(g.gH, measurementUnit)} | Bill: ${g.billedWFt}x${g.billedHFt}ft`,
           right: `${g.pieces} Pcs · ${g.sqft.toFixed(2)} Sq.Ft`,
         });
@@ -2082,8 +2222,6 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   };
 
   const isTabLocked = (tabId: BossTab): boolean => {
-    const rawMap = (layoutConfig.lockedTabs || {}) as Record<string, unknown>;
-    const normalizedMap: Record<string, boolean> = {};
     const keyAliases: Record<string, string> = {
       WINDOWS: 'WINDOWS',
       WINDOW: 'WINDOWS',
@@ -2135,21 +2273,40 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
       }
       return Boolean(val);
     };
-    Object.entries(rawMap).forEach(([k, v]) => {
-      const cleaned = String(k || '')
-        .trim()
-        .toUpperCase()
-        .replace(/[\s.-]+/g, '_');
-      const canon = keyAliases[cleaned] || cleaned;
-      if (canon) normalizedMap[canon] = toLockBool(v);
-    });
-    const reqCanon =
-      keyAliases[String(tabId || '').trim().toUpperCase().replace(/[\s.-]+/g, '_')] ||
-      String(tabId || '').trim().toUpperCase();
-    if (reqCanon === 'DG_WINDOWS') {
-      return 'DG_WINDOWS' in normalizedMap ? normalizedMap.DG_WINDOWS : true;
+    const normalizeMap = (src: unknown): Record<string, boolean> => {
+      const out: Record<string, boolean> = {};
+      if (!src || typeof src !== 'object') return out;
+      Object.entries(src as Record<string, unknown>).forEach(([k, v]) => {
+        const cleaned = String(k || '')
+          .trim()
+          .toUpperCase()
+          .replace(/[^A-Z0-9]+/g, '_')
+          .replace(/^_+|_+$/g, '');
+        const canon = keyAliases[cleaned] || cleaned;
+        if (canon) out[canon] = toLockBool(v);
+      });
+      return out;
+    };
+
+    const normUserMap = normalizeMap(userLockedTabs);
+    const normGlobalMap = normalizeMap(layoutConfig.lockedTabs || {});
+    const reqCleaned = String(tabId || '')
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+    const reqCanon = keyAliases[reqCleaned] || reqCleaned;
+
+    // 1. Per-user locked_tabs strictly overrides Admin global layoutConfig.lockedTabs
+    if (reqCanon in normUserMap) {
+      return normUserMap[reqCanon];
     }
-    return Boolean(normalizedMap[reqCanon]);
+
+    // 2. Fallback to Admin global layoutConfig.lockedTabs (DG_WINDOWS defaults locked if unset)
+    if (reqCanon === 'DG_WINDOWS') {
+      return 'DG_WINDOWS' in normGlobalMap ? normGlobalMap.DG_WINDOWS : true;
+    }
+    return Boolean(normGlobalMap[reqCanon]);
   };
 
   const TABS: { id: BossTab; title: string; iconKey: string; isLocked?: boolean }[] = (
@@ -2476,19 +2633,21 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   ctxGlassMode === 'OFF' ? 'text-rose-300' : 'text-emerald-400'
                 }`}
               >
-                {Object.keys(glassRates || { '5': {}, '8': {} }).flatMap((g) => {
-                  const cols =
-                    Object.keys(glassRates[g] || {}).length > 0
-                      ? Object.keys(glassRates[g])
-                      : g === '8'
-                      ? glassColors8mm
-                      : glassColors5mm;
-                  return cols.map((gc) => (
-                    <option key={`${g}|${gc}`} value={`${g}|${gc}`} className="bg-[#14181F] text-white">
-                      {g}m {gc}
-                    </option>
-                  ));
-                })}
+                {Object.keys(glassRates || { '5': {}, '8': {} })
+                  .filter((g) => g.toUpperCase() !== 'DG')
+                  .flatMap((g) => {
+                    const cols =
+                      Object.keys(glassRates[g] || {}).length > 0
+                        ? Object.keys(glassRates[g])
+                        : g === '8'
+                        ? glassColors8mm
+                        : glassColors5mm;
+                    return cols.map((gc) => (
+                      <option key={`${g}|${gc}`} value={`${g}|${gc}`} className="bg-[#14181F] text-white">
+                        {g}m {gc}
+                      </option>
+                    ));
+                  })}
                 <option value="OFF" className="bg-[#14181F] text-rose-300">
                   Sep Glass
                 </option>
@@ -2523,7 +2682,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
           </div>
 
           <div className="flex items-center gap-1 shrink-0">
-            {/* Active Plan Badge + Remaining Days (Server-Time Verified) */}
+            {/* Exact Role Badge (OWNER VIP / ADMIN / CLIENT) + Active Plan Badge */}
             {(() => {
               const effectiveNow =
                 (cloudAccessInfo?.serverNowMs && cloudAccessInfo.serverNowMs > 0
@@ -2533,33 +2692,76 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                 cloudAccessInfo?.expiresAt && cloudAccessInfo.expiresAt > effectiveNow
                   ? Math.max(1, Math.ceil((cloudAccessInfo.expiresAt - effectiveNow) / 86400000))
                   : null;
-              const isVip = cloudAccessInfo?.status === 'FREE';
-              const isPro = cloudAccessInfo?.status === 'ACTIVE';
-              const badgeText = isVip
+              const isOwnerAccount = Boolean(
+                authSession &&
+                  isOwnerIdentity({
+                    email: authSession.email,
+                    phone: authSession.phone,
+                    cnic: authSession.cnic,
+                    masterCfg: loadCachedMasterEngineConfig(),
+                  })
+              );
+              const detectedRole: BossUserRole = isOwnerAccount
+                ? 'OWNER'
+                : cloudAccessInfo?.role || authSession?.userRole || 'CLIENT';
+              const roleLabel =
+                detectedRole === 'OWNER'
+                  ? 'OWNER VIP'
+                  : detectedRole === 'ADMIN'
+                  ? 'ADMIN'
+                  : 'CLIENT';
+              const isVip = detectedRole === 'OWNER' || cloudAccessInfo?.status === 'FREE';
+              const isPro = !isVip && cloudAccessInfo?.status === 'ACTIVE';
+              const planBadgeText = isVip
                 ? 'VIP'
                 : isPro
                 ? `PRO${daysLeft ? ` ${daysLeft}d` : ''}`
                 : `TRIAL${daysLeft ? ` ${daysLeft}d` : ''}`;
               return (
-                <button
-                  type="button"
-                  onClick={() => setShowPackagesModal(true)}
-                  className={`boss-flat-btn h-6 px-1.5 sm:px-2 rounded-full border text-[9px] font-black flex items-center gap-1 cursor-pointer shrink-0 ${
-                    isVip
-                      ? 'bg-emerald-500/15 border-emerald-500/60 text-emerald-300'
-                      : isPro
-                      ? 'bg-amber-500/15 border-[#F5B738]/70 text-[#F5B738]'
-                      : 'bg-sky-500/15 border-sky-500/60 text-sky-300'
-                  }`}
-                  title={
-                    authSession
-                      ? `${authSession.name} (${authSession.phone}) — Click to view Plans`
-                      : 'Subscription Plans'
-                  }
-                >
-                  <Crown className="w-2.5 h-2.5 shrink-0" />
-                  <span>{badgeText}</span>
-                </button>
+                <>
+                  <span
+                    className={`h-6 px-1.5 sm:px-2 rounded-full border text-[9px] font-black flex items-center gap-1 shrink-0 ${
+                      detectedRole === 'OWNER'
+                        ? 'bg-emerald-500/20 border-emerald-400/70 text-emerald-300'
+                        : detectedRole === 'ADMIN'
+                        ? 'bg-purple-500/20 border-purple-400/70 text-purple-300'
+                        : 'bg-slate-700/50 border-slate-500/70 text-slate-200'
+                    }`}
+                    title={
+                      authSession
+                        ? `${authSession.name} (${authSession.phone || authSession.email}) · Role: ${roleLabel}`
+                        : `Role: ${roleLabel}`
+                    }
+                  >
+                    {detectedRole === 'OWNER' ? (
+                      <Crown className="w-2.5 h-2.5 shrink-0" />
+                    ) : (
+                      <ShieldCheck className="w-2.5 h-2.5 shrink-0" />
+                    )}
+                    <span>{roleLabel}</span>
+                  </span>
+                  {detectedRole !== 'OWNER' && (
+                    <button
+                      type="button"
+                      onClick={() => setShowPackagesModal(true)}
+                      className={`boss-flat-btn h-6 px-1.5 sm:px-2 rounded-full border text-[9px] font-black flex items-center gap-1 cursor-pointer shrink-0 ${
+                        isVip
+                          ? 'bg-emerald-500/15 border-emerald-500/60 text-emerald-300'
+                          : isPro
+                          ? 'bg-amber-500/15 border-[#F5B738]/70 text-[#F5B738]'
+                          : 'bg-sky-500/15 border-sky-500/60 text-sky-300'
+                      }`}
+                      title={
+                        authSession
+                          ? `${authSession.name} (${authSession.phone}) — Click to view Plans`
+                          : 'Subscription Plans'
+                      }
+                    >
+                      <Crown className="w-2.5 h-2.5 shrink-0" />
+                      <span>{planBadgeText}</span>
+                    </button>
+                  )}
+                </>
               );
             })()}
 
@@ -3118,6 +3320,10 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
       {currentTab === 'DG_WINDOWS' && (() => {
         const handleAddDgWindow = () => {
           const ft = ctxFrameType === 'F' ? 'F' : 'C';
+          const dgCols =
+            Object.keys(glassRates['DG'] || {}).length > 0
+              ? Object.keys(glassRates['DG'])
+              : DEFAULT_GLASS_COLORS_DG;
           const newDw: DgWindowItem = {
             id: `dgwin-${Date.now()}`,
             width: 48,
@@ -3125,8 +3331,8 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
             qty: 1,
             frameType: ft,
             sectionGauge: ctxGaugeMode === 'ON' ? ctxGauge : '1.6',
-            glassGauge: ctxGlassMode === 'ON' ? ctxGlassGauge : '5',
-            glassColor: ctxGlassMode === 'ON' ? ctxGlassColor : 'CLEAR',
+            glassGauge: 'DG',
+            glassColor: dgCols[0] || 'CLEAR',
             glassEnabled: true,
             panelCount: 2,
             lockType: 'LATCH',
@@ -3419,13 +3625,14 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                               item.id === dw.id ? { ...item, glassEnabled: en } : item
                             )
                           ),
-                        glassGauge: dw.glassGauge,
+                        glassGauge: 'DG',
                         glassColor: dw.glassColor,
-                        onChangeGlassSpec: (g, col) =>
+                        isDgMode: true,
+                        onChangeGlassSpec: (_g, col) =>
                           onUpdateDgWindows(
                             dgWindows.map((item) =>
                               item.id === dw.id
-                                ? { ...item, glassGauge: g, glassColor: col }
+                                ? { ...item, glassGauge: 'DG', glassColor: col }
                                 : item
                             )
                           ),
@@ -4559,9 +4766,42 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
             </div>
           </div>
 
+          {hiddenSections.length > 0 && (
+            <div className="p-2.5 sm:p-3 rounded-xl bg-amber-950/35 border border-amber-500/50 flex flex-wrap items-center justify-between gap-2 no-print">
+              <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                <span className="text-[11px] font-extrabold text-amber-300 flex items-center gap-1 shrink-0">
+                  <EyeOff className="w-3.5 h-3.5" />
+                  Hidden ({hiddenSections.length}):
+                </span>
+                {hiddenSections.map((sec) => (
+                  <button
+                    key={sec}
+                    type="button"
+                    onClick={() => onToggleHideSection(sec)}
+                    className="boss-flat-btn px-2 py-0.5 rounded-md bg-[#0C0F14] border border-amber-500/60 hover:bg-[#F5B738] hover:text-black text-amber-200 text-[10.5px] font-bold flex items-center gap-1 cursor-pointer transition-colors"
+                    title={`Unhide ${sec}`}
+                  >
+                    <Eye className="w-3 h-3 shrink-0" />
+                    <span>{sec}</span>
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={onUnhideAllSections}
+                className="boss-flat-btn px-2.5 py-1 rounded-lg bg-[#F5B738] hover:bg-amber-400 text-black text-[10.5px] font-black flex items-center gap-1 cursor-pointer shrink-0"
+              >
+                <Eye className="w-3.5 h-3.5" />
+                <span>Unhide All</span>
+              </button>
+            </div>
+          )}
+
           {Object.keys(sectionPiecesMap).length === 0 ? (
             <div className="p-10 rounded-xl bg-[#14181F] border border-[#2B3441] text-center text-xs text-slate-400">
-              Add windows or doors first to generate the cutting chart.
+              {hiddenSections.length > 0
+                ? 'All sections are currently hidden. Click any section above or "Unhide All" to show them.'
+                : 'Add windows or doors first to generate the cutting chart.'}
             </div>
           ) : (
             <div className="space-y-3">
@@ -4690,6 +4930,37 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
             </div>
           </div>
 
+          {hiddenSections.length > 0 && (
+            <div className="p-2.5 sm:p-3 rounded-xl bg-amber-950/35 border border-amber-500/50 flex flex-wrap items-center justify-between gap-2 no-print">
+              <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                <span className="text-[11px] font-extrabold text-amber-300 flex items-center gap-1 shrink-0">
+                  <EyeOff className="w-3.5 h-3.5" />
+                  Hidden ({hiddenSections.length}):
+                </span>
+                {hiddenSections.map((sec) => (
+                  <button
+                    key={sec}
+                    type="button"
+                    onClick={() => onToggleHideSection(sec)}
+                    className="boss-flat-btn px-2 py-0.5 rounded-md bg-[#0C0F14] border border-amber-500/60 hover:bg-[#F5B738] hover:text-black text-amber-200 text-[10.5px] font-bold flex items-center gap-1 cursor-pointer transition-colors"
+                    title={`Unhide ${sec}`}
+                  >
+                    <Eye className="w-3 h-3 shrink-0" />
+                    <span>{sec}</span>
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={onUnhideAllSections}
+                className="boss-flat-btn px-2.5 py-1 rounded-lg bg-[#F5B738] hover:bg-amber-400 text-black text-[10.5px] font-black flex items-center gap-1 cursor-pointer shrink-0"
+              >
+                <Eye className="w-3.5 h-3.5" />
+                <span>Unhide All</span>
+              </button>
+            </div>
+          )}
+
           <div className="p-3.5 sm:p-4 rounded-xl bg-[#14181F] border border-[#2B3441] space-y-2.5">
             <div className="text-xs font-extrabold text-[#F5B738] tracking-wide uppercase">
               TOTAL BARS SUMMARY
@@ -4697,7 +4968,9 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
 
             {Object.keys(sectionPiecesMap).length === 0 ? (
               <div className="py-8 text-center text-xs text-slate-400">
-                Add windows or doors first to see total stock bars.
+                {hiddenSections.length > 0
+                  ? 'All sections are currently hidden. Click any section above or "Unhide All" to show them.'
+                  : 'Add windows or doors first to see total stock bars.'}
               </div>
             ) : (
               <>
@@ -4917,7 +5190,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                         <div className="text-[10px] text-slate-400 mt-0.5">{g.frameDim}</div>
                       </td>
                       <td className="py-2.5 px-2 text-sky-400 font-bold font-sans whitespace-nowrap">
-                        {g.glassGauge}mm {g.glassColor}
+                        {g.glassGauge === 'DG' ? `DG Glass ${g.glassColor}` : `${g.glassGauge}mm ${g.glassColor}`}
                       </td>
                       <td className="py-2.5 px-2 font-bold text-[#F5B738] tabular-nums whitespace-nowrap">
                         {formatDim(g.gWpanel, measurementUnit)} ×{' '}
@@ -5051,18 +5324,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                 </label>
                 <div className="relative flex items-center">
                   <input
-                    type="number"
-                    min={0}
-                    max={100}
-                    value={markupPct}
-                    onChange={(e) =>
-                      onUpdateDefaults(
-                        hardwareRate,
-                        parseFloat(e.target.value) || 0,
-                        transportRent,
-                        labourCost
-                      )
-                    }
+                    type="text"
+                    inputMode="decimal"
+                    value={draftDiscountStr}
+                    onChange={(e) => handleDiscountTextChange(e.target.value)}
+                    placeholder="0"
                     title="Discount (%)"
                     aria-label="Discount (%)"
                     className="w-full h-7 pl-2 pr-5 rounded-lg bg-[#0C0F14] border border-emerald-500/70 focus:border-emerald-400 outline-none text-[11px] font-mono font-bold text-emerald-300"
@@ -5078,17 +5344,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   Hardware (Rs)
                 </label>
                 <input
-                  type="number"
-                  min={0}
-                  value={hardwareRate}
-                  onChange={(e) =>
-                    onUpdateDefaults(
-                      parseFloat(e.target.value) || 0,
-                      markupPct,
-                      transportRent,
-                      labourCost
-                    )
-                  }
+                  type="text"
+                  inputMode="decimal"
+                  value={draftHardwareStr}
+                  onChange={(e) => handleHardwareTextChange(e.target.value)}
+                  placeholder="0"
                   title="Hardware Rate / Unit (Rs)"
                   aria-label="Hardware (Rs)"
                   className="w-full h-7 px-2 rounded-lg bg-[#0C0F14] border border-slate-700 focus:border-[#F5B738] outline-none text-[11px] font-mono text-white"
@@ -5100,17 +5360,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   Labour (Rs)
                 </label>
                 <input
-                  type="number"
-                  min={0}
-                  value={labourCost}
-                  onChange={(e) =>
-                    onUpdateDefaults(
-                      hardwareRate,
-                      markupPct,
-                      transportRent,
-                      parseFloat(e.target.value) || 0
-                    )
-                  }
+                  type="text"
+                  inputMode="decimal"
+                  value={draftLabourStr}
+                  onChange={(e) => handleLabourTextChange(e.target.value)}
+                  placeholder="0"
                   title="Labour Charges (Rs)"
                   aria-label="Labour (Rs)"
                   className="w-full h-7 px-2 rounded-lg bg-[#0C0F14] border border-slate-700 focus:border-[#F5B738] outline-none text-[11px] font-mono text-white"
@@ -5122,17 +5376,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   Transport (Rs)
                 </label>
                 <input
-                  type="number"
-                  min={0}
-                  value={transportRent}
-                  onChange={(e) =>
-                    onUpdateDefaults(
-                      hardwareRate,
-                      markupPct,
-                      parseFloat(e.target.value) || 0,
-                      labourCost
-                    )
-                  }
+                  type="text"
+                  inputMode="decimal"
+                  value={draftTransportStr}
+                  onChange={(e) => handleTransportTextChange(e.target.value)}
+                  placeholder="0"
                   title="Transport Rent (Rs)"
                   aria-label="Transport (Rs)"
                   className="w-full h-7 px-2 rounded-lg bg-[#0C0F14] border border-slate-700 focus:border-[#F5B738] outline-none text-[11px] font-mono text-white"
@@ -5251,6 +5499,37 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                 Rs {Math.round(activeQuote.grandTotal).toLocaleString()}
               </div>
             </div>
+
+            {hiddenSections.length > 0 && (
+              <div className="p-2.5 sm:p-3 rounded-xl bg-amber-950/35 border border-amber-500/50 flex flex-wrap items-center justify-between gap-2 no-print">
+                <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                  <span className="text-[11px] font-extrabold text-amber-300 flex items-center gap-1 shrink-0">
+                    <EyeOff className="w-3.5 h-3.5" />
+                    Hidden ({hiddenSections.length}):
+                  </span>
+                  {hiddenSections.map((sec) => (
+                    <button
+                      key={sec}
+                      type="button"
+                      onClick={() => onToggleHideSection(sec)}
+                      className="boss-flat-btn px-2 py-0.5 rounded-md bg-[#0C0F14] border border-amber-500/60 hover:bg-[#F5B738] hover:text-black text-amber-200 text-[10.5px] font-bold flex items-center gap-1 cursor-pointer transition-colors"
+                      title={`Unhide ${sec}`}
+                    >
+                      <Eye className="w-3 h-3 shrink-0" />
+                      <span>{sec}</span>
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  onClick={onUnhideAllSections}
+                  className="boss-flat-btn px-2.5 py-1 rounded-lg bg-[#F5B738] hover:bg-amber-400 text-black text-[10.5px] font-black flex items-center gap-1 cursor-pointer shrink-0"
+                >
+                  <Eye className="w-3.5 h-3.5" />
+                  <span>Unhide All</span>
+                </button>
+              </div>
+            )}
 
             {/* Background & Sheet Adjustments (Collapsible via button above) */}
             {showBackgroundAdjustments && (
@@ -6898,10 +7177,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                                 const isHidden = hiddenSections.includes(sec);
                                 const val =
                                   rates[rateGaugeTab]?.[rateColorTab]?.[sec] ??
-                                  rates[rateGaugeTab]?.['DULL']?.[sec] ??
-                                  rates['1.6']?.[rateColorTab]?.[sec] ??
-                                  rates['1.2']?.[rateColorTab]?.[sec] ??
-                                  0;
+                                  resolveSectionRate(rates, rateGaugeTab, rateColorTab, sec);
                                 const barLen = sec.endsWith('F') ? 19 : 18;
                                 return (
                                   <tr
@@ -6976,10 +7252,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                           const isHidden = hiddenSections.includes(sec);
                           const val =
                             rates[rateGaugeTab]?.[rateColorTab]?.[sec] ??
-                            rates[rateGaugeTab]?.['DULL']?.[sec] ??
-                            rates['1.6']?.[rateColorTab]?.[sec] ??
-                            rates['1.2']?.[rateColorTab]?.[sec] ??
-                            0;
+                            resolveSectionRate(rates, rateGaugeTab, rateColorTab, sec);
                           const barLen = sec.endsWith('F') ? 19 : 18;
                           return (
                             <div
@@ -7133,7 +7406,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                         >
                           {Object.keys(glassRates).map((gm) => (
                             <option key={gm} value={gm}>
-                              {gm}mm
+                              {gm === 'DG' ? 'DG Glass' : `${gm}mm`}
                             </option>
                           ))}
                         </select>
@@ -7176,7 +7449,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                             if (addGlassTargetGauge === '8') setNewGlass8Color('');
                             else setNewGlass5Color('');
                             setShowAddGlassColorForm(false);
-                            showSettingsToast(`Added "${col}" to ${addGlassTargetGauge}mm Glass!`);
+                            showSettingsToast(
+                              `Added "${col}" to ${
+                                addGlassTargetGauge === 'DG' ? 'DG' : `${addGlassTargetGauge}mm`
+                              } Glass!`
+                            );
                           }}
                           className="boss-flat-btn px-3 py-1.5 rounded-lg bg-emerald-500 text-black font-bold text-xs shrink-0"
                         >
@@ -7194,15 +7471,17 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                             key={gm}
                             className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#14181F] border border-amber-500/50 text-amber-300 font-bold text-[11px]"
                           >
-                            <span>{gm}mm Glass</span>
+                            <span>{gm === 'DG' ? 'DG Glass' : `${gm}mm Glass`}</span>
                             <button
                               type="button"
                               onClick={() => {
                                 onDeleteGlassGauge(gm);
-                                showSettingsToast(`Removed ${gm}mm Glass Gauge`);
+                                showSettingsToast(
+                                  `Removed ${gm === 'DG' ? 'DG' : `${gm}mm`} Glass Gauge`
+                                );
                               }}
                               className="boss-flat-btn text-rose-400 hover:text-rose-300 font-bold cursor-pointer"
-                              title={`Delete ${gm}mm Glass Gauge`}
+                              title={`Delete ${gm === 'DG' ? 'DG' : `${gm}mm`} Glass Gauge`}
                             >
                               ✕
                             </button>
@@ -7231,7 +7510,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                     >
                       <div className="flex items-center justify-between gap-2 flex-wrap">
                         <span className="text-xs font-extrabold text-[#F5B738]">
-                          {gm}mm Glass Rates (Rs. / Sq.Ft)
+                          {gm === 'DG' ? 'DG Glass' : `${gm}mm Glass`} Rates (Rs. / Sq.Ft)
                         </span>
                         <div className="flex items-center gap-1.5">
                           <button
@@ -7242,17 +7521,19 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                             }}
                             className="boss-flat-btn px-2 py-0.5 rounded bg-emerald-950 border border-emerald-500/60 text-emerald-300 text-[10px] font-bold cursor-pointer"
                           >
-                            + {gm}mm Color
+                            + {gm === 'DG' ? 'DG' : `${gm}mm`} Color
                           </button>
                           <button
                             type="button"
                             onClick={() => {
                               onDeleteGlassGauge(gm);
-                              showSettingsToast(`Deleted ${gm}mm Glass Gauge`);
+                              showSettingsToast(
+                                `Deleted ${gm === 'DG' ? 'DG' : `${gm}mm`} Glass Gauge`
+                              );
                             }}
                             className="boss-flat-btn px-2 py-0.5 rounded bg-rose-950 border border-rose-500/60 text-rose-300 text-[10px] font-bold cursor-pointer"
                           >
-                            Del {gm}mm
+                            Del {gm === 'DG' ? 'DG' : `${gm}mm`}
                           </button>
                         </div>
                       </div>
@@ -7271,7 +7552,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                               {Object.entries(colorMap || {}).map(([col, rateVal]) => (
                                 <tr key={`${gm}-${col}`}>
                                   <td className="py-1.5 px-2.5 font-bold text-amber-300">
-                                    {gm}mm {col}
+                                    {gm === 'DG' ? `DG ${col}` : `${gm}mm ${col}`}
                                   </td>
                                   <td className="py-1.5 px-2">
                                     <input
@@ -7292,7 +7573,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                                       type="button"
                                       onClick={() => {
                                         onDeleteGlassColor(gm, col);
-                                        showSettingsToast(`Deleted "${col}" from ${gm}mm Glass`);
+                                        showSettingsToast(
+                                          `Deleted "${col}" from ${
+                                            gm === 'DG' ? 'DG' : `${gm}mm`
+                                          } Glass`
+                                        );
                                       }}
                                       className="boss-flat-btn p-1 rounded bg-rose-950 text-rose-300"
                                     >
@@ -7317,16 +7602,20 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                             >
                               <div className="flex items-start justify-between gap-1">
                                 <span className="text-[11px] font-extrabold text-[#F5B738] leading-tight truncate">
-                                  {gm}mm {col}
+                                  {gm === 'DG' ? `DG ${col}` : `${gm}mm ${col}`}
                                 </span>
                                 <button
                                   type="button"
                                   onClick={() => {
                                     onDeleteGlassColor(gm, col);
-                                    showSettingsToast(`Deleted "${col}" from ${gm}mm Glass`);
+                                    showSettingsToast(
+                                      `Deleted "${col}" from ${
+                                        gm === 'DG' ? 'DG' : `${gm}mm`
+                                      } Glass`
+                                    );
                                   }}
                                   className="boss-flat-btn p-0.5 text-rose-400 hover:text-rose-300 shrink-0 cursor-pointer"
-                                  title={`Delete ${col} from ${gm}mm Glass`}
+                                  title={`Delete ${col} from ${gm === 'DG' ? 'DG' : `${gm}mm`} Glass`}
                                 >
                                   <Trash2 className="w-3 h-3" />
                                 </button>
@@ -7833,17 +8122,12 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                     Hardware / Unit (Rs)
                   </label>
                   <input
-                    type="number"
-                    value={hardwareRate}
-                    onChange={(e) =>
-                      onUpdateDefaults(
-                        parseFloat(e.target.value) || 0,
-                        markupPct,
-                        transportRent,
-                        labourCost
-                      )
-                    }
-                    className="w-full px-3 py-2 rounded-lg bg-[#0C0F14] border border-slate-700 font-mono font-bold text-white text-xs"
+                    type="text"
+                    inputMode="decimal"
+                    value={draftHardwareStr}
+                    onChange={(e) => handleHardwareTextChange(e.target.value)}
+                    placeholder="0"
+                    className="w-full px-3 py-2 rounded-lg bg-[#0C0F14] border border-slate-700 focus:border-[#F5B738] outline-none font-mono font-bold text-white text-xs"
                   />
                 </div>
 
@@ -7852,17 +8136,12 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                     Discount (%)
                   </label>
                   <input
-                    type="number"
-                    value={markupPct}
-                    onChange={(e) =>
-                      onUpdateDefaults(
-                        hardwareRate,
-                        parseFloat(e.target.value) || 0,
-                        transportRent,
-                        labourCost
-                      )
-                    }
-                    className="w-full px-3 py-2 rounded-lg bg-[#0C0F14] border border-emerald-500/60 font-mono font-bold text-emerald-300 text-xs"
+                    type="text"
+                    inputMode="decimal"
+                    value={draftDiscountStr}
+                    onChange={(e) => handleDiscountTextChange(e.target.value)}
+                    placeholder="0"
+                    className="w-full px-3 py-2 rounded-lg bg-[#0C0F14] border border-emerald-500/60 focus:border-emerald-400 outline-none font-mono font-bold text-emerald-300 text-xs"
                   />
                 </div>
 
@@ -7871,17 +8150,12 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                     Labour Charges (Rs)
                   </label>
                   <input
-                    type="number"
-                    value={labourCost}
-                    onChange={(e) =>
-                      onUpdateDefaults(
-                        hardwareRate,
-                        markupPct,
-                        transportRent,
-                        parseFloat(e.target.value) || 0
-                      )
-                    }
-                    className="w-full px-3 py-2 rounded-lg bg-[#0C0F14] border border-slate-700 font-mono font-bold text-white text-xs"
+                    type="text"
+                    inputMode="decimal"
+                    value={draftLabourStr}
+                    onChange={(e) => handleLabourTextChange(e.target.value)}
+                    placeholder="0"
+                    className="w-full px-3 py-2 rounded-lg bg-[#0C0F14] border border-slate-700 focus:border-[#F5B738] outline-none font-mono font-bold text-white text-xs"
                   />
                 </div>
 
@@ -7890,17 +8164,12 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                     Transport Rent (Rs)
                   </label>
                   <input
-                    type="number"
-                    value={transportRent}
-                    onChange={(e) =>
-                      onUpdateDefaults(
-                        hardwareRate,
-                        markupPct,
-                        parseFloat(e.target.value) || 0,
-                        labourCost
-                      )
-                    }
-                    className="w-full px-3 py-2 rounded-lg bg-[#0C0F14] border border-slate-700 font-mono font-bold text-white text-xs"
+                    type="text"
+                    inputMode="decimal"
+                    value={draftTransportStr}
+                    onChange={(e) => handleTransportTextChange(e.target.value)}
+                    placeholder="0"
+                    className="w-full px-3 py-2 rounded-lg bg-[#0C0F14] border border-slate-700 focus:border-[#F5B738] outline-none font-mono font-bold text-white text-xs"
                   />
                 </div>
               </div>

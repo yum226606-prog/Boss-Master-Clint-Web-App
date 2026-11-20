@@ -1,11 +1,10 @@
 import {
   callSupabaseProxy,
-  DEFAULT_PUBLISHABLE_KEY,
   DEFAULT_SMS_GATEWAY_CONFIG,
-  DEFAULT_SUPABASE_URL,
   getEffectiveServerNowMs,
   isLocalClockRolledBack,
   SmsOtpGatewayConfig,
+  supabase,
 } from './supabaseClientConfig';
 
 export const ADMIN_SERVER_PRIMARY =
@@ -16,8 +15,13 @@ export const ADMIN_SERVER_DEV =
 export const AUTH_SESSION_STORAGE_KEY = 'boss_client_auth_session_v1';
 export const DEVICE_ID_STORAGE_KEY = 'boss_client_device_id';
 export const MASTER_ENGINE_CACHE_KEY = 'boss_cached_master_engine_config_v1';
+export const ACTIVE_SESSION_TOKEN_KEY = 'boss_active_session_token_v1';
 export const PRIMARY_OWNER_EMAIL = 'ssaboor2t@gmail.com';
+export const DEFAULT_OWNER_EMAILS = ['ssaboor2t@gmail.com', 'yum226606@gmail.com'];
+export const DEFAULT_OWNER_PHONES = ['3105524225'];
 export const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000;
+
+export type BossUserRole = 'OWNER' | 'ADMIN' | 'CLIENT';
 
 export interface ClientAuthSession {
   verified: boolean;
@@ -34,6 +38,54 @@ export interface ClientAuthSession {
   loggedInAt: number;
   trialStartTime?: number;
   trialExpiresAt?: number;
+  isLifetimeFree?: boolean;
+  isActivated?: boolean;
+  packagePlan?: string;
+  isBlocked?: boolean;
+  activeSessionToken?: string;
+  userRole?: BossUserRole;
+}
+
+export function generateActiveSessionToken(): string {
+  const bytes = new Uint8Array(12);
+  if (typeof window !== 'undefined' && window.crypto?.getRandomValues) {
+    window.crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < bytes.length; i++) {
+      bytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
+  const hex = Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+  return `SESS-${Date.now().toString(36)}-${hex}`;
+}
+
+export function loadActiveSessionToken(): string {
+  if (typeof window === 'undefined') return '';
+  try {
+    return String(localStorage.getItem(ACTIVE_SESSION_TOKEN_KEY) || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+export function saveActiveSessionToken(token: string): void {
+  if (typeof window === 'undefined' || !token) return;
+  try {
+    localStorage.setItem(ACTIVE_SESSION_TOKEN_KEY, token);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function clearActiveSessionToken(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.removeItem(ACTIVE_SESSION_TOKEN_KEY);
+  } catch {
+    // ignore storage errors
+  }
 }
 
 export function getOrCreateClientDeviceId(): string {
@@ -86,6 +138,9 @@ export function saveAuthSession(session: ClientAuthSession): void {
   if (typeof window === 'undefined') return;
   try {
     localStorage.setItem(DEVICE_ID_STORAGE_KEY, session.deviceId);
+    if (session.activeSessionToken) {
+      localStorage.setItem(ACTIVE_SESSION_TOKEN_KEY, session.activeSessionToken);
+    }
     localStorage.setItem(AUTH_SESSION_STORAGE_KEY, JSON.stringify(session));
   } catch {
     // ignore storage errors
@@ -96,6 +151,7 @@ export function clearAuthSession(): void {
   if (typeof window === 'undefined') return;
   try {
     localStorage.removeItem(AUTH_SESSION_STORAGE_KEY);
+    localStorage.removeItem(ACTIVE_SESSION_TOKEN_KEY);
   } catch {
     // ignore storage errors
   }
@@ -168,43 +224,26 @@ export async function sendSupabaseEmailOtp(
   email: string,
   meta?: { name?: string; phone?: string; device_id?: string }
 ): Promise<{ ok: boolean; status: number; error?: string }> {
-  const urlBase = (
-    (typeof window !== 'undefined' ? localStorage.getItem('boss_custom_supabase_url') : null) ||
-    DEFAULT_SUPABASE_URL
-  )
-    .replace(/\/rest\/v1\/?$/i, '')
-    .replace(/\/$/, '');
-  const apiKey =
-    (typeof window !== 'undefined' ? localStorage.getItem('boss_custom_supabase_key') : null) ||
-    DEFAULT_PUBLISHABLE_KEY;
-
-  const redirectTo =
-    typeof window !== 'undefined' && window.location?.origin
-      ? `?redirect_to=${encodeURIComponent(window.location.origin)}`
-      : '';
+  const cleanEmail = email.trim().toLowerCase();
+  const emailRedirectTo =
+    typeof window !== 'undefined' && window.location?.origin ? window.location.origin : undefined;
 
   try {
-    const resp = await fetch(`${urlBase}/auth/v1/otp${redirectTo}`, {
-      method: 'POST',
-      headers: {
-        apikey: apiKey,
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        email: email.trim(),
-        create_user: true,
+    const { error } = await supabase.auth.signInWithOtp({
+      email: cleanEmail,
+      options: {
+        shouldCreateUser: true,
+        emailRedirectTo,
         data: meta || {},
-      }),
+      },
     });
-    if (resp.ok) {
-      return { ok: true, status: resp.status };
+    if (!error) {
+      return { ok: true, status: 200 };
     }
-    const errJson = await resp.json().catch(() => ({}));
     return {
       ok: false,
-      status: resp.status,
-      error: errJson?.msg || errJson?.error_description || errJson?.message || `Email OTP error (${resp.status})`,
+      status: error.status || 400,
+      error: error.message || `Email OTP error (${error.status || 400})`,
     };
   } catch (e: any) {
     return { ok: false, status: 0, error: e?.message || 'Network error sending email OTP' };
@@ -235,26 +274,19 @@ export async function verifySupabaseEmailOtp(
   email: string,
   tokenOrUrl: string
 ): Promise<{ ok: boolean; error?: string }> {
-  const urlBase = (
-    (typeof window !== 'undefined' ? localStorage.getItem('boss_custom_supabase_url') : null) ||
-    DEFAULT_SUPABASE_URL
-  )
-    .replace(/\/rest\/v1\/?$/i, '')
-    .replace(/\/$/, '');
-  const apiKey =
-    (typeof window !== 'undefined' ? localStorage.getItem('boss_custom_supabase_key') : null) ||
-    DEFAULT_PUBLISHABLE_KEY;
-
   const cleanEmail = email.trim().toLowerCase();
   const rawInput = tokenOrUrl.trim();
 
-  // Support pasted confirmation URL or localhost redirect URL containing access_token / token_hash / token
   let extractedAccessToken = '';
   let extractedTokenHash = '';
   let extractedType = '';
   let cleanToken = rawInput.replace(/\s+/g, '');
 
-  if (rawInput.includes('access_token=') || rawInput.includes('token_hash=') || rawInput.includes('token=')) {
+  if (
+    rawInput.includes('access_token=') ||
+    rawInput.includes('token_hash=') ||
+    rawInput.includes('token=')
+  ) {
     try {
       const normalized = rawInput.replace('#', '?');
       const queryPart = normalized.includes('?') ? normalized.split('?').slice(1).join('&') : normalized;
@@ -269,19 +301,12 @@ export async function verifySupabaseEmailOtp(
     }
   }
 
-  // 1) If an access_token was received via confirmation link redirect, verify via /auth/v1/user
+  // 1) Confirmation link access_token verification via official Supabase Auth SDK
   if (extractedAccessToken) {
     try {
-      const uResp = await fetch(`${urlBase}/auth/v1/user`, {
-        method: 'GET',
-        headers: {
-          apikey: apiKey,
-          Authorization: `Bearer ${extractedAccessToken}`,
-        },
-      });
-      if (uResp.ok) {
-        const userData = await uResp.json().catch(() => ({}));
-        const verifiedEmail = String(userData?.email || '').trim().toLowerCase();
+      const { data, error } = await supabase.auth.getUser(extractedAccessToken);
+      if (!error && data?.user) {
+        const verifiedEmail = String(data.user.email || '').trim().toLowerCase();
         if (!verifiedEmail || verifiedEmail === cleanEmail) {
           return { ok: true };
         }
@@ -291,28 +316,20 @@ export async function verifySupabaseEmailOtp(
     }
   }
 
-  // 2) If token_hash was present, verify via /auth/v1/verify with token_hash
-  const typesToTry = extractedType
+  // 2) token_hash verification via official supabase.auth.verifyOtp
+  const hashTypesToTry = extractedType
     ? ([extractedType, 'email', 'signup', 'magiclink'] as const)
     : (['email', 'signup', 'magiclink'] as const);
 
   if (extractedTokenHash || cleanToken.startsWith('pkce_') || cleanToken.length > 16) {
     const hashCandidate = extractedTokenHash || cleanToken;
-    for (const verifyType of typesToTry) {
+    for (const verifyType of hashTypesToTry) {
       try {
-        const resp = await fetch(`${urlBase}/auth/v1/verify`, {
-          method: 'POST',
-          headers: {
-            apikey: apiKey,
-            Authorization: `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            token_hash: hashCandidate,
-            type: verifyType,
-          }),
+        const { data, error } = await supabase.auth.verifyOtp({
+          token_hash: hashCandidate,
+          type: verifyType as any,
         });
-        if (resp.ok) {
+        if (!error && (data?.session || data?.user)) {
           return { ok: true };
         }
       } catch {
@@ -321,29 +338,22 @@ export async function verifySupabaseEmailOtp(
     }
   }
 
-  // 3) Standard 6/8-digit Email OTP verification
+  // 3) Strict 6-digit Email OTP verification via official supabase.auth.verifyOtp
   for (const verifyType of ['email', 'signup', 'magiclink'] as const) {
     try {
-      const resp = await fetch(`${urlBase}/auth/v1/verify`, {
-        method: 'POST',
-        headers: {
-          apikey: apiKey,
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          email: email.trim(),
-          token: cleanToken,
-          type: verifyType,
-        }),
+      const { data, error } = await supabase.auth.verifyOtp({
+        email: cleanEmail,
+        token: cleanToken,
+        type: verifyType,
       });
-      if (resp.ok) {
+      if (!error && (data?.session || data?.user)) {
         return { ok: true };
       }
     } catch {
-      // try next verification type
+      // try next type
     }
   }
+
   return { ok: false, error: 'Email OTP code ghalat ya expire ho chuka hai.' };
 }
 
@@ -435,8 +445,8 @@ export function extractOwnerCredentialsFromMaster(masterCfg: Record<string, any>
   phones: string[];
   cnics: string[];
 } {
-  const emailSet = new Set<string>([PRIMARY_OWNER_EMAIL]);
-  const phoneSet = new Set<string>();
+  const emailSet = new Set<string>(DEFAULT_OWNER_EMAILS);
+  const phoneSet = new Set<string>(DEFAULT_OWNER_PHONES);
   const cnicSet = new Set<string>();
 
   const addEmail = (val: any) => {
@@ -470,6 +480,8 @@ export function extractOwnerCredentialsFromMaster(masterCfg: Record<string, any>
   };
 
   if (masterCfg && typeof masterCfg === 'object') {
+    addEmail(masterCfg.ownerIdentity?.emails);
+    addEmail(masterCfg.ownerIdentity?.email);
     addEmail(masterCfg.ownerEmail);
     addEmail(masterCfg.ownerEmails);
     addEmail(masterCfg.masterOwnerEmail);
@@ -484,6 +496,8 @@ export function extractOwnerCredentialsFromMaster(masterCfg: Record<string, any>
     addEmail(masterCfg.security?.adminEmails);
     addEmail(masterCfg.security?.vipEmails);
 
+    addPhone(masterCfg.ownerIdentity?.phone);
+    addPhone(masterCfg.ownerIdentity?.phones);
     addPhone(masterCfg.ownerPhone);
     addPhone(masterCfg.ownerPhones);
     addPhone(masterCfg.masterOwnerPhone);
@@ -496,6 +510,8 @@ export function extractOwnerCredentialsFromMaster(masterCfg: Record<string, any>
     addPhone(masterCfg.security?.adminPhone);
     addPhone(masterCfg.security?.adminPhones);
 
+    addCnic(masterCfg.ownerIdentity?.cnic);
+    addCnic(masterCfg.ownerIdentity?.cnics);
     addCnic(masterCfg.ownerCnic);
     addCnic(masterCfg.ownerCnics);
     addCnic(masterCfg.masterOwnerCnic);
@@ -588,6 +604,138 @@ export function isOwnerIdentity(params: {
   return false;
 }
 
+export function resolveUserRole(params: {
+  email?: string;
+  phone?: string;
+  cnic?: string;
+  matchedUser?: any | null;
+  matchedClientUser?: any | null;
+  matchedSub?: any | null;
+  matchedUac?: any | null;
+  masterCfg?: Record<string, any>;
+}): BossUserRole {
+  const effectiveCfg =
+    params.masterCfg && Object.keys(params.masterCfg).length > 0
+      ? params.masterCfg
+      : loadCachedMasterEngineConfig();
+
+  const email = String(
+    params.email ||
+      params.matchedUser?.email ||
+      params.matchedClientUser?.email ||
+      params.matchedSub?.email ||
+      params.matchedUac?.email ||
+      ''
+  )
+    .trim()
+    .toLowerCase();
+  const phoneDigits = normalizePhoneDigits(
+    String(
+      params.phone ||
+        params.matchedUser?.phone ||
+        params.matchedClientUser?.phone ||
+        params.matchedSub?.phone ||
+        params.matchedUac?.phone ||
+        ''
+    )
+  );
+  const cnicDigits = normalizeCnicDigits(
+    String(
+      params.cnic ||
+        params.matchedUser?.cnic ||
+        params.matchedClientUser?.cnic ||
+        params.matchedSub?.cnic ||
+        params.matchedUac?.cnic ||
+        ''
+    )
+  );
+
+  if (
+    isOwnerIdentity({
+      email,
+      phone: phoneDigits,
+      cnic: cnicDigits,
+      masterCfg: effectiveCfg,
+    })
+  ) {
+    return 'OWNER';
+  }
+
+  const rows = [
+    params.matchedUser,
+    params.matchedClientUser,
+    params.matchedSub,
+    params.matchedUac,
+  ].filter(Boolean);
+
+  for (const r of rows) {
+    const roleVal = String(
+      r.role || r.user_role || r.account_role || r.admin_role || r.accountType || ''
+    )
+      .trim()
+      .toUpperCase();
+    if (r.is_owner || r.isOwner || ['OWNER', 'SUPER_ADMIN', 'MASTER_ADMIN'].includes(roleVal)) {
+      return 'OWNER';
+    }
+  }
+
+  for (const r of rows) {
+    const roleVal = String(
+      r.role || r.user_role || r.account_role || r.admin_role || r.accountType || ''
+    )
+      .trim()
+      .toUpperCase();
+    if (
+      r.is_admin ||
+      r.isAdmin ||
+      r.is_sub_admin ||
+      r.isSubAdmin ||
+      ['ADMIN', 'SUB_ADMIN', 'SUBADMIN', 'MODERATOR', 'STAFF', 'MANAGER'].includes(roleVal)
+    ) {
+      return 'ADMIN';
+    }
+  }
+
+  const subAdminSources = [
+    effectiveCfg?.subAdmins,
+    effectiveCfg?.sub_admins,
+    effectiveCfg?.admins,
+    effectiveCfg?.adminUsers,
+    effectiveCfg?.adminAccounts,
+    effectiveCfg?.staff,
+    effectiveCfg?.security?.admins,
+    effectiveCfg?.security?.subAdmins,
+  ];
+  for (const src of subAdminSources) {
+    if (!src) continue;
+    const list = Array.isArray(src) ? src : typeof src === 'object' ? Object.values(src) : [];
+    for (const item of list) {
+      if (typeof item === 'string') {
+        const s = item.trim().toLowerCase();
+        if (s && email && s === email) return 'ADMIN';
+        const p = normalizePhoneDigits(s);
+        if (p.length >= 10 && phoneDigits && p === phoneDigits) return 'ADMIN';
+        const c = normalizeCnicDigits(s);
+        if (c.length >= 13 && cnicDigits && c === cnicDigits) return 'ADMIN';
+      } else if (item && typeof item === 'object') {
+        if (item.isActive === false || item.is_active === false || item.disabled === true) continue;
+        const itemEmail = String(item.email || '').trim().toLowerCase();
+        const itemPhone = normalizePhoneDigits(String(item.phone || ''));
+        const itemCnic = normalizeCnicDigits(String(item.cnic || ''));
+        if (
+          (email && itemEmail && itemEmail === email) ||
+          (phoneDigits.length >= 10 && itemPhone && itemPhone === phoneDigits) ||
+          (cnicDigits.length >= 13 && itemCnic && itemCnic === cnicDigits)
+        ) {
+          return 'ADMIN';
+        }
+      }
+    }
+  }
+
+  return 'CLIENT';
+}
+
 export async function fetchMasterEngineConfigFromSupabase(): Promise<Record<string, any>> {
   const res = await callSupabaseProxy({
     table: 'app_configs',
@@ -645,16 +793,17 @@ export function parseTimestampMs(val: any): number {
 
 export interface ExistingComboMatchResult {
   matchedUser: any | null;
+  matchedClientUser: any | null;
   matchedSub: any | null;
   matchedUac: any | null;
   matchedFields: string[];
   existingDeviceId: string;
+  allowMultiAccount: boolean;
 }
 
 /**
- * Strict 6-Field Anti-Fake ID & One-Trial-Per-User Combo Check:
- * Matches ANY existing row in users, subscriptions, or userAccessControl on:
- * CNIC, Email, Phone Number, Device ID, Public IP Address, or MAC/Device Fingerprint.
+ * Strict Anti-Fake ID & Duplicate Account Check across users, client_users, subscriptions & userAccessControl:
+ * Matches CNIC, Email, Phone Number, Device ID, Public IP Address, or MAC/Device Fingerprint.
  */
 export function findExistingAccountComboMatch(params: {
   email?: string;
@@ -664,6 +813,7 @@ export function findExistingAccountComboMatch(params: {
   ipAddress?: string;
   macAddress?: string;
   usersList: any[];
+  clientUsersList?: any[];
   subsList: any[];
   uacList?: any[];
   identityOnly?: boolean;
@@ -714,7 +864,9 @@ export function findExistingAccountComboMatch(params: {
   };
 
   const matchedReasons = new Set<string>();
+  const matchedRows: any[] = [];
   let matchedUser: any | null = null;
+  let matchedClientUser: any | null = null;
   let matchedSub: any | null = null;
   let matchedUac: any | null = null;
 
@@ -722,7 +874,17 @@ export function findExistingAccountComboMatch(params: {
     const reasons = getRowMatchReasons(u);
     if (reasons.length > 0) {
       reasons.forEach((x) => matchedReasons.add(x));
+      matchedRows.push(u);
       if (!matchedUser) matchedUser = u;
+    }
+  }
+
+  for (const cu of params.clientUsersList || []) {
+    const reasons = getRowMatchReasons(cu);
+    if (reasons.length > 0) {
+      reasons.forEach((x) => matchedReasons.add(x));
+      matchedRows.push(cu);
+      if (!matchedClientUser) matchedClientUser = cu;
     }
   }
 
@@ -730,6 +892,7 @@ export function findExistingAccountComboMatch(params: {
     const reasons = getRowMatchReasons(s);
     if (reasons.length > 0) {
       reasons.forEach((x) => matchedReasons.add(x));
+      matchedRows.push(s);
       if (!matchedSub) matchedSub = s;
     }
   }
@@ -738,13 +901,18 @@ export function findExistingAccountComboMatch(params: {
     const reasons = getRowMatchReasons(a);
     if (reasons.length > 0) {
       reasons.forEach((x) => matchedReasons.add(x));
+      matchedRows.push(a);
       if (!matchedUac) matchedUac = a;
     }
   }
 
-  // Link companion user/sub row by existing matched record's identity or device_id
+  // Link companion user/client_user/sub row by existing matched record's identity or device_id
   const anchorDev = String(
-    matchedUser?.device_id || matchedSub?.device_id || matchedUac?.device_id || ''
+    matchedUser?.device_id ||
+      matchedClientUser?.device_id ||
+      matchedSub?.device_id ||
+      matchedUac?.device_id ||
+      ''
   ).trim();
   if (!matchedSub && anchorDev && !anchorDev.startsWith('RESET_')) {
     matchedSub =
@@ -754,31 +922,56 @@ export function findExistingAccountComboMatch(params: {
     matchedUser =
       (params.usersList || []).find((u) => String(u?.device_id || '').trim() === anchorDev) || null;
   }
+  if (!matchedClientUser && anchorDev && !anchorDev.startsWith('RESET_')) {
+    matchedClientUser =
+      (params.clientUsersList || []).find((u) => String(u?.device_id || '').trim() === anchorDev) ||
+      null;
+  }
 
   const existingDeviceId = String(
-    matchedUser?.device_id || matchedSub?.device_id || matchedUac?.device_id || matchedUac?.deviceId || ''
+    matchedUser?.device_id ||
+      matchedClientUser?.device_id ||
+      matchedSub?.device_id ||
+      matchedUac?.device_id ||
+      matchedUac?.deviceId ||
+      ''
   ).trim();
+
+  const allowMultiAccount = Boolean(
+    matchedRows.length > 0 &&
+      matchedRows.some(
+        (r) =>
+          r?.allow_multi_account === true ||
+          r?.allowMultiAccount === true ||
+          String(r?.allow_multi_account || '').toLowerCase() === 'true'
+      )
+  );
 
   return {
     matchedUser,
+    matchedClientUser,
     matchedSub,
     matchedUac,
     matchedFields: Array.from(matchedReasons),
     existingDeviceId,
+    allowMultiAccount,
   };
 }
 
 export interface EvaluatedCloudAccess {
   status: 'ACTIVE' | 'TRIAL' | 'BLOCKED' | 'FREE';
   tier: string;
+  userRole: BossUserRole;
   expiresAt: number | null;
   serverNowMs: number;
   reason: string;
   isExpired: boolean;
   forceResetLogout: boolean;
   forceLogoutReason: string;
+  sessionConflict: boolean;
   cloudDeviceId: string;
   matchedUser: any | null;
+  matchedClientUser: any | null;
   matchedSub: any | null;
   matchedUac: any | null;
 }
@@ -813,15 +1006,44 @@ export function evaluateClientAccessState(params: {
 
   const matchesRecord = (r: any) => {
     if (!r || typeof r !== 'object') return false;
-    const dev = String(r.device_id || r.deviceId || '').trim();
-    if (dev && clientDeviceId && dev === clientDeviceId) return true;
+    const em = String(r.email || '').trim().toLowerCase();
+    if (targetEmail && em && em === targetEmail) return true;
     const p = normalizePhoneDigits(r.phone || '');
     if (targetPhoneDigits && p && p === targetPhoneDigits) return true;
     const c = normalizeCnicDigits(r.cnic || '');
     if (targetCnicDigits && c && c === targetCnicDigits) return true;
-    const em = String(r.email || '').trim().toLowerCase();
-    if (targetEmail && em && em === targetEmail) return true;
+    const dev = String(r.device_id || r.deviceId || '').trim();
+    if (dev && clientDeviceId && dev === clientDeviceId) return true;
     return false;
+  };
+
+  const findBestMatchedRecord = (list: any[]) => {
+    if (!Array.isArray(list) || list.length === 0) return null;
+    if (targetEmail) {
+      const byEmail = list.find(
+        (r) => r && String(r.email || '').trim().toLowerCase() === targetEmail
+      );
+      if (byEmail) return byEmail;
+    }
+    if (targetPhoneDigits) {
+      const byPhone = list.find(
+        (r) => r && normalizePhoneDigits(r.phone || '') === targetPhoneDigits
+      );
+      if (byPhone) return byPhone;
+    }
+    if (targetCnicDigits) {
+      const byCnic = list.find(
+        (r) => r && normalizeCnicDigits(r.cnic || '') === targetCnicDigits
+      );
+      if (byCnic) return byCnic;
+    }
+    if (clientDeviceId) {
+      const byDev = list.find(
+        (r) => r && String(r.device_id || r.deviceId || '').trim() === clientDeviceId
+      );
+      if (byDev) return byDev;
+    }
+    return null;
   };
 
   const matchesHardwareOrNetwork = (r: any) => {
@@ -834,16 +1056,18 @@ export function evaluateClientAccessState(params: {
     return false;
   };
 
-  const matchedUser =
-    usersList.find(matchesRecord) || clientUsersList.find(matchesRecord) || null;
-  const matchedSub = subsList.find(matchesRecord) || null;
+  const matchedUser = findBestMatchedRecord(usersList);
+  const matchedClientUser = findBestMatchedRecord(clientUsersList);
+  const effectiveUser = matchedUser || matchedClientUser;
+  const matchedSub = findBestMatchedRecord(subsList);
   const uacList = Array.isArray(masterCfg?.userAccessControl)
     ? masterCfg.userAccessControl
     : Object.values(masterCfg?.userAccessControl || {});
-  const matchedUac: any = uacList.find(matchesRecord) || null;
+  const matchedUac: any = findBestMatchedRecord(uacList);
 
   const deviceCandidates = [
     matchedUser?.device_id,
+    matchedClientUser?.device_id,
     matchedSub?.device_id,
     matchedUac?.device_id,
     matchedUac?.deviceId,
@@ -854,9 +1078,23 @@ export function evaluateClientAccessState(params: {
   const resetDeviceId = deviceCandidates.find((d) => d.startsWith('RESET_')) || '';
   const cloudDeviceId = resetDeviceId || deviceCandidates[0] || '';
 
+  // Single-Device Active Session Check (active_session_token)
+  const cloudSessionToken = String(
+    matchedUser?.active_session_token || matchedClientUser?.active_session_token || ''
+  ).trim();
+  const localSessionToken = String(
+    session?.activeSessionToken || loadActiveSessionToken() || ''
+  ).trim();
+  const sessionConflict = Boolean(
+    session &&
+      cloudSessionToken &&
+      cloudSessionToken !== localSessionToken
+  );
+
   // Check if Admin triggered RESET_ OR force_logout_at is newer than session.loggedInAt
   const forceLogoutTs = Math.max(
     parseTimestampMs(matchedUser?.force_logout_at),
+    parseTimestampMs(matchedClientUser?.force_logout_at),
     parseTimestampMs(matchedSub?.force_logout_at),
     parseTimestampMs(matchedUac?.force_logout_at),
     parseTimestampMs(matchedUac?.forceLogoutAt)
@@ -887,8 +1125,9 @@ export function evaluateClientAccessState(params: {
 
   // Check if any matching record (Account, Device ID, IP, MAC, CNIC, or Email) is blocked
   const blockedAnyRecord =
-    [matchedUser, matchedSub, matchedUac].find(isRowBlocked) ||
+    [matchedUser, matchedClientUser, matchedSub, matchedUac].find(isRowBlocked) ||
     usersList.find((r) => matchesHardwareOrNetwork(r) && isRowBlocked(r)) ||
+    clientUsersList.find((r) => matchesHardwareOrNetwork(r) && isRowBlocked(r)) ||
     subsList.find((r) => matchesHardwareOrNetwork(r) && isRowBlocked(r)) ||
     uacList.find((r: any) => matchesHardwareOrNetwork(r) && isRowBlocked(r)) ||
     null;
@@ -911,32 +1150,43 @@ export function evaluateClientAccessState(params: {
 
   const isBlockedFlag = Boolean(blockedAnyRecord || isMasterBlocklisted);
 
-  const isOwnerUser =
-    isOwnerIdentity({
-      email: targetEmail || matchedUser?.email || matchedSub?.email || matchedUac?.email,
-      phone: targetPhoneDigits || matchedUser?.phone || matchedSub?.phone || matchedUac?.phone,
-      cnic: targetCnicDigits || matchedUser?.cnic || matchedSub?.cnic || matchedUac?.cnic,
-      masterCfg,
-    }) ||
-    Boolean(
-      matchedUser?.is_owner ||
-        matchedUser?.is_admin ||
-        matchedUac?.isOwner ||
-        matchedUac?.is_owner ||
-        matchedUac?.isAdmin ||
-        matchedUac?.is_admin ||
-        ['OWNER', 'ADMIN', 'SUPER_ADMIN', 'MASTER_ADMIN'].includes(
-          String(matchedUser?.role || matchedUac?.role || '').toUpperCase()
-        )
-    );
+  const userRole = resolveUserRole({
+    email:
+      targetEmail ||
+      matchedUser?.email ||
+      matchedClientUser?.email ||
+      matchedSub?.email ||
+      matchedUac?.email,
+    phone:
+      targetPhoneDigits ||
+      matchedUser?.phone ||
+      matchedClientUser?.phone ||
+      matchedSub?.phone ||
+      matchedUac?.phone,
+    cnic:
+      targetCnicDigits ||
+      matchedUser?.cnic ||
+      matchedClientUser?.cnic ||
+      matchedSub?.cnic ||
+      matchedUac?.cnic,
+    matchedUser,
+    matchedClientUser,
+    matchedSub,
+    matchedUac,
+    masterCfg,
+  });
+
+  const isOwnerUser = userRole === 'OWNER';
 
   const isLifetimeFlag = Boolean(
     isOwnerUser ||
-      matchedUser?.is_lifetime ||
+      effectiveUser?.is_lifetime ||
+      matchedClientUser?.is_lifetime ||
       matchedSub?.is_lifetime ||
       matchedUac?.is_lifetime ||
       matchedUac?.isLifetimeFree ||
-      String(matchedUser?.subscription_tier || '').toUpperCase() === 'LIFETIME_VIP' ||
+      String(effectiveUser?.subscription_tier || '').toUpperCase() === 'LIFETIME_VIP' ||
+      String(matchedClientUser?.subscription_tier || '').toUpperCase() === 'LIFETIME_VIP' ||
       String(matchedSub?.subscription_tier || '').toUpperCase() === 'LIFETIME_VIP' ||
       String(matchedUac?.subscription_tier || '').toUpperCase() === 'LIFETIME_VIP' ||
       String(matchedUac?.packagePlan || '').toUpperCase() === 'LIFETIME_VIP'
@@ -953,6 +1203,10 @@ export function evaluateClientAccessState(params: {
       matchedUser?.activated_until,
       matchedUser?.subscription_expiry,
       matchedUser?.trial_end,
+      matchedClientUser?.activated_until_ms,
+      matchedClientUser?.activated_until,
+      matchedClientUser?.subscription_expiry,
+      matchedClientUser?.trial_end,
       matchedUac?.subscription_expiry,
       matchedUac?.subscriptionExpiresAt,
       matchedUac?.activatedUntil,
@@ -969,6 +1223,8 @@ export function evaluateClientAccessState(params: {
       matchedUser?.trial_start,
       matchedUser?.trial_start_time,
       matchedUser?.registered_at_epoch_ms,
+      matchedClientUser?.trial_start,
+      matchedClientUser?.trial_start_time,
       matchedUac?.trial_start_time,
       matchedUac?.trialStartTime,
       session?.trialStartTime,
@@ -981,9 +1237,10 @@ export function evaluateClientAccessState(params: {
     isOwnerUser ||
       matchedSub?.is_activated ||
       matchedUser?.is_activated ||
-      String(matchedUser?.account_status || '').toUpperCase() === 'ACTIVE' ||
-      String(matchedUser?.account_status || '').toUpperCase() === 'APPROVED' ||
-      String(matchedUser?.status || '').toUpperCase() === 'ACTIVE' ||
+      matchedClientUser?.is_activated ||
+      String(effectiveUser?.account_status || '').toUpperCase() === 'ACTIVE' ||
+      String(effectiveUser?.account_status || '').toUpperCase() === 'APPROVED' ||
+      String(effectiveUser?.status || '').toUpperCase() === 'ACTIVE' ||
       String(matchedSub?.status || '').toUpperCase() === 'ACTIVE' ||
       matchedUac?.is_activated ||
       matchedUac?.isPaidActive
@@ -1000,7 +1257,7 @@ export function evaluateClientAccessState(params: {
     reason =
       blockedAnyRecord?.block_reason ||
       blockedAnyRecord?.blockReason ||
-      matchedUser?.block_reason ||
+      effectiveUser?.block_reason ||
       matchedUac?.block_reason ||
       matchedUac?.blockReason ||
       'Suspended by Master Admin';
@@ -1012,8 +1269,8 @@ export function evaluateClientAccessState(params: {
     const cloudTier = String(
       matchedSub?.subscription_tier ||
         matchedSub?.package_name ||
-        matchedUser?.subscription_tier ||
-        matchedUser?.package_name ||
+        effectiveUser?.subscription_tier ||
+        effectiveUser?.package_name ||
         matchedUac?.subscription_tier ||
         matchedUac?.packagePlan ||
         matchedUac?.planName ||
@@ -1079,14 +1336,17 @@ export function evaluateClientAccessState(params: {
   return {
     status,
     tier,
+    userRole,
     expiresAt,
     serverNowMs: effectiveServerNowMs,
     reason,
     isExpired,
     forceResetLogout: isOwnerUser ? false : forceResetLogout,
     forceLogoutReason: isOwnerUser ? '' : forceLogoutReason,
+    sessionConflict,
     cloudDeviceId,
-    matchedUser,
+    matchedUser: effectiveUser,
+    matchedClientUser,
     matchedSub,
     matchedUac,
   };
@@ -1640,6 +1900,12 @@ export async function collectAndSyncUserTelemetryToSupabase(params: {
     const now = Date.now();
     const nowIso = new Date(now).toISOString();
 
+    const isOwner = isOwnerIdentity({
+      email: params.session?.email,
+      phone: params.session?.phone,
+      cnic: params.session?.cnic,
+    });
+
     const payload: Record<string, any> = {
       ip_address: ip || undefined,
       mac_address: mac,
@@ -1665,6 +1931,18 @@ export async function collectAndSyncUserTelemetryToSupabase(params: {
             latitude: gps.latitude,
             longitude: gps.longitude,
             location_url: gps.locationUrl,
+          }
+        : {}),
+      ...(isOwner
+        ? {
+            is_activated: true,
+            is_lifetime: true,
+            is_blocked: false,
+            block_reason: '',
+            account_status: 'ACTIVE',
+            status: 'ACTIVE',
+            subscription_tier: 'LIFETIME_VIP',
+            package_name: 'Lifetime Free VIP Package',
           }
         : {}),
       ...(params.extraFields || {}),

@@ -42,23 +42,38 @@ export const GAUGES = [
   'Std',
 ];
 
-// Supports both legacy grouped colors and the 12 individual fixed colors from the Industrial Rate Scanner
+// Default finish colors ensuring H.23, BLACK, BROWN, SAHARA, PC-RAL, WOOD COAT, ANODIZED, CHAMPAGNE are always available
+export const REQUIRED_DEFAULT_FINISH_COLORS = [
+  'DULL',
+  'H.23',
+  'BLACK',
+  'BROWN',
+  'SAHARA',
+  'PC-RAL',
+  'WOOD COAT',
+  'ANODIZED',
+  'CHAMPAGNE',
+];
+
+// Supports both required defaults, legacy grouped colors, and individual fixed colors from the Industrial Rate Scanner
 export const DEFAULT_COLORS = [
   'DULL',
+  'H.23',
+  'BLACK',
+  'BROWN',
+  'SAHARA',
+  'PC-RAL',
+  'WOOD COAT',
+  'ANODIZED',
+  'CHAMPAGNE',
+  'H23',
   'H23/PC-RAL',
   'SAHARA/BROWN',
   'BLACK/MULTI',
-  'WOOD COAT',
-  'H23',
-  'PC-RAL',
-  'SAHARA',
-  'BROWN',
-  'BLACK',
   'MULTI',
   'NATURAL',
   'D.SHINE',
   'SS DESIGNER',
-  'ANODIZED',
 ];
 
 export const INDUSTRIAL_FIXED_CATEGORIES = [
@@ -101,6 +116,7 @@ export const INDUSTRIAL_FIXED_COLORS = [
 
 export const DEFAULT_GLASS_COLORS_5MM = ['CLEAR', 'GREEN', 'BLUE', 'BRONZE', 'GREY', 'REFLECTIVE'];
 export const DEFAULT_GLASS_COLORS_8MM = ['CLEAR', 'GREEN', 'BLUE', 'BRONZE', 'GREY', 'FROSTED'];
+export const DEFAULT_GLASS_COLORS_DG = ['CLEAR', 'GREEN', 'BLUE', 'FROSTED'];
 
 export const DEFAULT_SECTIONS = [
   // DG.SERIES (Official Boss & Prime DG Series Master Profiles)
@@ -239,6 +255,7 @@ export function getInitialRates(): Record<string, Record<string, Record<string, 
   const colorMultipliers: Record<string, number> = {
     DULL: 1.0,
     'H23/PC-RAL': 1.05,
+    'H.23': 1.05,
     H23: 1.05,
     'PC-RAL': 1.05,
     'SAHARA/BROWN': 1.07,
@@ -252,6 +269,7 @@ export function getInitialRates(): Record<string, Record<string, Record<string, 
     'D.SHINE': 1.1,
     'SS DESIGNER': 1.18,
     ANODIZED: 1.06,
+    CHAMPAGNE: 1.08,
   };
 
   GAUGES.forEach((g) => {
@@ -406,11 +424,13 @@ export function mergeDgSeriesRates(
         // Direct colors from rate sheet
         applyRate(g, 'DULL', code, Math.round(item.rates.DULL * factor));
         applyRate(g, 'BROWN', code, Math.round(item.rates.BROWN * factor));
+        applyRate(g, 'H.23', code, Math.round(item.rates.H23 * factor));
         applyRate(g, 'H23', code, Math.round(item.rates.H23 * factor));
         applyRate(g, 'PC-RAL', code, Math.round(item.rates['PC-RAL'] * factor));
         applyRate(g, 'BLACK', code, Math.round(item.rates.BLACK * factor));
         applyRate(g, 'SAHARA', code, Math.round(item.rates.SAHARA * factor));
         applyRate(g, 'WOOD COAT', code, Math.round(item.rates['WOOD COAT'] * factor));
+        applyRate(g, 'CHAMPAGNE', code, Math.round(item.rates.H23 * 1.04 * factor));
 
         // Combined / legacy color chip aliases
         applyRate(g, 'H23/PC-RAL', code, Math.round(item.rates.H23 * factor));
@@ -464,7 +484,89 @@ export function getInitialGlassRates(): Record<string, Record<string, number>> {
       REFLECTIVE: 430,
       FROSTED: 410,
     },
+    DG: {
+      CLEAR: 450,
+      GREEN: 480,
+      BLUE: 500,
+      FROSTED: 650,
+    },
   };
+}
+
+export function mergeGlassRatesWithDefaults(
+  incoming?: Record<string, Record<string, number>> | null
+): Record<string, Record<string, number>> {
+  const defaults = getInitialGlassRates();
+  const next: Record<string, Record<string, number>> = {
+    '5': { ...defaults['5'] },
+    '8': { ...defaults['8'] },
+    DG: { ...defaults.DG },
+  };
+  if (incoming && typeof incoming === 'object') {
+    Object.entries(incoming).forEach(([gaugeKey, colMap]) => {
+      if (!colMap || typeof colMap !== 'object' || Object.keys(colMap).length === 0) return;
+      const normalizedKey =
+        gaugeKey.trim().toUpperCase() === 'DG' ? 'DG' : gaugeKey.trim();
+      next[normalizedKey] = {
+        ...(next[normalizedKey] || {}),
+        ...colMap,
+      };
+    });
+  }
+  return next;
+}
+
+export function mergeAvailableColorsWithDefaults(colors?: string[] | null): string[] {
+  const set = new Set<string>();
+  const addClean = (val: string) => {
+    const clean = String(val || '').trim().toUpperCase();
+    if (clean) set.add(clean);
+  };
+  (colors || []).forEach(addClean);
+  REQUIRED_DEFAULT_FINISH_COLORS.forEach(addClean);
+  return Array.from(set);
+}
+
+export function resolveSectionRate(
+  rates: Record<string, Record<string, Record<string, number>>> | undefined,
+  gauge: string,
+  color: string,
+  section: string
+): number {
+  if (!rates || !section) return 0;
+  const col = String(color || 'DULL').trim().toUpperCase();
+  const colorCandidates = Array.from(
+    new Set(
+      [
+        col,
+        col === 'H.23' ? 'H23' : col === 'H23' ? 'H.23' : '',
+        col.replace(/\./g, ''),
+        col === 'H.23' || col === 'H23' || col === 'PC-RAL' ? 'H23/PC-RAL' : '',
+        col === 'SAHARA' || col === 'BROWN' ? 'SAHARA/BROWN' : '',
+        col === 'BLACK' || col === 'MULTI' ? 'BLACK/MULTI' : '',
+        'DULL',
+      ].filter(Boolean)
+    )
+  );
+  const secCandidates = Array.from(
+    new Set([section, section.replace(/\./g, '')].filter(Boolean))
+  );
+  const gaugeCandidates = Array.from(new Set([gauge, '1.6', '1.2'].filter(Boolean)));
+
+  for (const g of gaugeCandidates) {
+    const gMap = rates[g];
+    if (!gMap) continue;
+    for (const c of colorCandidates) {
+      const cMap = gMap[c];
+      if (!cMap) continue;
+      for (const s of secCandidates) {
+        if (typeof cMap[s] === 'number') {
+          return cMap[s];
+        }
+      }
+    }
+  }
+  return 0;
 }
 
 export function getDefaultWindowFormula(): WindowFormulaSettings {

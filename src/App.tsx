@@ -2,7 +2,6 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   CheckCircle2,
   Download,
-  ExternalLink,
   Monitor,
   Smartphone,
   X,
@@ -56,6 +55,8 @@ import {
   getInitialRates,
   getStarterBankAccounts,
   getStarterPackages,
+  mergeAvailableColorsWithDefaults,
+  mergeGlassRatesWithDefaults,
 } from './utils/bossDefaultRates';
 import bossLionLogoImg from './assets/images/boss_lion_logo_1791741005749.jpg';
 import bossLetterheadCleanImg from './assets/images/boss_letterhead_bg_1791741019302.jpg';
@@ -73,6 +74,8 @@ import {
   SubscriptionExpiredLockModal,
 } from './components/AccountLockModals';
 import {
+  BossUserRole,
+  clearActiveSessionToken,
   clearAuthSession,
   ClientAuthSession,
   collectAndSyncUserTelemetryToSupabase,
@@ -81,6 +84,7 @@ import {
   getOrCreateClientDeviceId,
   getOrCreateDeviceMacFingerprint,
   isOwnerIdentity,
+  loadActiveSessionToken,
   loadAuthSession,
   loadCachedMasterEngineConfig,
   markUserOfflineInSupabase,
@@ -159,7 +163,8 @@ function canonicalizeTabKey(rawKey: string): string {
   const cleaned = String(rawKey || '')
     .trim()
     .toUpperCase()
-    .replace(/[\s.-]+/g, '_');
+    .replace(/[^A-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
   if (!cleaned) return '';
   return TAB_KEY_ALIASES[cleaned] || cleaned;
 }
@@ -282,7 +287,9 @@ export default function App() {
   const [glassFittingOption, setGlassFittingOption] = useState<'FIX_RUBBER' | 'U_PVC'>('FIX_RUBBER');
 
   // Catalog, Rates & Visibility
-  const [availableColors, setAvailableColors] = useState<string[]>(DEFAULT_COLORS);
+  const [availableColors, setAvailableColors] = useState<string[]>(() =>
+    mergeAvailableColorsWithDefaults(DEFAULT_COLORS)
+  );
   const [customSections, setCustomSections] = useState<string[]>([
     'CW50-MULLION',
     'CW50-TRANSOM',
@@ -394,6 +401,14 @@ export default function App() {
   const [layoutConfig, setLayoutConfig] = useState<ClientAppLayoutControlConfig>(() =>
     getDefaultLayoutControlConfig()
   );
+  const [userLockedTabs, setUserLockedTabs] = useState<Record<string, boolean>>(() => {
+    try {
+      const rawUl = localStorage.getItem(USER_LOCKED_TABS_KEY);
+      return rawUl ? normalizeLockedTabsMap(JSON.parse(rawUl)) : {};
+    } catch {
+      return {};
+    }
+  });
   const [mainLogoUrl, setMainLogoUrl] = useState<string>(bossLionLogoImg);
   const [letterheadBgUrl, setLetterheadBgUrl] = useState<string>(bossLetterheadCleanImg);
   const lastAppliedAdminThemeHashRef = useRef<string>('');
@@ -419,6 +434,7 @@ export default function App() {
   const [cloudAccessInfo, setCloudAccessInfo] = useState<{
     status: 'ACTIVE' | 'TRIAL' | 'BLOCKED' | 'FREE';
     tier: string;
+    role?: BossUserRole;
     expiresAt: number | null;
     serverNowMs?: number;
     reason: string;
@@ -438,6 +454,7 @@ export default function App() {
       return {
         status: 'FREE',
         tier: 'LIFETIME_VIP',
+        role: 'OWNER',
         expiresAt: null,
         serverNowMs: 0,
         reason: '',
@@ -447,6 +464,7 @@ export default function App() {
     return {
       status: 'TRIAL',
       tier: 'CLIENT',
+      role: initialSession?.userRole || 'CLIENT',
       expiresAt: null,
       serverNowMs: 0,
       reason: '',
@@ -465,12 +483,12 @@ export default function App() {
   );
 
   // PWA Install & Mobile Theme Studio State
-  const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
-  const isPromptingInstallRef = useRef(false);
+  const { isInstalled } = usePWAInstall();
   const wasOfflineRef = useRef(
     typeof navigator !== 'undefined' && navigator.onLine === false
   );
   const [showInstallModal, setShowInstallModal] = useState(false);
+  const [showIosInstallGuide, setShowIosInstallGuide] = useState(false);
   const [showThemeStudio, setShowThemeStudio] = useState(false);
   const [currentTheme, setCurrentTheme] = useState<AppThemeConfig>(() => {
     try {
@@ -954,7 +972,7 @@ export default function App() {
       }
       const incomingCols = sectionsCfg.availableColors || globalCfg.availableColors;
       if (Array.isArray(incomingCols) && incomingCols.length > 0) {
-        setAvailableColors(incomingCols);
+        setAvailableColors(mergeAvailableColorsWithDefaults(incomingCols));
       }
       const incomingHidden = sectionsCfg.hiddenSections || globalCfg.hiddenSections;
       if (Array.isArray(incomingHidden)) {
@@ -1029,6 +1047,11 @@ export default function App() {
 
       const cloudRates = ratesCfg.rates || globalCfg.rates;
       const cloudGlassRates = ratesCfg.glassRates || globalCfg.glassRates;
+      const nextMergedGlassRates =
+        shouldApplyCloudRates && cloudGlassRates && typeof cloudGlassRates === 'object'
+          ? mergeGlassRatesWithDefaults(cloudGlassRates)
+          : null;
+
       if (shouldApplyCloudRates && cloudRates && typeof cloudRates === 'object') {
         const mergedRates: Record<string, Record<string, Record<string, number>>> = JSON.parse(
           JSON.stringify(getInitialRates())
@@ -1039,15 +1062,23 @@ export default function App() {
           Object.entries(colObj).forEach(([col, secObj]: [string, any]) => {
             if (!secObj || typeof secObj !== 'object') return;
             mergedRates[g][col] = { ...(mergedRates[g][col] || {}), ...secObj };
+            if (col === 'H23') {
+              mergedRates[g]['H.23'] = { ...(mergedRates[g]['H.23'] || {}), ...secObj };
+            } else if (col === 'H.23') {
+              mergedRates[g]['H23'] = { ...(mergedRates[g]['H23'] || {}), ...secObj };
+            }
           });
         });
         setRates(mergedRates);
         if (forceRates) {
-          persistRatesSnapshotToDevice(mergedRates, cloudGlassRates || glassRates);
+          persistRatesSnapshotToDevice(mergedRates, nextMergedGlassRates || glassRates);
         }
       }
-      if (shouldApplyCloudRates && cloudGlassRates && typeof cloudGlassRates === 'object') {
-        setGlassRates((prev) => ({ ...prev, ...cloudGlassRates }));
+      if (nextMergedGlassRates) {
+        setGlassRates(nextMergedGlassRates);
+        if (forceRates && (!cloudRates || typeof cloudRates !== 'object')) {
+          persistRatesSnapshotToDevice(rates, nextMergedGlassRates);
+        }
       }
 
       // 6. Live Admin Access Control (Block Account/Device/IP/MAC/CNIC/Email, Remote force_logout_at & RESET_, VIP, Trial/Subscription Expiry)
@@ -1068,7 +1099,7 @@ export default function App() {
         serverNowMs,
       });
 
-      // Also apply per-user locked_tabs from users / client_users / subscriptions / userAccessControl (without Owner VIP bypass)
+      // Also compute per-user locked_tabs from users / client_users / subscriptions / userAccessControl (without Owner VIP bypass)
       const userLevelLockedTabs = normalizeLockedTabsMap(
         evaluated.matchedSub?.locked_tabs,
         evaluated.matchedSub?.lockedTabs,
@@ -1076,37 +1107,21 @@ export default function App() {
         evaluated.matchedUac?.lockedTabs,
         evaluated.matchedUser?.locked_tabs,
         evaluated.matchedUser?.lockedTabs,
-        evaluated.matchedUser?.layout_config?.lockedTabs
+        evaluated.matchedClientUser?.locked_tabs,
+        evaluated.matchedClientUser?.lockedTabs,
+        evaluated.matchedUser?.layout_config?.lockedTabs,
+        evaluated.matchedClientUser?.layout_config?.lockedTabs
       );
       try {
         localStorage.setItem(USER_LOCKED_TABS_KEY, JSON.stringify(userLevelLockedTabs));
       } catch {
         // ignore storage errors
       }
-      if (Object.keys(userLevelLockedTabs).length > 0) {
-        setLayoutConfig((prev) => {
-          const baseLocked = hasLockedTabsPayload
-            ? {
-                ...incomingLockedTabs,
-                DG_WINDOWS:
-                  'DG_WINDOWS' in incomingLockedTabs ? incomingLockedTabs.DG_WINDOWS : true,
-              }
-            : {
-                DG_WINDOWS: true,
-                ...(prev.lockedTabs || {}),
-              };
-          const mergedLocked = {
-            ...baseLocked,
-            ...userLevelLockedTabs,
-          };
-          return {
-            ...prev,
-            lockedTabs: {
-              ...mergedLocked,
-              DG_WINDOWS: 'DG_WINDOWS' in mergedLocked ? mergedLocked.DG_WINDOWS : true,
-            },
-          };
-        });
+      setUserLockedTabs(userLevelLockedTabs);
+
+      if (evaluated.sessionConflict) {
+        triggerSessionConflictLogout();
+        return false;
       }
 
       const isOwnerAccount = Boolean(
@@ -1121,6 +1136,12 @@ export default function App() {
 
       if (evaluated.forceResetLogout && !isOwnerAccount) {
         clearAuthSession();
+        clearActiveSessionToken();
+        clearInitialSyncCompletedFlag();
+        try {
+          localStorage.removeItem(USER_LOCKED_TABS_KEY);
+        } catch {}
+        setUserLockedTabs({});
         supabase.auth.signOut().catch(() => {});
         markUserOfflineInSupabase(clientDeviceId);
         setAuthSession(null);
@@ -1132,12 +1153,23 @@ export default function App() {
         return true;
       }
 
+      const resolvedRole: BossUserRole = isOwnerAccount ? 'OWNER' : evaluated.userRole || 'CLIENT';
+      if (activeSession && activeSession.userRole !== resolvedRole) {
+        const syncedSess: ClientAuthSession = {
+          ...activeSession,
+          userRole: resolvedRole,
+        };
+        saveAuthSession(syncedSess);
+        setAuthSession(syncedSess);
+      }
+
       const syncStamp = evaluated.serverNowMs > 0 ? evaluated.serverNowMs : Date.now();
       setCloudAccessInfo(
         isOwnerAccount
           ? {
               status: 'FREE',
               tier: 'LIFETIME_VIP',
+              role: 'OWNER',
               expiresAt: null,
               serverNowMs: syncStamp,
               reason: '',
@@ -1146,6 +1178,7 @@ export default function App() {
           : {
               status: evaluated.status,
               tier: evaluated.tier,
+              role: resolvedRole,
               expiresAt: evaluated.expiresAt,
               serverNowMs: evaluated.serverNowMs,
               reason: evaluated.reason,
@@ -1174,6 +1207,74 @@ export default function App() {
     } finally {
       setIsSyncingCloud(false);
     }
+  };
+
+  const triggerSessionConflictLogout = () => {
+    clearAuthSession();
+    clearActiveSessionToken();
+    clearInitialSyncCompletedFlag();
+    try {
+      localStorage.removeItem(USER_LOCKED_TABS_KEY);
+    } catch {}
+    setUserLockedTabs({});
+    supabase.auth.signOut().catch(() => {});
+    setAuthSession(null);
+    setIsSubscriptionExpired(false);
+    setCloudAccessInfo({
+      status: 'TRIAL',
+      tier: 'CLIENT',
+      role: 'CLIENT',
+      expiresAt: null,
+      reason: '',
+      lastSyncedAt: null,
+    });
+    setAuthNotice('Your ID was logged in on another device.');
+  };
+
+  const verifySingleDeviceSessionOnline = async (
+    sessionOverride?: ClientAuthSession | null
+  ): Promise<boolean> => {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return true;
+    const activeSess = sessionOverride !== undefined ? sessionOverride : authSession;
+    if (!activeSess?.verified) return true;
+    const localToken = String(
+      activeSess.activeSessionToken || loadActiveSessionToken() || ''
+    ).trim();
+    if (!localToken) return true;
+
+    try {
+      const [usersRes, clientUsersRes] = await Promise.all([
+        callSupabaseProxy({
+          table: 'users',
+          method: 'GET',
+          query: 'select=device_id,email,phone,cnic,active_session_token&limit=250',
+          timeoutMs: 6000,
+        }),
+        callSupabaseProxy({
+          table: 'client_users',
+          method: 'GET',
+          query: 'select=device_id,email,phone,cnic,active_session_token&limit=250',
+          timeoutMs: 6000,
+        }),
+      ]);
+      if (!usersRes.ok && !clientUsersRes.ok) return true;
+
+      const evalRes = evaluateClientAccessState({
+        session: activeSess,
+        clientDeviceId: activeSess.deviceId || clientDeviceId,
+        usersList: Array.isArray(usersRes.data) ? usersRes.data : [],
+        clientUsersList: Array.isArray(clientUsersRes.data) ? clientUsersRes.data : [],
+        subsList: [],
+        masterCfg: loadCachedMasterEngineConfig(),
+      });
+      if (evalRes.sessionConflict) {
+        triggerSessionConflictLogout();
+        return false;
+      }
+    } catch {
+      // non-fatal network failure
+    }
+    return true;
   };
 
   const loadSupportRequests = async (
@@ -1399,6 +1500,13 @@ export default function App() {
         error: 'Internet band hai (Offline). Support message send karne ke liye internet ON karein.',
       };
     }
+    const isSessionValid = await verifySingleDeviceSessionOnline();
+    if (!isSessionValid) {
+      return {
+        ok: false,
+        error: 'Your ID was logged in on another device.',
+      };
+    }
     setIsSubmittingSupportRequest(true);
     try {
       const nowIso = new Date().toISOString();
@@ -1484,6 +1592,8 @@ export default function App() {
     shopPhotoUrl?: string;
   }) => {
     if (!authSession?.verified) return;
+    const isSessionValid = await verifySingleDeviceSessionOnline();
+    if (!isSessionValid) return;
     const updatedSession: ClientAuthSession = {
       ...authSession,
       ...(profilePatch.companyName !== undefined
@@ -1512,21 +1622,26 @@ export default function App() {
     setAuthSession(session);
     setAuthNotice(null);
     setIsSubscriptionExpired(false);
-    if (
-      isOwnerIdentity({
-        email: session.email,
-        phone: session.phone,
-        cnic: session.cnic,
-        masterCfg: loadCachedMasterEngineConfig(),
-      })
-    ) {
+    const isOwner = isOwnerIdentity({
+      email: session.email,
+      phone: session.phone,
+      cnic: session.cnic,
+      masterCfg: loadCachedMasterEngineConfig(),
+    });
+    if (isOwner) {
       setCloudAccessInfo({
         status: 'FREE',
         tier: 'LIFETIME_VIP',
+        role: 'OWNER',
         expiresAt: null,
         reason: '',
         lastSyncedAt: Date.now(),
       });
+    } else {
+      setCloudAccessInfo((prev) => ({
+        ...prev,
+        role: session.userRole || 'CLIENT',
+      }));
     }
     if (session.companyName && session.companyName.trim()) {
       setCompanyName(session.companyName.trim());
@@ -1548,16 +1663,19 @@ export default function App() {
   const handleLogout = () => {
     markUserOfflineInSupabase(clientDeviceId);
     clearAuthSession();
+    clearActiveSessionToken();
     clearInitialSyncCompletedFlag();
     try {
       localStorage.removeItem(USER_LOCKED_TABS_KEY);
     } catch {}
+    setUserLockedTabs({});
     supabase.auth.signOut().catch(() => {});
     setAuthSession(null);
     setIsSubscriptionExpired(false);
     setCloudAccessInfo({
       status: 'TRIAL',
       tier: 'CLIENT',
+      role: 'CLIENT',
       expiresAt: null,
       reason: '',
       lastSyncedAt: null,
@@ -1715,18 +1833,12 @@ export default function App() {
         }
         if (Array.isArray(parsed.supportRequests)) setSupportRequests(parsed.supportRequests);
         if (parsed.layoutConfig || cachedM?.layoutConfig || cachedM?.lockedTabs || cachedM?.tabLocks || cachedM?.lockedPages) {
-          let storedUserLocks: any = {};
-          try {
-            const rawUl = localStorage.getItem(USER_LOCKED_TABS_KEY);
-            if (rawUl) storedUserLocks = JSON.parse(rawUl);
-          } catch {}
           const cachedLockedMerged = normalizeLockedTabsMap(
             parsed.layoutConfig?.lockedTabs,
             cachedM?.tabLocks,
             cachedM?.lockedPages,
             cachedM?.lockedTabs,
-            cachedM?.layoutConfig?.lockedTabs,
-            storedUserLocks
+            cachedM?.layoutConfig?.lockedTabs
           );
           setLayoutConfig((prev) => ({
             ...prev,
@@ -1761,8 +1873,10 @@ export default function App() {
         if (parsed.currentTheme) setCurrentTheme(enforceReadableContrast(parsed.currentTheme));
         if (parsed.downloadedThemes) setDownloadedThemes(parsed.downloadedThemes);
         setDeletedBackupVault([]);
-        if (parsed.glassRates) setGlassRates(parsed.glassRates);
-        if (parsed.availableColors?.length) setAvailableColors(parsed.availableColors);
+        if (parsed.glassRates) setGlassRates(mergeGlassRatesWithDefaults(parsed.glassRates));
+        if (parsed.availableColors?.length) {
+          setAvailableColors(mergeAvailableColorsWithDefaults(parsed.availableColors));
+        }
         if (parsed.customSections) setCustomSections(parsed.customSections);
         if (parsed.hiddenSections) setHiddenSections(parsed.hiddenSections);
         if (typeof parsed.hardwareRate === 'number') setHardwareRate(parsed.hardwareRate);
@@ -1784,6 +1898,7 @@ export default function App() {
           setCloudAccessInfo({
             status: 'FREE',
             tier: 'LIFETIME_VIP',
+            role: 'OWNER',
             expiresAt: null,
             serverNowMs: getEffectiveServerNowMs(),
             reason: '',
@@ -1791,7 +1906,10 @@ export default function App() {
           });
           setIsSubscriptionExpired(false);
         } else if (parsed.cloudAccessInfo && initialSess) {
-          setCloudAccessInfo(parsed.cloudAccessInfo);
+          setCloudAccessInfo({
+            ...parsed.cloudAccessInfo,
+            role: parsed.cloudAccessInfo.role || initialSess.userRole || 'CLIENT',
+          });
           const knownServerNow = getEffectiveServerNowMs() || Number(parsed.cloudAccessInfo.serverNowMs || 0);
           const cachedExp = Number(parsed.cloudAccessInfo.expiresAt || 0);
           const isCachedNonFree =
@@ -1878,8 +1996,12 @@ export default function App() {
       if (devRaw) {
         const devParsed = JSON.parse(devRaw);
         if (!raw && devParsed.rates) setRates(devParsed.rates);
-        if (!raw && devParsed.glassRates) setGlassRates(devParsed.glassRates);
-        if (!raw && devParsed.availableColors?.length) setAvailableColors(devParsed.availableColors);
+        if (!raw && devParsed.glassRates) {
+          setGlassRates(mergeGlassRatesWithDefaults(devParsed.glassRates));
+        }
+        if (!raw && devParsed.availableColors?.length) {
+          setAvailableColors(mergeAvailableColorsWithDefaults(devParsed.availableColors));
+        }
         if (!raw && devParsed.customSections) setCustomSections(devParsed.customSections);
         if (!raw && devParsed.hiddenSections) setHiddenSections(devParsed.hiddenSections);
         if (typeof devParsed.savedAt === 'number') setRateListSavedAt(devParsed.savedAt);
@@ -2028,9 +2150,9 @@ export default function App() {
     };
   }, [authSession?.verified, clientDeviceId]);
 
-  // Sync Main Logo to Browser Favicon (keep PNG apple-touch-icon intact for iOS Safari)
+  // Sync Main Logo to Browser Favicon (keep Golden Lion PNG icons intact by default)
   useEffect(() => {
-    if (!mainLogoUrl) return;
+    if (!mainLogoUrl || mainLogoUrl === bossLionLogoImg) return;
     document
       .querySelectorAll<HTMLLinkElement>('link[rel="icon"]')
       .forEach((link) => {
@@ -2306,9 +2428,16 @@ export default function App() {
         }
         nextRates[g][col][code] = Math.round(r.rate);
 
-        if (col === 'H23' || col === 'PC-RAL') {
+        if (col === 'H23' || col === 'H.23' || col === 'PC-RAL') {
           if (!nextRates[g]['H23/PC-RAL']) nextRates[g]['H23/PC-RAL'] = {};
           nextRates[g]['H23/PC-RAL'][code] = Math.round(r.rate);
+          if (col === 'H23') {
+            if (!nextRates[g]['H.23']) nextRates[g]['H.23'] = {};
+            nextRates[g]['H.23'][code] = Math.round(r.rate);
+          } else if (col === 'H.23') {
+            if (!nextRates[g]['H23']) nextRates[g]['H23'] = {};
+            nextRates[g]['H23'][code] = Math.round(r.rate);
+          }
         }
         if (col === 'SAHARA' || col === 'BROWN') {
           if (!nextRates[g]['SAHARA/BROWN']) nextRates[g]['SAHARA/BROWN'] = {};
@@ -2677,23 +2806,9 @@ export default function App() {
           <AppLayoutCalculatorScreen
           isInstalled={isInstalled}
           currentThemeName={currentTheme.name}
-          onTriggerInstall={async () => {
-            if (isPromptingInstallRef.current) return;
-            isPromptingInstallRef.current = true;
-            try {
-              if (isInstallable) {
-                const outcome = await install();
-                if (outcome === 'installed') {
-                  triggerGlobalToast('✅ App installed on your device!');
-                  return;
-                }
-              }
-              setShowInstallModal(true);
-            } finally {
-              setTimeout(() => {
-                isPromptingInstallRef.current = false;
-              }, 350);
-            }
+          onTriggerInstall={() => {
+            setShowIosInstallGuide(false);
+            setShowInstallModal(true);
           }}
           currentTab={currentCalcTab}
           onSelectTab={setCurrentCalcTab}
@@ -2781,15 +2896,21 @@ export default function App() {
           onUpdateProjectExtras={setProjectExtras}
           rates={rates}
           onUpdateSectionRate={(g, c, sec, r) => {
+            const nextG = {
+              ...(rates[g] || {}),
+              [c]: {
+                ...(rates[g]?.[c] || {}),
+                [sec]: r,
+              },
+            };
+            if (c === 'H.23') {
+              nextG['H23'] = { ...(nextG['H23'] || {}), [sec]: r };
+            } else if (c === 'H23') {
+              nextG['H.23'] = { ...(nextG['H.23'] || {}), [sec]: r };
+            }
             setRates({
               ...rates,
-              [g]: {
-                ...(rates[g] || {}),
-                [c]: {
-                  ...(rates[g]?.[c] || {}),
-                  [sec]: r,
-                },
-              },
+              [g]: nextG,
             });
           }}
           glassRates={glassRates}
@@ -2805,16 +2926,22 @@ export default function App() {
           onAddGlassColor={handleAddGlassColor}
           onDeleteGlassColor={handleDeleteGlassColor}
           onAddGlassGauge={(gm: string) => {
-            const clean = gm.replace(/[^0-9.]/g, '').trim();
+            const rawUpper = gm.trim().toUpperCase();
+            const clean = rawUpper === 'DG' ? 'DG' : gm.replace(/[^0-9.]/g, '').trim();
             if (!clean) return;
             setGlassRates((prev) => {
               if (prev[clean]) return prev;
               return {
                 ...prev,
-                [clean]: { CLEAR: 260, GREEN: 290, BLUE: 300 },
+                [clean]:
+                  clean === 'DG'
+                    ? { CLEAR: 450, GREEN: 480, BLUE: 500, FROSTED: 650 }
+                    : { CLEAR: 260, GREEN: 290, BLUE: 300 },
               };
             });
-            triggerGlobalToast(`Added ${clean}mm Glass Gauge!`);
+            triggerGlobalToast(
+              clean === 'DG' ? 'Added DG Glass Gauge!' : `Added ${clean}mm Glass Gauge!`
+            );
           }}
           onDeleteGlassGauge={(gm: string) => {
             setGlassRates((prev) => {
@@ -2919,6 +3046,7 @@ export default function App() {
           onApplyRateListRows={handleApplyRateListRows}
           onBulkAdjustRatesPct={handleBulkAdjustRatesPct}
           layoutConfig={layoutConfig}
+          userLockedTabs={userLockedTabs}
           onUpdateLayoutConfig={setLayoutConfig}
           onExportFullBackup={() => {
             const raw = localStorage.getItem(STORAGE_KEY) || '{}';
@@ -3025,49 +3153,14 @@ export default function App() {
               </button>
             </div>
 
-            {/* Action Buttons: 1-Click Browser Install + Admin Android APK / Windows EXE / iOS Links */}
+            {/* Action Buttons: Android APK / Windows EXE / Apple iPhone iPad (iOS) Guide */}
             {(() => {
               const androidDownloadUrl =
                 mobileDownloadConfig?.androidUrl || mobileDownloadConfig?.androidApkUrl || '';
               const windowsDownloadUrl = mobileDownloadConfig?.windowsUrl || '';
-              const iosDownloadUrl =
-                mobileDownloadConfig?.iosUrl ||
-                mobileDownloadConfig?.iosDownloadUrl ||
-                mobileDownloadConfig?.iosAppUrl ||
-                '';
 
               return (
                 <div className="space-y-2">
-                  {/* Top: 1-Click Native Browser Install App Button */}
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      const out = await install();
-                      if (out === 'installed') {
-                        setShowInstallModal(false);
-                        triggerGlobalToast('✅ App installed on your device!');
-                      } else if (out === 'ios-share' || out === 'ios-manual') {
-                        triggerGlobalToast(
-                          '📱 iPhone/iPad: Safari mein Share button daba kar "Add to Home Screen" select karein.'
-                        );
-                      } else if (out === 'manual') {
-                        triggerGlobalToast(
-                          '💡 Browser address bar ke "Install App" icon ya menu (⋮ -> Install App) se install karein.'
-                        );
-                      }
-                    }}
-                    className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-[#F5B738] hover:bg-amber-400 text-black font-black text-xs flex items-center justify-center gap-2 cursor-pointer"
-                  >
-                    <Download className="w-4 h-4" />
-                    <span>
-                      {isInstallable
-                        ? 'Install App Now (1-Click)'
-                        : isInstalled
-                        ? 'App Already Installed'
-                        : 'Install App Now'}
-                    </span>
-                  </button>
-
                   {/* Android APK Download Button */}
                   {androidDownloadUrl ? (
                     <a
@@ -3122,29 +3215,29 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Apple iPhone / iPad (iOS) Install Link / Guide */}
-                  {iosDownloadUrl ? (
-                    <a
-                      href={iosDownloadUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-sky-500 hover:bg-sky-400 text-black font-black text-xs flex items-center justify-center gap-2 cursor-pointer"
-                    >
-                      <Smartphone className="w-4 h-4" />
-                      <span>
-                        Apple iPhone / iPad (iOS) Install Link
-                        {mobileDownloadConfig?.iosVersion
-                          ? ` · v${mobileDownloadConfig.iosVersion}`
-                          : ''}
-                      </span>
-                    </a>
-                  ) : (
-                    <div className="w-full py-2 px-3 rounded-xl bg-[#14181F] border border-sky-500/30 text-sky-300 font-bold text-[11px] flex items-center justify-between gap-2">
-                      <span className="flex items-center gap-2">
-                        <Smartphone className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-                        <span>Apple iPhone / iPad (iOS) Guide</span>
-                      </span>
-                      <span className="text-[10px] text-slate-400">Safari → Share → Add</span>
+                  {/* Apple iPhone / iPad (iOS) Inline Visual Guide Button (Never opens new tab) */}
+                  <button
+                    type="button"
+                    onClick={() => setShowIosInstallGuide((prev) => !prev)}
+                    className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-sky-500 hover:bg-sky-400 text-black font-black text-xs flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <Smartphone className="w-4 h-4" />
+                    <span>
+                      Apple iPhone / iPad (iOS)
+                      {mobileDownloadConfig?.iosVersion
+                        ? ` · v${mobileDownloadConfig.iosVersion}`
+                        : ''}
+                    </span>
+                  </button>
+
+                  {showIosInstallGuide && (
+                    <div className="p-3 rounded-xl bg-sky-950/60 border border-sky-400/70 text-sky-100 text-[11.5px] leading-relaxed space-y-1.5">
+                      <div className="font-black text-sky-300 text-xs">
+                        iPhone / iPad Par App Install Karne Ka Tarika:
+                      </div>
+                      <p>
+                        Browser ke Share (⬆️) icon par tap karein → &apos;Add to Home Screen&apos; chunein → &apos;Add&apos; dabayein.
+                      </p>
                     </div>
                   )}
 
@@ -3153,18 +3246,6 @@ export default function App() {
                       <strong className="text-[#F5B738]">Update Notes:</strong>{' '}
                       {mobileDownloadConfig.releaseNotes}
                     </div>
-                  )}
-
-                  {typeof window !== 'undefined' && window.self !== window.top && (
-                    <a
-                      href={window.location.href}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-emerald-500/20 border border-emerald-500/60 hover:bg-emerald-500 hover:text-black text-emerald-300 font-black text-xs flex items-center justify-center gap-2 cursor-pointer"
-                    >
-                      <ExternalLink className="w-4 h-4" />
-                      <span>Open Full Screen in Browser to Install</span>
-                    </a>
                   )}
                 </div>
               );
