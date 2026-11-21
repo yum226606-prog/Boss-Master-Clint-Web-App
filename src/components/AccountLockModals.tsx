@@ -20,7 +20,7 @@ import {
   BankAccountConfig,
   SubscriptionPackageConfig,
 } from '../types/bossModels';
-import { ClientAuthSession, fetchAdminServer } from '../utils/adminApiConfig';
+import { ClientAuthSession, upsertClientSubscriptionOrder } from '../utils/adminApiConfig';
 import {
   callSupabaseProxy,
   uploadImageToUserUploadsBucket,
@@ -238,24 +238,6 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
     } catch {
       // ignore direct check error
     }
-
-    try {
-      const resp = await fetchAdminServer(
-        `/api/client-order-status/${encodeURIComponent(clientDeviceId)}`
-      );
-      const data = await resp.json();
-      if (data?.ok && data?.latestOrder) {
-        setActiveOrder(data.latestOrder);
-        if (
-          data.latestOrder.status === 'APPROVED_AUTO' ||
-          data.latestOrder.status === 'APPROVED_MANUAL'
-        ) {
-          await onRefreshCloudStatus();
-        }
-      }
-    } catch {
-      // ignore offline check
-    }
   };
 
   useEffect(() => {
@@ -296,45 +278,19 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
     setIsSubmitting(true);
     setOrderNotice(null);
     try {
-      const now = Date.now();
-      const nowIso = new Date(now).toISOString();
-      const subPayload: Record<string, any> = {
-        device_id: clientDeviceId,
-        user_name: authSession.name || 'Client',
+      const sbSubRes = await upsertClientSubscriptionOrder({
+        deviceId: clientDeviceId,
+        userName: authSession.name || 'Client',
         phone: authSession.phone || '',
         email: authSession.email || '',
         cnic: authSession.cnic || '',
-        package_name: pkg?.name || 'Monthly Pro Plan',
-        subscription_tier: pkg?.planCode || 'MONTHLY',
+        packageName: pkg?.name || 'Monthly Pro Plan',
+        subscriptionTier: pkg?.planCode || 'MONTHLY',
         amount: pkgAmount,
-        payment_method: selectedBank,
-        last_payment_tid: cleanTid,
-        ...(receiptUrl ? { receipt_url: receiptUrl } : {}),
-        status: 'PENDING',
-        last_updated: now,
-        updated_at: nowIso,
-      };
-
-      const [sbSubRes] = await Promise.all([
-        callSupabaseProxy({
-          table: 'subscriptions',
-          method: 'POST',
-          upsert: true,
-          payload: subPayload,
-          timeoutMs: 12000,
-        }),
-        callSupabaseProxy({
-          table: 'users',
-          method: 'PATCH',
-          query: `device_id=eq.${encodeURIComponent(clientDeviceId)}`,
-          payload: {
-            last_payment_tid: cleanTid,
-            package_name: pkg?.name || 'Monthly Pro Plan',
-            last_cloud_sync: now,
-          },
-          timeoutMs: 8000,
-        }).catch(() => ({ ok: false })),
-      ]);
+        paymentMethod: selectedBank,
+        lastPaymentTid: cleanTid,
+        receiptUrl,
+      });
 
       if (!sbSubRes.ok) {
         setOrderNotice(sbSubRes.error || 'Supabase par payment details save nahi ho sakin.');
@@ -353,42 +309,6 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
       setOrderNotice(
         '✅ Payment TID aur Receipt Supabase par Admin Panel ko send ho chuki hai! Verify hote hi App unlock ho jaye gi.'
       );
-
-      // Non-fatal optional ping to Admin Webhook server for instant email robot matching
-      const bankObj =
-        bankAccounts.find((b) => b.bankName === selectedBank) || bankAccounts[0];
-      fetchAdminServer('/api/client-submit-order', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          deviceId: clientDeviceId,
-          clientName: authSession.name,
-          clientPhone: authSession.phone,
-          clientEmail: authSession.email,
-          clientCnic: authSession.cnic,
-          packageId: pkg?.id || 'pkg-custom',
-          packageName: pkg?.name || 'Monthly Pro Plan',
-          planCode: pkg?.planCode || 'MONTHLY',
-          durationMonths: pkg?.durationMonths || 1,
-          amountRs: pkgAmount,
-          bankAccountId: bankObj?.id || '',
-          bankName: selectedBank,
-          accountTitle: bankObj?.accountTitle || 'Syed Saboor Nawab',
-          accountNumber: bankObj?.accountNumber || '03105524225',
-          tid: cleanTid,
-          receiptUrl,
-        }),
-        timeoutMs: 6000,
-      })
-        .then(async (r) => {
-          const d = await r.json().catch(() => ({}));
-          if (d?.ok && d?.isApprovedNow) {
-            setActiveOrder(d.order);
-            setOrderNotice('🎉 Payment Verify ho gayi! App unlock ho rahi hai...');
-            await onRefreshCloudStatus();
-          }
-        })
-        .catch(() => {});
     } catch (err: any) {
       setOrderNotice(err?.message || 'Payment submit karte waqt error aaya.');
     } finally {

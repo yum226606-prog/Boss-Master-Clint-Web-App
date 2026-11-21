@@ -61,9 +61,9 @@ import {
 import {
   BossUserRole,
   ClientAuthSession,
-  fetchAdminServer,
   isOwnerIdentity,
   loadCachedMasterEngineConfig,
+  upsertClientSubscriptionOrder,
 } from '../utils/adminApiConfig';
 import {
   callSupabaseProxy,
@@ -624,7 +624,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     }
   }, [bankAccounts, orderBankName]);
 
-  // Poll Supabase subscriptions + optional webhook server for order status
+  // Check Supabase subscriptions table directly for order status (no broken /api/ calls)
   const checkClientOrderStatus = async () => {
     if (!clientDeviceId) return;
     try {
@@ -655,19 +655,6 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
           });
         }
         if (isApproved) {
-          setIsOrderAutoApproved(true);
-          onSyncFromSupabase?.({ forceRates: false, silent: true });
-          return;
-        }
-      }
-
-      const res = await fetchAdminServer(
-        `/api/client-order-status/${encodeURIComponent(clientDeviceId)}`
-      );
-      const data = await res.json();
-      if (data.ok && data.latestOrder) {
-        setActiveClientOrder(data.latestOrder);
-        if (data.latestOrder.status === 'APPROVED_AUTO' || data.latestOrder.status === 'APPROVED_MANUAL') {
           setIsOrderAutoApproved(true);
           onSyncFromSupabase?.({ forceRates: false, silent: true });
         }
@@ -725,45 +712,20 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
 
     try {
       setIsSubmittingOrder(true);
-      const now = Date.now();
-      const nowIso = new Date(now).toISOString();
 
-      // 1. Direct Supabase subscriptions & users sync
-      const [sbSubRes] = await Promise.all([
-        callSupabaseProxy({
-          table: 'subscriptions',
-          method: 'POST',
-          upsert: true,
-          payload: {
-            device_id: clientDeviceId,
-            user_name: cleanClientName,
-            phone: cleanClientPhone,
-            email: authSession?.email || '',
-            cnic: authSession?.cnic || '',
-            package_name: pkgToOrder.name,
-            subscription_tier: pkgToOrder.planCode || 'MONTHLY',
-            amount: amountVal,
-            payment_method: orderBankName,
-            last_payment_tid: cleanTid,
-            ...(orderReceiptUrl ? { receipt_url: orderReceiptUrl } : {}),
-            status: 'PENDING',
-            last_updated: now,
-            updated_at: nowIso,
-          },
-          timeoutMs: 12000,
-        }),
-        callSupabaseProxy({
-          table: 'users',
-          method: 'PATCH',
-          query: `device_id=eq.${encodeURIComponent(clientDeviceId)}`,
-          payload: {
-            last_payment_tid: cleanTid,
-            package_name: pkgToOrder.name,
-            last_cloud_sync: now,
-          },
-          timeoutMs: 8000,
-        }).catch(() => ({ ok: false })),
-      ]);
+      const sbSubRes = await upsertClientSubscriptionOrder({
+        deviceId: clientDeviceId,
+        userName: cleanClientName,
+        phone: cleanClientPhone,
+        email: authSession?.email || '',
+        cnic: authSession?.cnic || '',
+        packageName: pkgToOrder.name,
+        subscriptionTier: pkgToOrder.planCode || 'MONTHLY',
+        amount: amountVal,
+        paymentMethod: orderBankName,
+        lastPaymentTid: cleanTid,
+        receiptUrl: orderReceiptUrl,
+      });
 
       if (!sbSubRes.ok) {
         showSettingsToast(sbSubRes.error || 'Could not save payment to Supabase. Try again.');
@@ -779,42 +741,6 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
         receiptUrl: orderReceiptUrl,
       });
       showSettingsToast('✅ Payment TID & Receipt sent directly to Admin Panel (Supabase)!');
-
-      // 2. Non-fatal optional webhook ping for automated bank-email matching
-      const selectedBankObj = bankAccounts.find((b) => b.bankName === orderBankName) || bankAccounts[0];
-      fetchAdminServer('/api/client-submit-order', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          deviceId: clientDeviceId,
-          clientName: cleanClientName,
-          clientPhone: cleanClientPhone,
-          clientEmail: authSession?.email || '',
-          clientCnic: authSession?.cnic || '',
-          packageId: pkgToOrder.id,
-          packageName: pkgToOrder.name,
-          planCode: pkgToOrder.planCode || 'MONTHLY',
-          durationMonths: pkgToOrder.durationMonths || 1,
-          amountRs: amountVal,
-          bankAccountId: selectedBankObj?.id || '',
-          bankName: orderBankName,
-          accountTitle: selectedBankObj?.accountTitle || 'Syed Saboor Nawab',
-          accountNumber: selectedBankObj?.accountNumber || '03105524225',
-          tid: cleanTid,
-          receiptUrl: orderReceiptUrl,
-        }),
-        timeoutMs: 6000,
-      })
-        .then(async (res) => {
-          const data = await res.json().catch(() => ({}));
-          if (res.ok && data?.ok && data.isApprovedNow) {
-            setActiveClientOrder(data.order);
-            setIsOrderAutoApproved(true);
-            showSettingsToast('🎉 Payment Verified! Your Account is Activated Automatically!');
-            onSyncFromSupabase?.({ forceRates: false, silent: true });
-          }
-        })
-        .catch(() => {});
     } catch (err: any) {
       showSettingsToast('Error submitting order: ' + err?.message);
     } finally {

@@ -258,6 +258,12 @@ export async function fetchSupabaseServerTimeMs(): Promise<number> {
   return getEffectiveServerNowMs();
 }
 
+const TRANSIENT_SUPABASE_STATUSES = new Set([521, 522, 525, 502, 503, 504]);
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function callSupabaseProxy(params: {
   table: string;
   method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
@@ -293,18 +299,54 @@ export async function callSupabaseProxy(params: {
   }
 
   const startTime = Date.now();
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), params.timeoutMs ?? 10000);
+  const perAttemptTimeoutMs = params.timeoutMs ?? 10000;
+  const maxRetries = 2; // 1 initial try + 2 retries (1s gap) on 521/522/525/502/503/504
+
+  const fetchWithTimeout = async (url: string, init: RequestInit): Promise<Response> => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), perAttemptTimeoutMs);
+    try {
+      const r = await fetch(url, { ...init, signal: controller.signal });
+      clearTimeout(timeoutId);
+      return r;
+    } catch (err) {
+      clearTimeout(timeoutId);
+      throw err;
+    }
+  };
 
   try {
     let activePayload = params.payload ? { ...params.payload } : undefined;
-    let resp = await fetch(targetUrl, {
-      method,
-      headers,
-      signal: controller.signal,
-      ...(activePayload && method !== 'GET' ? { body: JSON.stringify(activePayload) } : {}),
-    });
-    captureDateHeaderFromResponse(resp);
+    let resp: Response | null = null;
+    let lastNetworkErr: any = null;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        resp = await fetchWithTimeout(targetUrl, {
+          method,
+          headers,
+          ...(activePayload && method !== 'GET' ? { body: JSON.stringify(activePayload) } : {}),
+        });
+        captureDateHeaderFromResponse(resp);
+
+        if (TRANSIENT_SUPABASE_STATUSES.has(resp.status) && attempt < maxRetries) {
+          await sleepMs(1000);
+          continue;
+        }
+        break;
+      } catch (err: any) {
+        lastNetworkErr = err;
+        if (attempt < maxRetries) {
+          await sleepMs(1000);
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    if (!resp) {
+      throw lastNetworkErr || new Error('Network error');
+    }
 
     // If PostgREST reports PGRST204 ("Could not find the '<col>' column"), strip that column and retry cleanly
     let stripRetries = 0;
@@ -316,10 +358,9 @@ export async function callSupabaseProxy(params: {
       }
       delete activePayload[colMatch[1]];
       stripRetries++;
-      resp = await fetch(targetUrl, {
+      resp = await fetchWithTimeout(targetUrl, {
         method,
         headers,
-        signal: controller.signal,
         body: JSON.stringify(activePayload),
       });
       captureDateHeaderFromResponse(resp);
@@ -339,11 +380,10 @@ export async function callSupabaseProxy(params: {
           const patchUrl = `${urlBase}/rest/v1/${params.table}?${idKey}=eq.${encodeURIComponent(idVal)}`;
           const patchHeaders = { ...headers };
           delete patchHeaders['Prefer'];
-          const patchResp = await fetch(patchUrl, {
+          const patchResp = await fetchWithTimeout(patchUrl, {
             method: 'PATCH',
             headers: patchHeaders,
             body: JSON.stringify(activePayload),
-            signal: controller.signal,
           });
           captureDateHeaderFromResponse(patchResp);
           if (patchResp.ok) {
@@ -355,7 +395,6 @@ export async function callSupabaseProxy(params: {
       }
     }
 
-    clearTimeout(timeoutId);
     const latencyMs = Date.now() - startTime;
 
     if (resp.status === 204) {
@@ -380,7 +419,6 @@ export async function callSupabaseProxy(params: {
       error: !resp.ok ? data?.message || `Supabase Error (${resp.status})` : undefined,
     };
   } catch (e: any) {
-    clearTimeout(timeoutId);
     const latencyMs = Date.now() - startTime;
     return {
       ok: false,

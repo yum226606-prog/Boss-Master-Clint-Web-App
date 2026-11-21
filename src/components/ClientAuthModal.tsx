@@ -1163,7 +1163,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     const formattedPhone = formatPakPhone(rawId);
     const formattedCnic = cnicDigits.length === 13 ? formatPakCnic(rawId) : rawId;
 
-    // Targeted OR search across email, phone, and cnic in users & subscriptions + full list fallback
+    // Targeted OR search ONLY for matching email, phone, or CNIC (never downloads all users / 5MB full table)
     const orFilters: string[] = [];
     if (isEmailInput) {
       orFilters.push(`email.ilike.${encodeURIComponent(rawId.toLowerCase())}`);
@@ -1174,41 +1174,32 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     if (rawId !== formattedPhone) {
       orFilters.push(`phone.eq.${encodeURIComponent(rawId)}`);
     }
+    if (phoneDigits.length >= 10) {
+      orFilters.push(`phone.ilike.${encodeURIComponent(`*${phoneDigits}`)}`);
+    }
     if (cnicDigits.length >= 10) {
       orFilters.push(`cnic.eq.${encodeURIComponent(formattedCnic)}`);
       orFilters.push(`cnic.eq.${encodeURIComponent(cnicDigits)}`);
     }
-    const orQuery = orFilters.length > 0 ? `or=(${orFilters.join(',')})&select=*` : 'select=*&limit=250';
+    const orQuery = `or=(${Array.from(new Set(orFilters)).join(',')})&select=*&limit=5`;
 
-    const [directUserRes, directSubRes, allUsersRes, clientUsersRes, subsRes, masterCfg, publicIp, serverNowMs] = await Promise.all([
+    const [directUserRes, clientUsersRes, directSubRes, masterCfg, publicIp, serverNowMs] = await Promise.all([
       callSupabaseProxy({
         table: 'users',
         method: 'GET',
         query: orQuery,
-        timeoutMs: 8000,
-      }),
-      callSupabaseProxy({
-        table: 'subscriptions',
-        method: 'GET',
-        query: orQuery,
-        timeoutMs: 8000,
-      }),
-      callSupabaseProxy({
-        table: 'users',
-        method: 'GET',
-        query: 'select=*&limit=400',
         timeoutMs: 8000,
       }),
       callSupabaseProxy({
         table: 'client_users',
         method: 'GET',
-        query: 'select=*&limit=400',
+        query: orQuery,
         timeoutMs: 8000,
       }),
       callSupabaseProxy({
         table: 'subscriptions',
         method: 'GET',
-        query: 'select=*&limit=400',
+        query: orQuery,
         timeoutMs: 8000,
       }),
       fetchMasterEngineConfigFromSupabase(),
@@ -1234,22 +1225,25 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     };
 
     const directUsers = Array.isArray(directUserRes.data) ? directUserRes.data : [];
-    const directSubs = Array.isArray(directSubRes.data) ? directSubRes.data : [];
-    const usersList = Array.isArray(allUsersRes.data) ? allUsersRes.data : [];
     const clientUsersList = Array.isArray(clientUsersRes.data) ? clientUsersRes.data : [];
-    const subsList = Array.isArray(subsRes.data) ? subsRes.data : [];
+    const directSubs = Array.isArray(directSubRes.data) ? directSubRes.data : [];
+    const usersList = directUsers;
+    const subsList = directSubs;
     const uacList = Array.isArray(masterCfg?.userAccessControl)
       ? masterCfg.userAccessControl
       : Object.values(masterCfg?.userAccessControl || {});
 
     const matchedUser =
+      directUsers.find(matchesIdentity) ||
       directUsers[0] ||
-      usersList.find(matchesIdentity) ||
       null;
-    const matchedClientUser = clientUsersList.find(matchesIdentity) || null;
+    const matchedClientUser =
+      clientUsersList.find(matchesIdentity) ||
+      clientUsersList[0] ||
+      null;
     const matchedSub =
+      directSubs.find(matchesIdentity) ||
       directSubs[0] ||
-      subsList.find(matchesIdentity) ||
       null;
     const matchedUac: any = uacList.find(matchesIdentity) || null;
 

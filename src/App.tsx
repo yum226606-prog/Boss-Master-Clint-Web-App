@@ -75,6 +75,7 @@ import {
 } from './components/AccountLockModals';
 import {
   BossUserRole,
+  buildScopedUserQuery,
   clearActiveSessionToken,
   clearAuthSession,
   clearLastActiveAtMs,
@@ -564,27 +565,43 @@ export default function App() {
 
     setIsSyncingCloud(true);
     try {
+      const scopedUserQuery = buildScopedUserQuery({
+        deviceId: activeSession?.deviceId || clientDeviceId,
+        email: activeSession?.email,
+        phone: activeSession?.phone,
+        cnic: activeSession?.cnic,
+        select: '*',
+        limit: 5,
+      });
+      const emptyTableResult = { ok: true, status: 200, data: [] as any[] };
+
       const [cfgRes, usersRes, clientUsersRes, subsRes, clientIpAddress, serverNowMs] = await Promise.all([
         callSupabaseProxy({
           table: 'app_configs',
           method: 'GET',
           query: 'select=id,value',
         }),
-        callSupabaseProxy({
-          table: 'users',
-          method: 'GET',
-          query: 'select=*&limit=250',
-        }),
-        callSupabaseProxy({
-          table: 'client_users',
-          method: 'GET',
-          query: 'select=*&limit=250',
-        }),
-        callSupabaseProxy({
-          table: 'subscriptions',
-          method: 'GET',
-          query: 'select=*&limit=250',
-        }),
+        scopedUserQuery
+          ? callSupabaseProxy({
+              table: 'users',
+              method: 'GET',
+              query: scopedUserQuery,
+            })
+          : Promise.resolve(emptyTableResult),
+        scopedUserQuery
+          ? callSupabaseProxy({
+              table: 'client_users',
+              method: 'GET',
+              query: scopedUserQuery,
+            })
+          : Promise.resolve(emptyTableResult),
+        scopedUserQuery
+          ? callSupabaseProxy({
+              table: 'subscriptions',
+              method: 'GET',
+              query: scopedUserQuery,
+            })
+          : Promise.resolve(emptyTableResult),
         getClientPublicIpAddress(),
         fetchSupabaseServerTimeMs(),
       ]);
@@ -1294,17 +1311,27 @@ export default function App() {
     if (!localToken) return true;
 
     try {
+      const scopedTokenQuery = buildScopedUserQuery({
+        deviceId: activeSess.deviceId || clientDeviceId,
+        email: activeSess.email,
+        phone: activeSess.phone,
+        cnic: activeSess.cnic,
+        select: 'device_id,email,phone,cnic,active_session_token',
+        limit: 5,
+      });
+      if (!scopedTokenQuery) return true;
+
       const [usersRes, clientUsersRes] = await Promise.all([
         callSupabaseProxy({
           table: 'users',
           method: 'GET',
-          query: 'select=device_id,email,phone,cnic,active_session_token&limit=250',
+          query: scopedTokenQuery,
           timeoutMs: 6000,
         }),
         callSupabaseProxy({
           table: 'client_users',
           method: 'GET',
-          query: 'select=device_id,email,phone,cnic,active_session_token&limit=250',
+          query: scopedTokenQuery,
           timeoutMs: 6000,
         }),
       ]);
@@ -1343,7 +1370,7 @@ export default function App() {
       const sbRes = await callSupabaseProxy({
         table: 'messages',
         method: 'GET',
-        query: 'select=*&order=created_at.desc&limit=150',
+        query: 'select=*&order=created_at.desc&limit=50',
         timeoutMs: 8000,
       });
 
@@ -1363,8 +1390,10 @@ export default function App() {
             ''
         ).trim();
         const targetDevUp = targetDev.toUpperCase();
-        const mEmail = String(m.email || m.target_email || '').trim().toLowerCase();
-        const mPhoneDigits = normalizePhoneDigits(String(m.phone || m.target_phone || ''));
+        const mEmail = String(m.user_email || m.email || m.target_email || '').trim().toLowerCase();
+        const mPhoneDigits = normalizePhoneDigits(
+          String(m.user_phone || m.phone || m.target_phone || '')
+        );
         const senderRaw = String(
           m.sender || m.sender_role || m.role || m.direction || ''
         ).toLowerCase();
@@ -1422,8 +1451,8 @@ export default function App() {
           id: msgId,
           deviceId: targetDev || myDevice,
           userName: String(m.user_name || m.userName || (isFromAdmin ? 'Boss Admin' : 'Client')),
-          userPhone: String(m.phone || m.userPhone || ''),
-          userEmail: String(m.email || m.userEmail || ''),
+          userPhone: String(m.user_phone || m.phone || m.userPhone || ''),
+          userEmail: String(m.user_email || m.email || m.userEmail || ''),
           requestType: String(
             m.category ||
               m.subject ||
@@ -1563,22 +1592,16 @@ export default function App() {
       const nowIso = new Date().toISOString();
       const messagePayload = {
         device_id: clientDeviceId,
-        user_id: authSession?.userId || clientDeviceId,
-        category: payload.requestType || 'General Support',
         user_name: payload.userName || authSession?.name || 'Client',
-        phone: payload.userPhone || authSession?.phone || '',
-        email: payload.userEmail || authSession?.email || '',
+        user_phone: payload.userPhone || authSession?.phone || '',
+        user_email: payload.userEmail || authSession?.email || '',
         subject: payload.requestType || 'Support Request',
         message: payload.message,
-        text: payload.message,
-        sender: 'client',
         status: 'pending',
-        is_read: false,
-        is_resolved: false,
         created_at: nowIso,
       };
 
-      // Insert directly into Supabase "messages" table (no /api/ dependency)
+      // Insert directly into Supabase "messages" table with verified columns (no /api/ or extra column fallback)
       const sbMsgRes = await callSupabaseProxy({
         table: 'messages',
         method: 'POST',
@@ -1610,15 +1633,15 @@ export default function App() {
         id: String(insertedRow?.id || `msg-${Date.now()}`),
         deviceId: clientDeviceId,
         userName: messagePayload.user_name,
-        userPhone: messagePayload.phone,
+        userPhone: messagePayload.user_phone,
         userCnic: authSession?.cnic || '',
-        userEmail: String(messagePayload.email || ''),
-        requestType: messagePayload.category || messagePayload.subject,
+        userEmail: String(messagePayload.user_email || ''),
+        requestType: messagePayload.subject,
         message: payload.message,
         createdAt: insertedRow?.created_at
           ? new Date(insertedRow.created_at).getTime() || Date.now()
           : Date.now(),
-        isResolved: Boolean(insertedRow?.is_resolved),
+        isResolved: String(insertedRow?.status || '').toLowerCase() === 'resolved',
         resolvedBy: '',
         resolvedAt: 0,
         sender: 'CLIENT',

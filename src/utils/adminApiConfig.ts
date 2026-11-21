@@ -2170,3 +2170,175 @@ export async function markUserOfflineInSupabase(deviceId: string): Promise<void>
     // non-fatal
   }
 }
+
+/**
+ * Build a scoped PostgREST query for ONLY the current logged-in user (prevents full-table 250/400-row downloads).
+ */
+export function buildScopedUserQuery(params: {
+  deviceId?: string;
+  email?: string;
+  phone?: string;
+  cnic?: string;
+  select?: string;
+  limit?: number;
+}): string | null {
+  const filters: string[] = [];
+  const dev = String(params.deviceId || '').trim();
+  if (dev && dev !== 'DEV-CLIENT-DEFAULT' && !dev.startsWith('RESET_')) {
+    filters.push(`device_id.eq.${encodeURIComponent(dev)}`);
+  }
+  const email = String(params.email || '').trim().toLowerCase();
+  if (email && email.includes('@')) {
+    filters.push(`email.ilike.${encodeURIComponent(email)}`);
+  }
+  const rawPhone = String(params.phone || '').trim();
+  const phoneDigits = normalizePhoneDigits(rawPhone);
+  if (rawPhone) {
+    filters.push(`phone.eq.${encodeURIComponent(rawPhone)}`);
+  }
+  if (phoneDigits.length >= 10) {
+    filters.push(`phone.ilike.${encodeURIComponent(`*${phoneDigits}`)}`);
+  }
+  const rawCnic = String(params.cnic || '').trim();
+  const cnicDigits = normalizeCnicDigits(rawCnic);
+  if (rawCnic) {
+    filters.push(`cnic.eq.${encodeURIComponent(rawCnic)}`);
+  }
+  if (cnicDigits.length === 13) {
+    const formattedCnic = formatPakCnic(cnicDigits);
+    if (formattedCnic !== rawCnic) {
+      filters.push(`cnic.eq.${encodeURIComponent(formattedCnic)}`);
+    }
+    if (cnicDigits !== rawCnic) {
+      filters.push(`cnic.eq.${encodeURIComponent(cnicDigits)}`);
+    }
+  }
+  const uniqueFilters = Array.from(new Set(filters));
+  if (uniqueFilters.length === 0) return null;
+  const selectPart = params.select ? `select=${params.select}` : 'select=*';
+  const limitPart = `limit=${params.limit ?? 5}`;
+  return `or=(${uniqueFilters.join(',')})&${selectPart}&${limitPart}`;
+}
+
+/**
+ * Save a package purchase / payment TID directly to Supabase 'subscriptions' table.
+ * Checks by device_id or phone first and uses PATCH if a row exists, otherwise POSTs a new row (avoids 409 Conflict & 400 errors).
+ */
+export async function upsertClientSubscriptionOrder(params: {
+  deviceId: string;
+  userName: string;
+  phone: string;
+  email: string;
+  cnic: string;
+  packageName: string;
+  subscriptionTier: string;
+  amount: number;
+  paymentMethod: string;
+  lastPaymentTid: string;
+  receiptUrl?: string;
+}): Promise<{ ok: boolean; error?: string; status?: number }> {
+  const now = Date.now();
+  const nowIso = new Date(now).toISOString();
+  const cleanDev = String(params.deviceId || '').trim();
+  const cleanPhone = String(params.phone || '').trim();
+  const phoneDigits = normalizePhoneDigits(cleanPhone);
+
+  const lookupFilters: string[] = [];
+  if (cleanDev) {
+    lookupFilters.push(`device_id.eq.${encodeURIComponent(cleanDev)}`);
+  }
+  if (cleanPhone) {
+    lookupFilters.push(`phone.eq.${encodeURIComponent(cleanPhone)}`);
+  }
+  if (phoneDigits.length >= 10) {
+    lookupFilters.push(`phone.ilike.${encodeURIComponent(`*${phoneDigits}`)}`);
+  }
+
+  let existingRow: any = null;
+  if (lookupFilters.length > 0) {
+    const orFilter = `or=(${Array.from(new Set(lookupFilters)).join(',')})`;
+    let lookupRes = await callSupabaseProxy({
+      table: 'subscriptions',
+      method: 'GET',
+      query: `${orFilter}&select=id,device_id,phone&limit=5`,
+      timeoutMs: 8000,
+    });
+    if (!lookupRes.ok && lookupRes.status === 400) {
+      lookupRes = await callSupabaseProxy({
+        table: 'subscriptions',
+        method: 'GET',
+        query: `${orFilter}&select=device_id,phone&limit=5`,
+        timeoutMs: 8000,
+      });
+    }
+    if (lookupRes.ok && Array.isArray(lookupRes.data) && lookupRes.data.length > 0) {
+      existingRow =
+        lookupRes.data.find((r: any) => String(r?.device_id || '').trim() === cleanDev) ||
+        lookupRes.data[0];
+    }
+  }
+
+  const basePayload: Record<string, any> = {
+    device_id: cleanDev,
+    user_name: params.userName || 'Client',
+    phone: cleanPhone,
+    email: params.email || '',
+    cnic: params.cnic || '',
+    package_name: params.packageName,
+    subscription_tier: params.subscriptionTier || 'MONTHLY',
+    amount: params.amount,
+    payment_method: params.paymentMethod,
+    last_payment_tid: params.lastPaymentTid,
+    ...(params.receiptUrl ? { receipt_url: params.receiptUrl } : {}),
+    status: 'PENDING',
+    last_updated: now,
+    updated_at: nowIso,
+  };
+
+  let subWriteRes: { ok: boolean; error?: string; status?: number };
+  if (existingRow) {
+    const patchQuery = existingRow.id
+      ? `id=eq.${encodeURIComponent(String(existingRow.id))}`
+      : existingRow.device_id
+      ? `device_id=eq.${encodeURIComponent(String(existingRow.device_id))}`
+      : `phone=eq.${encodeURIComponent(String(existingRow.phone))}`;
+
+    subWriteRes = await callSupabaseProxy({
+      table: 'subscriptions',
+      method: 'PATCH',
+      query: patchQuery,
+      upsert: false,
+      payload: basePayload,
+      timeoutMs: 12000,
+    });
+  } else {
+    subWriteRes = await callSupabaseProxy({
+      table: 'subscriptions',
+      method: 'POST',
+      upsert: false,
+      payload: {
+        id: generateSafeUUID(),
+        ...basePayload,
+        created_at: nowIso,
+      },
+      timeoutMs: 12000,
+    });
+  }
+
+  if (cleanDev && !cleanDev.startsWith('RESET_')) {
+    await callSupabaseProxy({
+      table: 'users',
+      method: 'PATCH',
+      query: `device_id=eq.${encodeURIComponent(cleanDev)}`,
+      payload: {
+        last_payment_tid: params.lastPaymentTid,
+        package_name: params.packageName,
+        last_cloud_sync: now,
+      },
+      timeoutMs: 8000,
+    }).catch(() => {});
+  }
+
+  return subWriteRes;
+}
+
