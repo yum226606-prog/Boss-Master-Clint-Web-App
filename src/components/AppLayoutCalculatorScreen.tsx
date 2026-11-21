@@ -67,6 +67,7 @@ import {
 } from '../utils/adminApiConfig';
 import {
   callSupabaseProxy,
+  compressFileToJpegDataUrl,
   getEffectiveServerNowMs,
   uploadImageToUserUploadsBucket,
 } from '../utils/supabaseClientConfig';
@@ -602,6 +603,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   );
   const [orderTidInput, setOrderTidInput] = useState<string>('');
   const [orderReceiptUrl, setOrderReceiptUrl] = useState<string>('');
+  const [orderReceiptBase64, setOrderReceiptBase64] = useState<string>('');
   const [isUploadingOrderReceipt, setIsUploadingOrderReceipt] = useState<boolean>(false);
   const [orderClientName, setOrderClientName] = useState<string>(authSession?.name || customerName || 'Client');
   const [orderClientPhone, setOrderClientPhone] = useState<string>(authSession?.phone || customerPhone || '');
@@ -685,6 +687,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
         tag: 'payment_receipt',
       });
       setOrderReceiptUrl(uploaded.url);
+      setOrderReceiptBase64(uploaded.base64DataUrl);
       showSettingsToast('✅ Payment screenshot uploaded!');
     } catch {
       showSettingsToast('Could not read receipt screenshot. Try again.');
@@ -725,6 +728,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
         paymentMethod: orderBankName,
         lastPaymentTid: cleanTid,
         receiptUrl: orderReceiptUrl,
+        receiptBase64: orderReceiptBase64,
       });
 
       if (!sbSubRes.ok) {
@@ -753,22 +757,28 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     setTimeout(() => setSettingsNotice(null), 3200);
   };
 
-  const handleImageFileUpload = (
+  const handleImageFileUpload = async (
     e: React.ChangeEvent<HTMLInputElement>,
     cb: (dataUrl: string) => void,
     label: string
   ) => {
     const f = e.target.files?.[0];
-    if (!f) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        cb(reader.result);
-        showSettingsToast(`${label} updated!`);
-      }
-    };
-    reader.readAsDataURL(f);
     e.target.value = '';
+    if (!f) return;
+    try {
+      const compressedDataUrl = await compressFileToJpegDataUrl(f, 800, 0.65, 120 * 1024);
+      cb(compressedDataUrl);
+      showSettingsToast(`${label} updated!`);
+    } catch {
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (typeof reader.result === 'string') {
+          cb(reader.result);
+          showSettingsToast(`${label} updated!`);
+        }
+      };
+      reader.readAsDataURL(f);
+    }
   };
 
   // Active Shop Logo for Quotation & Charts (falls back to Official Golden Lion Main Icon if no custom Shop Logo is set)

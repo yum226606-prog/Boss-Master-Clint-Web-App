@@ -1165,25 +1165,41 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
 
     // Targeted OR search ONLY for matching email, phone, or CNIC (never downloads all users / 5MB full table)
     const orFilters: string[] = [];
+    const subPhoneFilters: string[] = [];
     if (isEmailInput) {
       orFilters.push(`email.ilike.${encodeURIComponent(rawId.toLowerCase())}`);
     }
     if (formattedPhone) {
-      orFilters.push(`phone.eq.${encodeURIComponent(formattedPhone)}`);
+      const f = `phone.eq.${encodeURIComponent(formattedPhone)}`;
+      orFilters.push(f);
+      subPhoneFilters.push(f);
     }
-    if (rawId !== formattedPhone) {
-      orFilters.push(`phone.eq.${encodeURIComponent(rawId)}`);
+    if (rawId !== formattedPhone && !isEmailInput) {
+      const f = `phone.eq.${encodeURIComponent(rawId)}`;
+      orFilters.push(f);
+      if (phoneDigits.length >= 7) {
+        subPhoneFilters.push(f);
+      }
     }
     if (phoneDigits.length >= 10) {
-      orFilters.push(`phone.ilike.${encodeURIComponent(`*${phoneDigits}`)}`);
+      const eq0 = `phone.eq.${encodeURIComponent(`0${phoneDigits}`)}`;
+      const eq92 = `phone.eq.${encodeURIComponent(`+92${phoneDigits}`)}`;
+      const eqRaw = `phone.eq.${encodeURIComponent(phoneDigits)}`;
+      orFilters.push(eq0, eq92, eqRaw);
+      subPhoneFilters.push(eq0, eq92);
     }
     if (cnicDigits.length >= 10) {
       orFilters.push(`cnic.eq.${encodeURIComponent(formattedCnic)}`);
       orFilters.push(`cnic.eq.${encodeURIComponent(cnicDigits)}`);
     }
     const orQuery = `or=(${Array.from(new Set(orFilters)).join(',')})&select=*&limit=5`;
+    const uniqueSubPhoneFilters = Array.from(new Set(subPhoneFilters));
+    const subOrQuery =
+      uniqueSubPhoneFilters.length > 0
+        ? `or=(${uniqueSubPhoneFilters.join(',')})&select=*&limit=5`
+        : null;
 
-    const [directUserRes, clientUsersRes, directSubRes, masterCfg, publicIp, serverNowMs] = await Promise.all([
+    const [directUserRes, clientUsersRes, initialSubRes, masterCfg, publicIp, serverNowMs] = await Promise.all([
       callSupabaseProxy({
         table: 'users',
         method: 'GET',
@@ -1196,16 +1212,48 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         query: orQuery,
         timeoutMs: 8000,
       }),
-      callSupabaseProxy({
-        table: 'subscriptions',
-        method: 'GET',
-        query: orQuery,
-        timeoutMs: 8000,
-      }),
+      subOrQuery
+        ? callSupabaseProxy({
+            table: 'subscriptions',
+            method: 'GET',
+            query: subOrQuery,
+            timeoutMs: 8000,
+          })
+        : Promise.resolve({ ok: true, status: 200, data: [] as any[] }),
       fetchMasterEngineConfigFromSupabase(),
       getClientPublicIpAddress(),
       fetchSupabaseServerTimeMs(),
     ]);
+
+    let directSubRes = initialSubRes;
+    const firstMatchedUser = Array.isArray(directUserRes.data) ? directUserRes.data[0] : null;
+    const firstMatchedClient = Array.isArray(clientUsersRes.data) ? clientUsersRes.data[0] : null;
+    const resolvedSubDev = String(
+      firstMatchedUser?.device_id || firstMatchedClient?.device_id || ''
+    ).trim();
+    const resolvedSubPhone = String(
+      firstMatchedUser?.phone || firstMatchedClient?.phone || ''
+    ).trim();
+    if (
+      (!Array.isArray(directSubRes.data) || directSubRes.data.length === 0) &&
+      (resolvedSubDev || resolvedSubPhone)
+    ) {
+      const subFallbackFilters: string[] = [];
+      if (resolvedSubDev && !resolvedSubDev.startsWith('RESET_')) {
+        subFallbackFilters.push(`device_id.eq.${encodeURIComponent(resolvedSubDev)}`);
+      }
+      if (resolvedSubPhone) {
+        subFallbackFilters.push(`phone.eq.${encodeURIComponent(resolvedSubPhone)}`);
+      }
+      if (subFallbackFilters.length > 0) {
+        directSubRes = await callSupabaseProxy({
+          table: 'subscriptions',
+          method: 'GET',
+          query: `or=(${Array.from(new Set(subFallbackFilters)).join(',')})&select=*&limit=5`,
+          timeoutMs: 7000,
+        });
+      }
+    }
 
     const matchesIdentity = (rec: any) => {
       if (!rec || typeof rec !== 'object') return false;

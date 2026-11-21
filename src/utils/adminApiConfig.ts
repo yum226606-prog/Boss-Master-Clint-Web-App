@@ -2197,7 +2197,9 @@ export function buildScopedUserQuery(params: {
     filters.push(`phone.eq.${encodeURIComponent(rawPhone)}`);
   }
   if (phoneDigits.length >= 10) {
-    filters.push(`phone.ilike.${encodeURIComponent(`*${phoneDigits}`)}`);
+    filters.push(`phone.eq.${encodeURIComponent(`0${phoneDigits}`)}`);
+    filters.push(`phone.eq.${encodeURIComponent(`+92${phoneDigits}`)}`);
+    filters.push(`phone.eq.${encodeURIComponent(phoneDigits)}`);
   }
   const rawCnic = String(params.cnic || '').trim();
   const cnicDigits = normalizeCnicDigits(rawCnic);
@@ -2221,8 +2223,39 @@ export function buildScopedUserQuery(params: {
 }
 
 /**
+ * Targeted PostgREST query specifically for 'subscriptions' using ONLY device_id.eq and phone.eq
+ * (avoids unquoted phone.ilike.* wildcards and unsupported columns that cause 400 Bad Request).
+ */
+export function buildScopedSubscriptionQuery(params: {
+  deviceId?: string;
+  phone?: string;
+  select?: string;
+  limit?: number;
+}): string | null {
+  const filters: string[] = [];
+  const dev = String(params.deviceId || '').trim();
+  if (dev && dev !== 'DEV-CLIENT-DEFAULT' && !dev.startsWith('RESET_')) {
+    filters.push(`device_id.eq.${encodeURIComponent(dev)}`);
+  }
+  const rawPhone = String(params.phone || '').trim();
+  const phoneDigits = normalizePhoneDigits(rawPhone);
+  if (rawPhone) {
+    filters.push(`phone.eq.${encodeURIComponent(rawPhone)}`);
+  }
+  if (phoneDigits.length >= 10) {
+    filters.push(`phone.eq.${encodeURIComponent(`0${phoneDigits}`)}`);
+    filters.push(`phone.eq.${encodeURIComponent(`+92${phoneDigits}`)}`);
+  }
+  const uniqueFilters = Array.from(new Set(filters));
+  if (uniqueFilters.length === 0) return null;
+  const selectPart = params.select ? `select=${params.select}` : 'select=*';
+  const limitPart = `limit=${params.limit ?? 5}`;
+  return `or=(${uniqueFilters.join(',')})&${selectPart}&${limitPart}`;
+}
+
+/**
  * Save a package purchase / payment TID directly to Supabase 'subscriptions' table.
- * Checks by device_id or phone first and uses PATCH if a row exists, otherwise POSTs a new row (avoids 409 Conflict & 400 errors).
+ * Checks by device_id or phone first (using exact .eq filters only) and uses PATCH if a row exists, otherwise POSTs a new row (avoids 409 Conflict & 400 errors).
  */
 export async function upsertClientSubscriptionOrder(params: {
   deviceId: string;
@@ -2236,6 +2269,7 @@ export async function upsertClientSubscriptionOrder(params: {
   paymentMethod: string;
   lastPaymentTid: string;
   receiptUrl?: string;
+  receiptBase64?: string;
 }): Promise<{ ok: boolean; error?: string; status?: number }> {
   const now = Date.now();
   const nowIso = new Date(now).toISOString();
@@ -2251,32 +2285,43 @@ export async function upsertClientSubscriptionOrder(params: {
     lookupFilters.push(`phone.eq.${encodeURIComponent(cleanPhone)}`);
   }
   if (phoneDigits.length >= 10) {
-    lookupFilters.push(`phone.ilike.${encodeURIComponent(`*${phoneDigits}`)}`);
+    lookupFilters.push(`phone.eq.${encodeURIComponent(`0${phoneDigits}`)}`);
   }
 
   let existingRow: any = null;
+  let schemaSampleRow: any = null;
   if (lookupFilters.length > 0) {
     const orFilter = `or=(${Array.from(new Set(lookupFilters)).join(',')})`;
-    let lookupRes = await callSupabaseProxy({
+    const lookupRes = await callSupabaseProxy({
       table: 'subscriptions',
       method: 'GET',
-      query: `${orFilter}&select=id,device_id,phone&limit=5`,
+      query: `${orFilter}&select=*&limit=5`,
       timeoutMs: 8000,
     });
-    if (!lookupRes.ok && lookupRes.status === 400) {
-      lookupRes = await callSupabaseProxy({
-        table: 'subscriptions',
-        method: 'GET',
-        query: `${orFilter}&select=device_id,phone&limit=5`,
-        timeoutMs: 8000,
-      });
-    }
     if (lookupRes.ok && Array.isArray(lookupRes.data) && lookupRes.data.length > 0) {
+      schemaSampleRow = lookupRes.data[0];
       existingRow =
         lookupRes.data.find((r: any) => String(r?.device_id || '').trim() === cleanDev) ||
         lookupRes.data[0];
     }
   }
+
+  if (!schemaSampleRow && params.receiptBase64) {
+    const probeRes = await callSupabaseProxy({
+      table: 'subscriptions',
+      method: 'GET',
+      query: 'select=*&limit=1',
+      timeoutMs: 6000,
+    });
+    if (probeRes.ok && Array.isArray(probeRes.data) && probeRes.data.length > 0) {
+      schemaSampleRow = probeRes.data[0];
+    }
+  }
+
+  const supportsReceiptBase64 = Boolean(
+    schemaSampleRow && Object.prototype.hasOwnProperty.call(schemaSampleRow, 'receipt_base64')
+  );
+  const resolvedReceiptUrl = params.receiptUrl || params.receiptBase64 || '';
 
   const basePayload: Record<string, any> = {
     device_id: cleanDev,
@@ -2289,7 +2334,8 @@ export async function upsertClientSubscriptionOrder(params: {
     amount: params.amount,
     payment_method: params.paymentMethod,
     last_payment_tid: params.lastPaymentTid,
-    ...(params.receiptUrl ? { receipt_url: params.receiptUrl } : {}),
+    ...(resolvedReceiptUrl ? { receipt_url: resolvedReceiptUrl } : {}),
+    ...(supportsReceiptBase64 && params.receiptBase64 ? { receipt_base64: params.receiptBase64 } : {}),
     status: 'PENDING',
     last_updated: now,
     updated_at: nowIso,
@@ -2317,7 +2363,6 @@ export async function upsertClientSubscriptionOrder(params: {
       method: 'POST',
       upsert: false,
       payload: {
-        id: generateSafeUUID(),
         ...basePayload,
         created_at: nowIso,
       },

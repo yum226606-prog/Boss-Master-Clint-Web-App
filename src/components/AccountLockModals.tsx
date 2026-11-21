@@ -166,6 +166,7 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
   );
   const [tidInput, setTidInput] = useState('');
   const [receiptUrl, setReceiptUrl] = useState('');
+  const [receiptBase64, setReceiptBase64] = useState('');
   const [isUploadingReceipt, setIsUploadingReceipt] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -258,6 +259,7 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
         tag: 'payment_receipt',
       });
       setReceiptUrl(uploaded.url);
+      setReceiptBase64(uploaded.base64DataUrl);
     } catch {
       setOrderNotice('Receipt screenshot upload nahi ho saka, dobara try karein.');
     } finally {
@@ -290,6 +292,7 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
         paymentMethod: selectedBank,
         lastPaymentTid: cleanTid,
         receiptUrl,
+        receiptBase64,
       });
 
       if (!sbSubRes.ok) {

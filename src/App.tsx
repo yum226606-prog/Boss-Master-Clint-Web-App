@@ -75,6 +75,7 @@ import {
 } from './components/AccountLockModals';
 import {
   BossUserRole,
+  buildScopedSubscriptionQuery,
   buildScopedUserQuery,
   clearActiveSessionToken,
   clearAuthSession,
@@ -573,6 +574,12 @@ export default function App() {
         select: '*',
         limit: 5,
       });
+      const scopedSubQuery = buildScopedSubscriptionQuery({
+        deviceId: activeSession?.deviceId || clientDeviceId,
+        phone: activeSession?.phone,
+        select: '*',
+        limit: 5,
+      });
       const emptyTableResult = { ok: true, status: 200, data: [] as any[] };
 
       const [cfgRes, usersRes, clientUsersRes, subsRes, clientIpAddress, serverNowMs] = await Promise.all([
@@ -595,11 +602,11 @@ export default function App() {
               query: scopedUserQuery,
             })
           : Promise.resolve(emptyTableResult),
-        scopedUserQuery
+        scopedSubQuery
           ? callSupabaseProxy({
               table: 'subscriptions',
               method: 'GET',
-              query: scopedUserQuery,
+              query: scopedSubQuery,
             })
           : Promise.resolve(emptyTableResult),
         getClientPublicIpAddress(),

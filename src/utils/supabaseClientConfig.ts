@@ -437,11 +437,11 @@ async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
   return res.blob();
 }
 
-function compressFileToJpegDataUrl(
+export function compressFileToJpegDataUrl(
   file: File,
   maxWidth = 800,
-  quality = 0.6,
-  maxBytes = 80 * 1024
+  quality = 0.65,
+  maxBytes = 120 * 1024
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -500,28 +500,35 @@ function compressFileToJpegDataUrl(
 }
 
 /**
- * Upload an image (File or compressed Data URL) to Supabase Storage 'user_uploads' bucket.
- * Falls back cleanly to compact compressed JPEG Data URL (< 80KB) if storage bucket isn't provisioned yet.
+ * Upload an image (File or compressed Data URL) to Supabase Storage.
+ * - Payment receipts ('receipts') upload strictly to the existing 'receipts' bucket after 800px / 0.65 JPEG compression.
+ * - Falls back cleanly to compact compressed JPEG Data URL if storage upload is unavailable.
  */
 export async function uploadImageToUserUploadsBucket(params: {
   fileOrDataUrl: File | string;
   folder: 'cnic' | 'selfies' | 'shops' | 'receipts' | 'logos';
   deviceId: string;
   tag?: string;
-}): Promise<{ url: string; storedInBucket: boolean }> {
+}): Promise<{ url: string; base64DataUrl: string; storedInBucket: boolean }> {
+  const isReceipt = params.folder === 'receipts';
   const dataUrl =
     typeof params.fileOrDataUrl === 'string'
       ? params.fileOrDataUrl
+      : isReceipt
+      ? await compressFileToJpegDataUrl(params.fileOrDataUrl, 800, 0.65, 120 * 1024)
       : await compressFileToJpegDataUrl(params.fileOrDataUrl, 800, 0.6, 80 * 1024);
 
   try {
     const { url: urlBase, key: apiKey } = getActiveSupabaseCredentials();
     const safeDev = (params.deviceId || 'DEV-UNKNOWN').replace(/[^A-Za-z0-9_-]/g, '_');
     const safeTag = (params.tag || 'img').replace(/[^A-Za-z0-9_-]/g, '_');
-    const filePath = `${params.folder}/${safeDev}/${safeTag}_${Date.now()}.jpg`;
+    const targetBucket = isReceipt ? 'receipts' : 'user_uploads';
+    const filePath = isReceipt
+      ? `${safeDev}/${safeTag}_${Date.now()}.jpg`
+      : `${params.folder}/${safeDev}/${safeTag}_${Date.now()}.jpg`;
     const blob = await dataUrlToBlob(dataUrl);
 
-    const uploadResp = await fetch(`${urlBase}/storage/v1/object/user_uploads/${filePath}`, {
+    const uploadResp = await fetch(`${urlBase}/storage/v1/object/${targetBucket}/${filePath}`, {
       method: 'POST',
       headers: {
         apikey: apiKey,
@@ -533,12 +540,12 @@ export async function uploadImageToUserUploadsBucket(params: {
     });
 
     if (uploadResp.ok) {
-      const publicUrl = `${urlBase}/storage/v1/object/public/user_uploads/${filePath}`;
-      return { url: publicUrl, storedInBucket: true };
+      const publicUrl = `${urlBase}/storage/v1/object/public/${targetBucket}/${filePath}`;
+      return { url: publicUrl, base64DataUrl: dataUrl, storedInBucket: true };
     }
   } catch {
     // Non-fatal fallback to compact JPEG Data URL
   }
 
-  return { url: dataUrl, storedInBucket: false };
+  return { url: dataUrl, base64DataUrl: dataUrl, storedInBucket: false };
 }
