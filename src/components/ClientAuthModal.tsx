@@ -37,11 +37,13 @@ import {
   enrollBiometricPasskey,
   evaluateClientAccessState,
   extractAuthCallbackFromUrl,
+  fetchDuplicateCheckRows,
   fetchMasterEngineConfigFromSupabase,
   findExistingAccountComboMatch,
   formatPakCnic,
   formatPakPhone,
   generateActiveSessionToken,
+  generateSafeUUID,
   getClientPublicIpAddress,
   getDeviceModelName,
   getOrCreateClientDeviceId,
@@ -69,10 +71,10 @@ import {
 
 function validateCnicPhotoFile(file: File): Promise<{ ok: boolean; error?: string }> {
   return new Promise((resolve) => {
-    const failMsg = 'Please upload a clear CNIC ID Card photo';
+    const failMsg = 'Please upload a valid, non-blank CNIC photo (min 200x200px).';
     const isImageMime =
       !file.type || file.type.toLowerCase().startsWith('image/');
-    if (!isImageMime || file.size < 8192) {
+    if (!isImageMime || file.size < 1024) {
       resolve({ ok: false, error: failMsg });
       return;
     }
@@ -90,18 +92,16 @@ function validateCnicPhotoFile(file: File): Promise<{ ok: boolean; error?: strin
         try {
           const w = img.naturalWidth || img.width || 0;
           const h = img.naturalHeight || img.height || 0;
-          if (w < 320 || h < 200) {
-            resolve({ ok: false, error: failMsg });
+          if (w < 200 || h < 200) {
+            resolve({
+              ok: false,
+              error: 'Photo bohot chhoti hai (< 200px). Baraye meharbani wazeh CNIC photo select karein.',
+            });
             return;
           }
-          const aspect = w / h;
-          // Reject portrait selfies / tall screenshots / square avatars — CNIC is a landscape ID card (~1.58:1)
-          if (aspect < 1.18 || aspect > 2.35) {
-            resolve({ ok: false, error: failMsg });
-            return;
-          }
-          const sampleW = 120;
-          const sampleH = 80;
+          // Flexible check: allow zoomed-out CNIC, tilted angles, hands/table in frame; only reject completely blank/solid images
+          const sampleW = 64;
+          const sampleH = 64;
           const canvas = document.createElement('canvas');
           canvas.width = sampleW;
           canvas.height = sampleH;
@@ -130,18 +130,16 @@ function validateCnicPhotoFile(file: File): Promise<{ ok: boolean; error?: strin
           }
           const mean = sum / count;
           let sqDiff = 0;
-          let edges = 0;
           for (let i = 0; i < count; i++) {
             const d = lum[i] - mean;
             sqDiff += d * d;
-            if (i > 0 && Math.abs(lum[i] - lum[i - 1]) > 12) {
-              edges++;
-            }
           }
           const stddev = Math.sqrt(sqDiff / count);
-          const edgeRatio = edges / count;
-          if (stddev < 14 || maxL - minL < 40 || edgeRatio < 0.03) {
-            resolve({ ok: false, error: failMsg });
+          if (maxL - minL < 12 || stddev < 4) {
+            resolve({
+              ok: false,
+              error: 'Yeh photo bilkul blank / khali lag rahi hai. Dobara CNIC photo upload karein.',
+            });
             return;
           }
           resolve({ ok: true });
@@ -611,18 +609,21 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       identifier: resolvedEmail || resolvedPhone || resolvedCnic || effectiveDeviceId,
       userName: session.name,
     });
-    const binding: BiometricBinding = {
-      deviceId: session.deviceId,
-      identifier: resolvedEmail || resolvedPhone || resolvedCnic || effectiveDeviceId,
-      userName: session.name,
-      email: session.email,
-      phone: session.phone,
-      cnic: session.cnic,
-      credentialId: bioEnrolled.credentialId || biometricBinding?.credentialId,
-      enrolledAt: now,
-    };
-    saveBiometricBinding(binding);
-    setBiometricBinding(binding);
+    const finalCredId = bioEnrolled.credentialId || biometricBinding?.credentialId;
+    if (finalCredId) {
+      const binding: BiometricBinding = {
+        deviceId: session.deviceId,
+        identifier: resolvedEmail || resolvedPhone || resolvedCnic || effectiveDeviceId,
+        userName: session.name,
+        email: session.email,
+        phone: session.phone,
+        cnic: session.cnic,
+        credentialId: finalCredId,
+        enrolledAt: now,
+      };
+      saveBiometricBinding(binding);
+      setBiometricBinding(binding);
+    }
 
     try {
       localStorage.removeItem(PENDING_REG_DRAFT_KEY);
@@ -663,49 +664,35 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       const macAddress = getOrCreateDeviceMacFingerprint();
       const deviceModel = getDeviceModelName();
 
-      const [allUsersRes, clientUsersRes, subsRes, masterCfg, gpsRes, publicIp, serverNowMs] =
+      // Fast lightweight duplicate/existence projection (never pulls heavy base64 CNIC photos)
+      const [usersDupRes, clientUsersDupRes, subsDupRes, masterCfg, publicIp, serverNowMs] =
         await Promise.all([
-          callSupabaseProxy({
-            table: 'users',
-            method: 'GET',
-            query: 'select=*&limit=400',
-            timeoutMs: 8000,
-          }),
-          callSupabaseProxy({
-            table: 'client_users',
-            method: 'GET',
-            query: 'select=*&limit=400',
-            timeoutMs: 8000,
-          }),
-          callSupabaseProxy({
-            table: 'subscriptions',
-            method: 'GET',
-            query: 'select=*&limit=400',
-            timeoutMs: 8000,
-          }),
+          fetchDuplicateCheckRows('users', 8000),
+          fetchDuplicateCheckRows('client_users', 8000),
+          fetchDuplicateCheckRows('subscriptions', 8000),
           fetchMasterEngineConfigFromSupabase(),
-          requestMandatoryGpsLocation(),
           getClientPublicIpAddress(),
           fetchSupabaseServerTimeMs(),
         ]);
 
-      const gps = gpsRes.ok ? gpsRes.gps : loadStoredGpsLocation();
-      if (gpsRes.ok && gpsRes.gps) {
-        setLiveGps(gpsRes.gps);
-        setGpsStatus('READY');
-        setGpsStatusMsg(gpsRes.message);
+      if (!usersDupRes.ok && !clientUsersDupRes.ok) {
+        setErrorMsg(
+          `Database connection error (${usersDupRes.error || clientUsersDupRes.error || 'Supabase unreachable'}). Internet check karein.`
+        );
+        setInfoMsg(null);
+        return;
       }
 
-      const usersList = Array.isArray(allUsersRes.data) ? allUsersRes.data : [];
-      const clientUsersList = Array.isArray(clientUsersRes.data) ? clientUsersRes.data : [];
-      const subsList = Array.isArray(subsRes.data) ? subsRes.data : [];
+      const usersList = usersDupRes.rows;
+      const clientUsersList = clientUsersDupRes.rows;
+      const subsList = subsDupRes.rows;
       const uacList = Array.isArray(masterCfg?.userAccessControl)
         ? masterCfg.userAccessControl
         : Object.values(masterCfg?.userAccessControl || {});
 
       const isOwner = isOwnerIdentity({ email: gEmail, masterCfg });
 
-      // 1) Check if this Google email already belongs to an existing account (Login)
+      // 1) Check if this Google email already belongs to an existing account (Login — GPS optional)
       const emailMatch = findExistingAccountComboMatch({
         email: gEmail,
         usersList,
@@ -721,20 +708,48 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         emailMatch.matchedSub ||
         emailMatch.matchedUac
       ) {
+        // Fetch targeted full rows for the matched user before logging in
+        const [fullU, fullCu, fullSub] = await Promise.all([
+          callSupabaseProxy({
+            table: 'users',
+            method: 'GET',
+            query: `email=ilike.${encodeURIComponent(gEmail)}&select=*&limit=5`,
+            timeoutMs: 7000,
+          }),
+          callSupabaseProxy({
+            table: 'client_users',
+            method: 'GET',
+            query: `email=ilike.${encodeURIComponent(gEmail)}&select=*&limit=5`,
+            timeoutMs: 7000,
+          }),
+          callSupabaseProxy({
+            table: 'subscriptions',
+            method: 'GET',
+            query: `email=ilike.${encodeURIComponent(gEmail)}&select=*&limit=5`,
+            timeoutMs: 7000,
+          }),
+        ]);
+        const fullMatchedUser =
+          (Array.isArray(fullU.data) && fullU.data[0]) || emailMatch.matchedUser;
+        const fullMatchedClientUser =
+          (Array.isArray(fullCu.data) && fullCu.data[0]) || emailMatch.matchedClientUser;
+        const fullMatchedSub =
+          (Array.isArray(fullSub.data) && fullSub.data[0]) || emailMatch.matchedSub;
+
         setPendingGoogleUser(null);
         await loginIntoMatchedExistingRecord({
-          matchedUser: emailMatch.matchedUser,
-          matchedClientUser: emailMatch.matchedClientUser,
-          matchedSub: emailMatch.matchedSub,
+          matchedUser: fullMatchedUser,
+          matchedClientUser: fullMatchedClientUser,
+          matchedSub: fullMatchedSub,
           matchedUac: emailMatch.matchedUac,
-          usersList,
-          clientUsersList,
-          subsList,
+          usersList: fullMatchedUser ? [fullMatchedUser] : usersList,
+          clientUsersList: fullMatchedClientUser ? [fullMatchedClientUser] : clientUsersList,
+          subsList: fullMatchedSub ? [fullMatchedSub] : subsList,
           masterCfg,
           publicIp,
           macAddress,
           deviceModel,
-          gps,
+          gps: loadStoredGpsLocation(),
           serverNowMs,
           fallbackName: gName,
           fallbackEmail: gEmail,
@@ -773,14 +788,22 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         return;
       }
 
-      // Mandatory GPS Location check for creating ANY brand-new non-owner Google account
-      if (!isOwner && (!gpsRes.ok || !gpsRes.gps)) {
-        setPendingGoogleUser(supaUser);
-        setGpsStatus('ERROR');
+      // 3) Mandatory GPS Location enforcement for creating ANY brand-new non-owner Google account
+      let gps = loadStoredGpsLocation();
+      if (!isOwner) {
+        const gpsRes = await requestMandatoryGpsLocation();
+        if (!gpsRes.ok || !gpsRes.gps) {
+          setPendingGoogleUser(supaUser);
+          setGpsStatus('ERROR');
+          setGpsStatusMsg(gpsRes.message);
+          setInfoMsg(null);
+          setErrorMsg(gpsRes.message || 'Please allow Location access to create your account');
+          return;
+        }
+        gps = gpsRes.gps;
+        setLiveGps(gps);
+        setGpsStatus('READY');
         setGpsStatusMsg(gpsRes.message);
-        setInfoMsg(null);
-        setErrorMsg(`📍 Location ON Karna Zaroori Hai: ${gpsRes.message}`);
-        return;
       }
       setPendingGoogleUser(null);
 
@@ -788,10 +811,13 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       const nowIso = new Date(now).toISOString();
       const sessionToken = generateActiveSessionToken();
       const userRole = resolveUserRole({ email: gEmail, masterCfg });
+      const recordUuid = generateSafeUUID();
+      const resolvedGpsAddress = gps?.address || gps?.city || '';
 
       // Brand-new Google user: Auto-create Verified account with trial_used = true
       const expiry = isOwner ? 0 : now + TWO_DAYS_MS;
       const newUserPayload: Record<string, any> = {
+        id: recordUuid,
         device_id: activeDeviceId,
         user_id: activeDeviceId,
         name: gName,
@@ -799,7 +825,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         phone: '',
         email: gEmail,
         cnic: '',
-        shop_address: '',
+        shop_address: resolvedGpsAddress,
         ip_address: publicIp || '',
         mac_address: macAddress,
         device_model: deviceModel,
@@ -830,6 +856,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
               latitude: gps.latitude,
               longitude: gps.longitude,
               location_url: gps.locationUrl,
+              ...(gps.city ? { gps_city: gps.city } : {}),
+              ...(gps.address ? { gps_address: gps.address } : {}),
             }
           : {}),
       };
@@ -854,7 +882,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         created_at: nowIso,
       };
 
-      const [uRes] = await Promise.all([
+      // Strict Database Insert (both users AND client_users MUST succeed — zero silent offline fallback)
+      const [uRes, cuRes] = await Promise.all([
         callSupabaseProxy({
           table: 'users',
           method: 'POST',
@@ -867,19 +896,21 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           method: 'POST',
           upsert: true,
           payload: {
+            id: recordUuid,
             device_id: activeDeviceId,
             name: gName,
             email: gEmail,
             phone: '',
             cnic: '',
+            shop_address: resolvedGpsAddress,
             role: userRole,
             active_session_token: sessionToken,
             is_online: true,
             last_seen: nowIso,
             created_at: nowIso,
           },
-          timeoutMs: 8000,
-        }).catch(() => ({ ok: false })),
+          timeoutMs: 10000,
+        }),
         callSupabaseProxy({
           table: 'subscriptions',
           method: 'POST',
@@ -889,8 +920,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         }),
       ]);
 
-      if (!uRes.ok) {
-        setErrorMsg(uRes.error || 'Google account Supabase par save nahi ho saka. Dobara try karein.');
+      if (!uRes.ok || !cuRes.ok) {
+        const errs: string[] = [];
+        if (!uRes.ok) errs.push(`users: ${uRes.error || `HTTP ${uRes.status}`}`);
+        if (!cuRes.ok) errs.push(`client_users: ${cuRes.error || `HTTP ${cuRes.status}`}`);
+        setErrorMsg(`Database save error — profile create nahi hua (${errs.join(' | ')}).`);
         setInfoMsg(null);
         return;
       }
@@ -905,7 +939,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         phone: '',
         email: gEmail,
         cnic: '',
-        shopAddress: '',
+        shopAddress: resolvedGpsAddress,
         companyName: `${gName} Aluminium & Glass`,
         loggedInAt: now,
         trialStartTime: now,
@@ -927,26 +961,28 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         identifier: gEmail,
         userName: gName,
       });
-      const binding: BiometricBinding = {
-        deviceId: activeDeviceId,
-        identifier: gEmail,
-        userName: gName,
-        email: gEmail,
-        phone: '',
-        cnic: '',
-        credentialId: bioEnrolled.credentialId,
-        enrolledAt: now,
-      };
-      saveBiometricBinding(binding);
-      setBiometricBinding(binding);
+      if (bioEnrolled.ok && bioEnrolled.credentialId) {
+        const binding: BiometricBinding = {
+          deviceId: activeDeviceId,
+          identifier: gEmail,
+          userName: gName,
+          email: gEmail,
+          phone: '',
+          cnic: '',
+          credentialId: bioEnrolled.credentialId,
+          enrolledAt: now,
+        };
+        saveBiometricBinding(binding);
+        setBiometricBinding(binding);
+      }
 
       if (typeof window !== 'undefined' && window.history?.replaceState) {
         window.history.replaceState({}, document.title, window.location.pathname);
       }
       saveAuthSession(session);
       onAuthenticated(session);
-    } catch {
-      setErrorMsg('Google verification ke dauran cloud network error aaya.');
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Google verification ke dauran cloud network error aaya.');
       setInfoMsg(null);
     } finally {
       setIsGoogleAuthenticating(false);
@@ -1089,7 +1125,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         deviceId: clientDeviceId,
         tag: side.toLowerCase(),
       });
-      const finalVal = uploaded.url || (await compressImageToDataUrl(file, 900, 0.72));
+      const finalVal = uploaded.url || (await compressImageToDataUrl(file, 800, 0.6, 80 * 1024));
       if (side === 'FRONT') setCnicFrontPhoto(finalVal);
       else if (side === 'BACK') setCnicBackPhoto(finalVal);
       else if (side === 'SELFIE') setSelfiePhoto(finalVal);
@@ -1627,24 +1663,27 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         : {}),
     };
 
-    // Save biometric binding for 1-tap Fingerprint Login
+    // Save real biometric binding ONLY if WebAuthn credential actually succeeded
     const bioRes = await enrollBiometricPasskey({
       deviceId: session.deviceId,
       identifier: session.email || session.phone || session.cnic || rawId,
       userName: session.name,
     });
-    const nextBinding: BiometricBinding = {
-      deviceId: session.deviceId,
-      identifier: session.email || session.phone || session.cnic || rawId,
-      userName: session.name,
-      email: session.email,
-      phone: session.phone,
-      cnic: session.cnic,
-      credentialId: bioRes.credentialId || biometricBinding?.credentialId,
-      enrolledAt: now,
-    };
-    saveBiometricBinding(nextBinding);
-    setBiometricBinding(nextBinding);
+    const finalCredId = bioRes.credentialId || biometricBinding?.credentialId;
+    if (finalCredId) {
+      const nextBinding: BiometricBinding = {
+        deviceId: session.deviceId,
+        identifier: session.email || session.phone || session.cnic || rawId,
+        userName: session.name,
+        email: session.email,
+        phone: session.phone,
+        cnic: session.cnic,
+        credentialId: finalCredId,
+        enrolledAt: now,
+      };
+      saveBiometricBinding(nextBinding);
+      setBiometricBinding(nextBinding);
+    }
 
     saveAuthSession(session);
     if (gps) {
@@ -1688,35 +1727,30 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     const saved = loadBiometricBinding();
     const enteredId = loginIdentifier.trim();
 
-    if (!saved && !enteredId) {
+    if (!saved || !saved.credentialId) {
       setErrorMsg(
-        'Fingerprint Login ke liye pehle aik baar apna Email, Mobile Number ya CNIC daal kar Login karein, phir Fingerprint khud link ho jaye ga.'
+        'Fingerprint / Biometric is device par registered nahi hai. Pehle Password ya Google se Login karein (taakay real Biometric passkey link ho sakay).'
       );
       return;
     }
 
     setIsBiometricLoggingIn(true);
     try {
-      if (saved) {
-        const bioVerify = await verifyBiometricPasskey(saved.credentialId);
-        if (!bioVerify.ok && bioVerify.cancelled) {
-          setErrorMsg('Fingerprint / Biometric verification cancel ho gayi.');
-          return;
-        }
-        await performUniversalLogin({
-          identifier: enteredId || saved.identifier,
-          password: loginPassword,
-          skipPasswordCheck: !enteredId || enteredId.toLowerCase() === saved.identifier.toLowerCase(),
-          enrollBiometric: true,
-        });
-      } else {
-        await performUniversalLogin({
-          identifier: enteredId,
-          password: loginPassword,
-          skipPasswordCheck: false,
-          enrollBiometric: true,
-        });
+      const bioVerify = await verifyBiometricPasskey(saved.credentialId);
+      if (!bioVerify.ok) {
+        setErrorMsg(
+          bioVerify.error ||
+            'Fingerprint / Biometric verification fail ya cancel ho gayi. Password ya Google se Login karein.'
+        );
+        return;
       }
+
+      await performUniversalLogin({
+        identifier: enteredId || saved.identifier,
+        password: loginPassword,
+        skipPasswordCheck: !enteredId || enteredId.toLowerCase() === saved.identifier.toLowerCase(),
+        enrollBiometric: true,
+      });
     } catch {
       setErrorMsg('Fingerprint login verify karte waqt network error aaya.');
     } finally {
@@ -1807,31 +1841,23 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       const macAddress = getOrCreateDeviceMacFingerprint();
       const deviceModel = getDeviceModelName();
 
-      const [usersRes, clientUsersRes, subsRes, masterCfg, publicIp, gpsRes, serverNowMs] =
+      const [usersDupRes, clientUsersDupRes, subsDupRes, masterCfg, publicIp, gpsRes, serverNowMs] =
         await Promise.all([
-          callSupabaseProxy({
-            table: 'users',
-            method: 'GET',
-            query: 'select=*&limit=400',
-            timeoutMs: 8000,
-          }),
-          callSupabaseProxy({
-            table: 'client_users',
-            method: 'GET',
-            query: 'select=*&limit=400',
-            timeoutMs: 8000,
-          }),
-          callSupabaseProxy({
-            table: 'subscriptions',
-            method: 'GET',
-            query: 'select=*&limit=400',
-            timeoutMs: 8000,
-          }),
+          fetchDuplicateCheckRows('users', 8000),
+          fetchDuplicateCheckRows('client_users', 8000),
+          fetchDuplicateCheckRows('subscriptions', 8000),
           fetchMasterEngineConfigFromSupabase(),
           getClientPublicIpAddress(),
           requestMandatoryGpsLocation(),
           fetchSupabaseServerTimeMs(),
         ]);
+
+      if (!usersDupRes.ok && !clientUsersDupRes.ok) {
+        setErrorMsg(
+          `Database connection error (${usersDupRes.error || clientUsersDupRes.error || 'Supabase unreachable'}). Internet check karein.`
+        );
+        return;
+      }
 
       const gps = gpsRes.ok ? gpsRes.gps : loadStoredGpsLocation();
       if (gpsRes.ok && gpsRes.gps) {
@@ -1840,9 +1866,9 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         setGpsStatusMsg(gpsRes.message);
       }
 
-      const usersList = Array.isArray(usersRes.data) ? usersRes.data : [];
-      const clientUsersList = Array.isArray(clientUsersRes.data) ? clientUsersRes.data : [];
-      const subsList = Array.isArray(subsRes.data) ? subsRes.data : [];
+      const usersList = usersDupRes.rows;
+      const clientUsersList = clientUsersDupRes.rows;
+      const subsList = subsDupRes.rows;
       const uacList = Array.isArray(masterCfg?.userAccessControl)
         ? masterCfg.userAccessControl
         : Object.values(masterCfg?.userAccessControl || {});
@@ -1878,14 +1904,42 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
 
       if (hasDuplicateMatch) {
         if (isOwner) {
+          // Load full owner rows before logging in
+          const [fullU, fullCu, fullSub] = await Promise.all([
+            callSupabaseProxy({
+              table: 'users',
+              method: 'GET',
+              query: `email=ilike.${encodeURIComponent(cleanEmail)}&select=*&limit=5`,
+              timeoutMs: 7000,
+            }),
+            callSupabaseProxy({
+              table: 'client_users',
+              method: 'GET',
+              query: `email=ilike.${encodeURIComponent(cleanEmail)}&select=*&limit=5`,
+              timeoutMs: 7000,
+            }),
+            callSupabaseProxy({
+              table: 'subscriptions',
+              method: 'GET',
+              query: `email=ilike.${encodeURIComponent(cleanEmail)}&select=*&limit=5`,
+              timeoutMs: 7000,
+            }),
+          ]);
+          const fullMatchedUser =
+            (Array.isArray(fullU.data) && fullU.data[0]) || comboMatch.matchedUser;
+          const fullMatchedClientUser =
+            (Array.isArray(fullCu.data) && fullCu.data[0]) || comboMatch.matchedClientUser;
+          const fullMatchedSub =
+            (Array.isArray(fullSub.data) && fullSub.data[0]) || comboMatch.matchedSub;
+
           await loginIntoMatchedExistingRecord({
-            matchedUser: comboMatch.matchedUser,
-            matchedClientUser: comboMatch.matchedClientUser,
-            matchedSub: comboMatch.matchedSub,
+            matchedUser: fullMatchedUser,
+            matchedClientUser: fullMatchedClientUser,
+            matchedSub: fullMatchedSub,
             matchedUac: comboMatch.matchedUac,
-            usersList,
-            clientUsersList,
-            subsList,
+            usersList: fullMatchedUser ? [fullMatchedUser] : usersList,
+            clientUsersList: fullMatchedClientUser ? [fullMatchedClientUser] : clientUsersList,
+            subsList: fullMatchedSub ? [fullMatchedSub] : subsList,
             masterCfg,
             publicIp,
             macAddress,
@@ -1915,7 +1969,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         setLiveGps(null);
         setGpsStatus('ERROR');
         setGpsStatusMsg(gpsRes.message);
-        setErrorMsg(`📍 Location ON Karna Zaroori Hai: ${gpsRes.message}`);
+        setErrorMsg(gpsRes.message || 'Please allow Location access to create your account');
         return;
       }
 
@@ -1951,7 +2005,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       }
 
       setInfoMsg(
-        `Verification code aapke Email (${cleanEmail}) par bhej diya gaya hai. Apna Inbox ya Spam folder check karein.`
+        `6-digit OTP code aapke Email (${cleanEmail}) par bhej diya gaya hai. Apna Inbox ya Spam folder check karein.`
       );
       setRegStep('OTP');
     } catch (err: any) {
@@ -2020,31 +2074,23 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       const macAddress = getOrCreateDeviceMacFingerprint();
       const deviceModel = getDeviceModelName();
 
-      const [usersRes, clientUsersRes, subsRes, masterCfg, gpsRes, publicIp, serverNowMs] =
+      const [usersDupRes, clientUsersDupRes, subsDupRes, masterCfg, gpsRes, publicIp, serverNowMs] =
         await Promise.all([
-          callSupabaseProxy({
-            table: 'users',
-            method: 'GET',
-            query: 'select=*&limit=400',
-            timeoutMs: 8000,
-          }),
-          callSupabaseProxy({
-            table: 'client_users',
-            method: 'GET',
-            query: 'select=*&limit=400',
-            timeoutMs: 8000,
-          }),
-          callSupabaseProxy({
-            table: 'subscriptions',
-            method: 'GET',
-            query: 'select=*&limit=400',
-            timeoutMs: 8000,
-          }),
+          fetchDuplicateCheckRows('users', 8000),
+          fetchDuplicateCheckRows('client_users', 8000),
+          fetchDuplicateCheckRows('subscriptions', 8000),
           fetchMasterEngineConfigFromSupabase(),
           requestMandatoryGpsLocation(),
           getClientPublicIpAddress(),
           fetchSupabaseServerTimeMs(),
         ]);
+
+      if (!usersDupRes.ok && !clientUsersDupRes.ok) {
+        setErrorMsg(
+          `Database connection error (${usersDupRes.error || clientUsersDupRes.error || 'Supabase unreachable'}). Profile save nahi hua.`
+        );
+        return;
+      }
 
       const gps = gpsRes.ok ? gpsRes.gps : loadStoredGpsLocation();
       if (gpsRes.ok && gpsRes.gps) {
@@ -2053,9 +2099,9 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         setGpsStatusMsg(gpsRes.message);
       }
 
-      const usersList = Array.isArray(usersRes.data) ? usersRes.data : [];
-      const clientUsersList = Array.isArray(clientUsersRes.data) ? clientUsersRes.data : [];
-      const subsList = Array.isArray(subsRes.data) ? subsRes.data : [];
+      const usersList = usersDupRes.rows;
+      const clientUsersList = clientUsersDupRes.rows;
+      const subsList = subsDupRes.rows;
       const uacList = Array.isArray(masterCfg?.userAccessControl)
         ? masterCfg.userAccessControl
         : Object.values(masterCfg?.userAccessControl || {});
@@ -2093,14 +2139,41 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
 
       if (hasDuplicateMatch) {
         if (isOwner) {
+          const [fullU, fullCu, fullSub] = await Promise.all([
+            callSupabaseProxy({
+              table: 'users',
+              method: 'GET',
+              query: `email=ilike.${encodeURIComponent(cleanEmail)}&select=*&limit=5`,
+              timeoutMs: 7000,
+            }),
+            callSupabaseProxy({
+              table: 'client_users',
+              method: 'GET',
+              query: `email=ilike.${encodeURIComponent(cleanEmail)}&select=*&limit=5`,
+              timeoutMs: 7000,
+            }),
+            callSupabaseProxy({
+              table: 'subscriptions',
+              method: 'GET',
+              query: `email=ilike.${encodeURIComponent(cleanEmail)}&select=*&limit=5`,
+              timeoutMs: 7000,
+            }),
+          ]);
+          const fullMatchedUser =
+            (Array.isArray(fullU.data) && fullU.data[0]) || comboMatch.matchedUser;
+          const fullMatchedClientUser =
+            (Array.isArray(fullCu.data) && fullCu.data[0]) || comboMatch.matchedClientUser;
+          const fullMatchedSub =
+            (Array.isArray(fullSub.data) && fullSub.data[0]) || comboMatch.matchedSub;
+
           await loginIntoMatchedExistingRecord({
-            matchedUser: comboMatch.matchedUser,
-            matchedClientUser: comboMatch.matchedClientUser,
-            matchedSub: comboMatch.matchedSub,
+            matchedUser: fullMatchedUser,
+            matchedClientUser: fullMatchedClientUser,
+            matchedSub: fullMatchedSub,
             matchedUac: comboMatch.matchedUac,
-            usersList,
-            clientUsersList,
-            subsList,
+            usersList: fullMatchedUser ? [fullMatchedUser] : usersList,
+            clientUsersList: fullMatchedClientUser ? [fullMatchedClientUser] : clientUsersList,
+            subsList: fullMatchedSub ? [fullMatchedSub] : subsList,
             masterCfg: effectiveMasterCfg,
             publicIp,
             macAddress,
@@ -2129,7 +2202,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         setLiveGps(null);
         setGpsStatus('ERROR');
         setGpsStatusMsg(gpsRes.message);
-        setErrorMsg(`📍 Location ON Karna Zaroori Hai: ${gpsRes.message}`);
+        setErrorMsg(gpsRes.message || 'Please allow Location access to create your account');
         return;
       }
 
@@ -2141,6 +2214,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         regPasswordHash || (regPassword.trim() ? await hashPasswordSha256(regPassword) : '');
       const cleanCompany = regCompany.trim() || `${cleanName} Aluminium & Glass`;
       const sessionToken = generateActiveSessionToken();
+      const recordUuid = generateSafeUUID();
       const userRole = resolveUserRole({
         email: cleanEmail,
         phone: cleanPhone,
@@ -2149,6 +2223,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       });
 
       const userPayload: Record<string, any> = {
+        id: recordUuid,
         device_id: activeDeviceId,
         user_id: activeDeviceId,
         name: cleanName,
@@ -2156,7 +2231,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         phone: cleanPhone,
         email: cleanEmail,
         cnic: cleanCnic,
-        shop_address: cleanAddress,
+        shop_address: cleanAddress || gps?.address || gps?.city || '',
         cnic_front_url: cnicFrontPhoto,
         cnic_back_url: cnicBackPhoto,
         ...(selfiePhoto ? { selfie_url: selfiePhoto } : {}),
@@ -2192,6 +2267,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
               latitude: gps.latitude,
               longitude: gps.longitude,
               location_url: gps.locationUrl,
+              ...(gps.city ? { gps_city: gps.city } : {}),
+              ...(gps.address ? { gps_address: gps.address } : {}),
             }
           : {}),
       };
@@ -2216,7 +2293,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         created_at: trialStartIso,
       };
 
-      const [uRes, , subRes] = await Promise.all([
+      // Strict Database Insert (both users AND client_users MUST succeed — zero silent offline-only fallback)
+      const [uRes, cuRes, subRes] = await Promise.all([
         callSupabaseProxy({
           table: 'users',
           method: 'POST',
@@ -2229,12 +2307,13 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           method: 'POST',
           upsert: true,
           payload: {
+            id: recordUuid,
             device_id: activeDeviceId,
             name: cleanName,
             email: cleanEmail,
             phone: cleanPhone,
             cnic: cleanCnic,
-            shop_address: cleanAddress,
+            shop_address: cleanAddress || gps?.address || gps?.city || '',
             company_name: cleanCompany,
             role: userRole,
             active_session_token: sessionToken,
@@ -2242,8 +2321,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
             last_seen: trialStartIso,
             created_at: trialStartIso,
           },
-          timeoutMs: 8000,
-        }).catch(() => ({ ok: false })),
+          timeoutMs: 10000,
+        }),
         callSupabaseProxy({
           table: 'subscriptions',
           method: 'POST',
@@ -2253,9 +2332,12 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         }),
       ]);
 
-      if (!uRes.ok) {
+      if (!uRes.ok || !cuRes.ok) {
+        const errs: string[] = [];
+        if (!uRes.ok) errs.push(`users: ${uRes.error || `HTTP ${uRes.status}`}`);
+        if (!cuRes.ok) errs.push(`client_users: ${cuRes.error || `HTTP ${cuRes.status}`}`);
         setErrorMsg(
-          uRes.error || 'Admin cloud par account details save nahi ho sakin. Dobara try karein.'
+          `Database save error — profile create nahi hua (${errs.join(' | ')}).`
         );
         return;
       }
@@ -2292,7 +2374,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         phone: cleanPhone,
         email: cleanEmail,
         cnic: cleanCnic,
-        shopAddress: cleanAddress,
+        shopAddress: cleanAddress || gps?.address || gps?.city || '',
         companyName: cleanCompany,
         selfieUrl: selfiePhoto || '',
         shopPhotoUrl: shopPhoto || '',
@@ -2311,24 +2393,26 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           : {}),
       };
 
-      // Enroll Fingerprint / Biometric passkey for instant next login
+      // Enroll real WebAuthn passkey if supported (only bind when genuine credentialId exists)
       const bioRes = await enrollBiometricPasskey({
         deviceId: clientDeviceId,
         identifier: cleanEmail || cleanPhone,
         userName: cleanName,
       });
-      const binding: BiometricBinding = {
-        deviceId: clientDeviceId,
-        identifier: cleanEmail || cleanPhone,
-        userName: cleanName,
-        email: cleanEmail,
-        phone: cleanPhone,
-        cnic: cleanCnic,
-        credentialId: bioRes.credentialId,
-        enrolledAt: trialStart,
-      };
-      saveBiometricBinding(binding);
-      setBiometricBinding(binding);
+      if (bioRes.ok && bioRes.credentialId) {
+        const binding: BiometricBinding = {
+          deviceId: clientDeviceId,
+          identifier: cleanEmail || cleanPhone,
+          userName: cleanName,
+          email: cleanEmail,
+          phone: cleanPhone,
+          cnic: cleanCnic,
+          credentialId: bioRes.credentialId,
+          enrolledAt: trialStart,
+        };
+        saveBiometricBinding(binding);
+        setBiometricBinding(binding);
+      }
 
       try {
         localStorage.removeItem(PENDING_REG_DRAFT_KEY);
@@ -2337,8 +2421,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       }
       saveAuthSession(session);
       onAuthenticated(session);
-    } catch {
-      setErrorMsg('Registration complete karte waqt network error aaya.');
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Registration complete karte waqt network error aaya.');
     } finally {
       setIsVerifyingAndCreating(false);
     }
@@ -2585,7 +2669,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                 </button>
               </div>
 
-              {biometricBinding && (
+              {biometricBinding && biometricBinding.credentialId && (
                 <div className="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-[10.5px] text-emerald-300 flex items-center justify-between gap-2">
                   <span className="flex items-center gap-1.5 truncate">
                     <Fingerprint className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
@@ -2784,7 +2868,6 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                   <input
                     type="file"
                     accept="image/*"
-                    capture="environment"
                     onChange={(e) => handlePhotoUpload(e, 'FRONT')}
                     className="hidden"
                   />
@@ -2818,7 +2901,6 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                   <input
                     type="file"
                     accept="image/*"
-                    capture="environment"
                     onChange={(e) => handlePhotoUpload(e, 'BACK')}
                     className="hidden"
                   />
@@ -3019,7 +3101,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                       setOtpInput(val.replace(/[^0-9]/g, '').slice(0, 8));
                     }
                   }}
-                  placeholder="6-Digit OTP ya Confirmation Link Paste Karein"
+                  placeholder="Enter 6-Digit Email OTP Code"
                   className={`w-full py-2.5 px-3 rounded-xl bg-[#14181F] border-2 border-[#F5B738]/70 text-center font-mono font-black text-[#F5B738] focus:border-[#F5B738] outline-none ${
                     otpInput.length > 10
                       ? 'text-xs tracking-normal'
@@ -3028,7 +3110,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                   required
                 />
                 <p className="mt-1.5 text-[10px] text-slate-400 leading-snug">
-                  Agar email mein 6-digit code ki jagah <strong className="text-slate-300">&quot;Confirm your mail&quot;</strong> link aaya ho aur click par <strong className="text-rose-300">localhost refused to connect</strong> aaye, to browser address bar se us link ko copy karke yahan paste kar dein.
+                  Apne Email Inbox ya Spam folder mein aaya hua <strong className="text-slate-200">6-digit numeric OTP code</strong> yahan darj karein.
                 </p>
               </div>
 

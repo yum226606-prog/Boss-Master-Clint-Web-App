@@ -5290,10 +5290,10 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
       {currentTab === 'QUOTATION' && (
         <div className="space-y-4">
           {/* Customer, Discount, Hardware, Labour, Transport (Compact Single-Line Grid) & Single-Line Icon Toolbar */}
-          <div className="p-2.5 sm:p-3 rounded-xl bg-[#14181F] border border-[#2B3441] space-y-2 no-print">
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-1.5">
+          <div className="p-2 sm:p-3 rounded-xl bg-[#14181F] border border-[#2B3441] space-y-2 no-print">
+            <div className="grid grid-cols-3 lg:grid-cols-6 gap-1.5">
               <div className="min-w-0">
-                <label className="block text-[9.5px] font-semibold text-slate-400 mb-0.5 truncate">
+                <label className="block text-[9px] sm:text-[9.5px] font-semibold text-slate-400 mb-0.5 truncate">
                   Customer Name
                 </label>
                 <input
@@ -5301,12 +5301,12 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   value={customerName}
                   onChange={(e) => onSetCustomerInfo(e.target.value, customerPhone)}
                   placeholder="Tariq Mehmood"
-                  className="w-full h-7 px-2 rounded-lg bg-[#0C0F14] border border-slate-700 focus:border-[#F5B738] outline-none text-[11px] text-white"
+                  className="w-full h-7 px-1.5 sm:px-2 rounded-lg bg-[#0C0F14] border border-slate-700 focus:border-[#F5B738] outline-none text-[10.5px] sm:text-[11px] text-white"
                 />
               </div>
 
               <div className="min-w-0">
-                <label className="block text-[9.5px] font-semibold text-slate-400 mb-0.5 truncate">
+                <label className="block text-[9px] sm:text-[9.5px] font-semibold text-slate-400 mb-0.5 truncate">
                   Phone Number
                 </label>
                 <input
@@ -5314,12 +5314,12 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   value={customerPhone}
                   onChange={(e) => onSetCustomerInfo(customerName, e.target.value)}
                   placeholder="0300-1234567"
-                  className="w-full h-7 px-2 rounded-lg bg-[#0C0F14] border border-slate-700 focus:border-[#F5B738] outline-none text-[11px] font-mono text-white"
+                  className="w-full h-7 px-1.5 sm:px-2 rounded-lg bg-[#0C0F14] border border-slate-700 focus:border-[#F5B738] outline-none text-[10.5px] sm:text-[11px] font-mono text-white"
                 />
               </div>
 
               <div className="min-w-0">
-                <label className="block text-[9.5px] font-bold text-emerald-400 mb-0.5 truncate">
+                <label className="block text-[9px] sm:text-[9.5px] font-bold text-emerald-400 mb-0.5 truncate">
                   Discount (%)
                 </label>
                 <div className="relative flex items-center">
@@ -5331,7 +5331,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                     placeholder="0"
                     title="Discount (%)"
                     aria-label="Discount (%)"
-                    className="w-full h-7 pl-2 pr-5 rounded-lg bg-[#0C0F14] border border-emerald-500/70 focus:border-emerald-400 outline-none text-[11px] font-mono font-bold text-emerald-300"
+                    className="w-full h-7 pl-1.5 sm:pl-2 pr-4 sm:pr-5 rounded-lg bg-[#0C0F14] border border-emerald-500/70 focus:border-emerald-400 outline-none text-[10.5px] sm:text-[11px] font-mono font-bold text-emerald-300"
                   />
                   <span className="absolute right-1.5 text-[10px] font-bold text-emerald-400 pointer-events-none">
                     %
@@ -5340,7 +5340,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               </div>
 
               <div className="min-w-0">
-                <label className="block text-[9.5px] font-semibold text-slate-400 mb-0.5 truncate">
+                <label className="block text-[9px] sm:text-[9.5px] font-semibold text-slate-400 mb-0.5 truncate">
                   Hardware (Rs)
                 </label>
                 <input
@@ -5351,12 +5351,12 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   placeholder="0"
                   title="Hardware Rate / Unit (Rs)"
                   aria-label="Hardware (Rs)"
-                  className="w-full h-7 px-2 rounded-lg bg-[#0C0F14] border border-slate-700 focus:border-[#F5B738] outline-none text-[11px] font-mono text-white"
+                  className="w-full h-7 px-1.5 sm:px-2 rounded-lg bg-[#0C0F14] border border-slate-700 focus:border-[#F5B738] outline-none text-[10.5px] sm:text-[11px] font-mono text-white"
                 />
               </div>
 
               <div className="min-w-0">
-                <label className="block text-[9.5px] font-semibold text-slate-400 mb-0.5 truncate">
+                <label className="block text-[9px] sm:text-[9.5px] font-semibold text-slate-400 mb-0.5 truncate">
                   Labour (Rs)
                 </label>
                 <input
@@ -5367,12 +5367,12 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   placeholder="0"
                   title="Labour Charges (Rs)"
                   aria-label="Labour (Rs)"
-                  className="w-full h-7 px-2 rounded-lg bg-[#0C0F14] border border-slate-700 focus:border-[#F5B738] outline-none text-[11px] font-mono text-white"
+                  className="w-full h-7 px-1.5 sm:px-2 rounded-lg bg-[#0C0F14] border border-slate-700 focus:border-[#F5B738] outline-none text-[10.5px] sm:text-[11px] font-mono text-white"
                 />
               </div>
 
               <div className="min-w-0">
-                <label className="block text-[9.5px] font-semibold text-slate-400 mb-0.5 truncate">
+                <label className="block text-[9px] sm:text-[9.5px] font-semibold text-slate-400 mb-0.5 truncate">
                   Transport (Rs)
                 </label>
                 <input
@@ -5383,7 +5383,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   placeholder="0"
                   title="Transport Rent (Rs)"
                   aria-label="Transport (Rs)"
-                  className="w-full h-7 px-2 rounded-lg bg-[#0C0F14] border border-slate-700 focus:border-[#F5B738] outline-none text-[11px] font-mono text-white"
+                  className="w-full h-7 px-1.5 sm:px-2 rounded-lg bg-[#0C0F14] border border-slate-700 focus:border-[#F5B738] outline-none text-[10.5px] sm:text-[11px] font-mono text-white"
                 />
               </div>
             </div>

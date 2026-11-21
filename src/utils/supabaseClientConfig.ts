@@ -401,8 +401,9 @@ async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
 
 function compressFileToJpegDataUrl(
   file: File,
-  maxWidth = 960,
-  quality = 0.74
+  maxWidth = 800,
+  quality = 0.6,
+  maxBytes = 80 * 1024
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -417,20 +418,39 @@ function compressFileToJpegDataUrl(
       img.onerror = () => resolve(src);
       img.onload = () => {
         try {
-          const scale = img.width > maxWidth ? maxWidth / img.width : 1;
-          const targetW = Math.max(1, Math.round(img.width * scale));
-          const targetH = Math.max(1, Math.round(img.height * scale));
-          const canvas = document.createElement('canvas');
-          canvas.width = targetW;
-          canvas.height = targetH;
-          const ctx = canvas.getContext('2d');
-          if (!ctx) {
-            resolve(src);
-            return;
+          let currentMaxW = maxWidth;
+          let currentQuality = quality;
+          let bestJpeg = '';
+
+          for (let attempt = 0; attempt < 5; attempt++) {
+            const scale = img.width > currentMaxW ? currentMaxW / img.width : 1;
+            const targetW = Math.max(1, Math.round(img.width * scale));
+            const targetH = Math.max(1, Math.round(img.height * scale));
+            const canvas = document.createElement('canvas');
+            canvas.width = targetW;
+            canvas.height = targetH;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) {
+              resolve(src);
+              return;
+            }
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, targetW, targetH);
+            ctx.drawImage(img, 0, 0, targetW, targetH);
+            const jpeg = canvas.toDataURL('image/jpeg', currentQuality);
+            bestJpeg = !bestJpeg || jpeg.length < bestJpeg.length ? jpeg : bestJpeg;
+            if (jpeg.length <= maxBytes) {
+              resolve(jpeg);
+              return;
+            }
+            if (currentQuality > 0.34) {
+              currentQuality = Math.max(0.28, Number((currentQuality - 0.1).toFixed(2)));
+            } else {
+              currentMaxW = Math.max(420, Math.round(currentMaxW * 0.8));
+            }
           }
-          ctx.drawImage(img, 0, 0, targetW, targetH);
-          const jpeg = canvas.toDataURL('image/jpeg', quality);
-          resolve(jpeg.length < src.length ? jpeg : src);
+
+          resolve(bestJpeg || src);
         } catch {
           resolve(src);
         }
@@ -443,7 +463,7 @@ function compressFileToJpegDataUrl(
 
 /**
  * Upload an image (File or compressed Data URL) to Supabase Storage 'user_uploads' bucket.
- * Falls back cleanly to compact compressed JPEG Data URL if storage bucket isn't provisioned yet.
+ * Falls back cleanly to compact compressed JPEG Data URL (< 80KB) if storage bucket isn't provisioned yet.
  */
 export async function uploadImageToUserUploadsBucket(params: {
   fileOrDataUrl: File | string;
@@ -454,7 +474,7 @@ export async function uploadImageToUserUploadsBucket(params: {
   const dataUrl =
     typeof params.fileOrDataUrl === 'string'
       ? params.fileOrDataUrl
-      : await compressFileToJpegDataUrl(params.fileOrDataUrl, 960, 0.74);
+      : await compressFileToJpegDataUrl(params.fileOrDataUrl, 800, 0.6, 80 * 1024);
 
   try {
     const { url: urlBase, key: apiKey } = getActiveSupabaseCredentials();

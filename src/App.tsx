@@ -77,6 +77,7 @@ import {
   BossUserRole,
   clearActiveSessionToken,
   clearAuthSession,
+  clearLastActiveAtMs,
   ClientAuthSession,
   collectAndSyncUserTelemetryToSupabase,
   evaluateClientAccessState,
@@ -84,6 +85,7 @@ import {
   getOrCreateClientDeviceId,
   getOrCreateDeviceMacFingerprint,
   isOwnerIdentity,
+  isSessionInactiveExpired,
   loadActiveSessionToken,
   loadAuthSession,
   loadCachedMasterEngineConfig,
@@ -91,6 +93,7 @@ import {
   requestAndSaveGpsLocation,
   saveAuthSession,
   saveCachedMasterEngineConfig,
+  saveLastActiveAtMs,
 } from './utils/adminApiConfig';
 
 const STORAGE_KEY = 'boss_aluminium_master_web_state_v1';
@@ -268,10 +271,33 @@ function saveLastSeenSupportMs(ms: number): void {
 }
 
 export default function App() {
-  const [authSession, setAuthSession] = useState<ClientAuthSession | null>(() =>
-    loadAuthSession()
+  const [initialBootAuth] = useState<{
+    session: ClientAuthSession | null;
+    notice: string | null;
+  }>(() => {
+    const sess = loadAuthSession();
+    if (sess?.verified && isSessionInactiveExpired(sess)) {
+      clearAuthSession();
+      clearActiveSessionToken();
+      clearLastActiveAtMs();
+      clearInitialSyncCompletedFlag();
+      try {
+        localStorage.removeItem(USER_LOCKED_TABS_KEY);
+      } catch {}
+      return {
+        session: null,
+        notice: 'Session expired after 3 days of inactivity. Please login again.',
+      };
+    }
+    if (sess?.verified) {
+      saveLastActiveAtMs(Date.now());
+    }
+    return { session: sess, notice: null };
+  });
+  const [authSession, setAuthSession] = useState<ClientAuthSession | null>(
+    initialBootAuth.session
   );
-  const [authNotice, setAuthNotice] = useState<string | null>(null);
+  const [authNotice, setAuthNotice] = useState<string | null>(initialBootAuth.notice);
   const [isSubscriptionExpired, setIsSubscriptionExpired] = useState<boolean>(false);
   const [currentCalcTab, setCurrentCalcTab] = useState<BossTab>('WINDOWS');
 
@@ -1212,6 +1238,7 @@ export default function App() {
   const triggerSessionConflictLogout = () => {
     clearAuthSession();
     clearActiveSessionToken();
+    clearLastActiveAtMs();
     clearInitialSyncCompletedFlag();
     try {
       localStorage.removeItem(USER_LOCKED_TABS_KEY);
@@ -1229,6 +1256,30 @@ export default function App() {
       lastSyncedAt: null,
     });
     setAuthNotice('Your ID was logged in on another device.');
+  };
+
+  const triggerInactivityLogout = () => {
+    markUserOfflineInSupabase(clientDeviceId);
+    clearAuthSession();
+    clearActiveSessionToken();
+    clearLastActiveAtMs();
+    clearInitialSyncCompletedFlag();
+    try {
+      localStorage.removeItem(USER_LOCKED_TABS_KEY);
+    } catch {}
+    setUserLockedTabs({});
+    supabase.auth.signOut().catch(() => {});
+    setAuthSession(null);
+    setIsSubscriptionExpired(false);
+    setCloudAccessInfo({
+      status: 'TRIAL',
+      tier: 'CLIENT',
+      role: 'CLIENT',
+      expiresAt: null,
+      reason: '',
+      lastSyncedAt: null,
+    });
+    setAuthNotice('Session expired after 3 days of inactivity. Please login again.');
   };
 
   const verifySingleDeviceSessionOnline = async (
@@ -1619,6 +1670,7 @@ export default function App() {
   const handleAuthenticated = async (session: ClientAuthSession) => {
     setClientDeviceId(session.deviceId);
     saveAuthSession(session);
+    saveLastActiveAtMs(Date.now());
     setAuthSession(session);
     setAuthNotice(null);
     setIsSubscriptionExpired(false);
@@ -1664,6 +1716,7 @@ export default function App() {
     markUserOfflineInSupabase(clientDeviceId);
     clearAuthSession();
     clearActiveSessionToken();
+    clearLastActiveAtMs();
     clearInitialSyncCompletedFlag();
     try {
       localStorage.removeItem(USER_LOCKED_TABS_KEY);
@@ -2116,6 +2169,57 @@ export default function App() {
       document.removeEventListener('cut', handleCopyOrCut, true);
     };
   }, []);
+
+  // 3-Day (72-hour) inactivity tracking & auto-logout (updates throttled last_active_at in localStorage)
+  useEffect(() => {
+    if (!authSession?.verified) return;
+
+    if (isSessionInactiveExpired(authSession)) {
+      triggerInactivityLogout();
+      return;
+    }
+
+    let lastSavedAt = Date.now();
+    saveLastActiveAtMs(lastSavedAt);
+
+    const recordUserActivity = () => {
+      if (isSessionInactiveExpired(authSession)) {
+        triggerInactivityLogout();
+        return;
+      }
+      const now = Date.now();
+      if (now - lastSavedAt >= 15000) {
+        lastSavedAt = now;
+        saveLastActiveAtMs(now);
+      }
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        if (isSessionInactiveExpired(authSession)) {
+          triggerInactivityLogout();
+          return;
+        }
+        const now = Date.now();
+        lastSavedAt = now;
+        saveLastActiveAtMs(now);
+      }
+    };
+
+    window.addEventListener('pointerdown', recordUserActivity, true);
+    window.addEventListener('keydown', recordUserActivity, true);
+    window.addEventListener('touchstart', recordUserActivity, { passive: true, capture: true });
+    window.addEventListener('scroll', recordUserActivity, { passive: true, capture: true });
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      window.removeEventListener('pointerdown', recordUserActivity, true);
+      window.removeEventListener('keydown', recordUserActivity, true);
+      window.removeEventListener('touchstart', recordUserActivity, true);
+      window.removeEventListener('scroll', recordUserActivity, true);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [authSession?.verified, authSession?.loggedInAt]);
 
   // Mark user offline on browser/tab close (no background polling or focus/visibility loops)
   useEffect(() => {

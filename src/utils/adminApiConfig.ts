@@ -16,10 +16,12 @@ export const AUTH_SESSION_STORAGE_KEY = 'boss_client_auth_session_v1';
 export const DEVICE_ID_STORAGE_KEY = 'boss_client_device_id';
 export const MASTER_ENGINE_CACHE_KEY = 'boss_cached_master_engine_config_v1';
 export const ACTIVE_SESSION_TOKEN_KEY = 'boss_active_session_token_v1';
+export const LAST_ACTIVE_AT_KEY = 'boss_last_active_at_v1';
 export const PRIMARY_OWNER_EMAIL = 'ssaboor2t@gmail.com';
 export const DEFAULT_OWNER_EMAILS = ['ssaboor2t@gmail.com', 'yum226606@gmail.com'];
 export const DEFAULT_OWNER_PHONES = ['3105524225'];
 export const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000;
+export const INACTIVITY_LIMIT_MS = 3 * 24 * 60 * 60 * 1000;
 
 export type BossUserRole = 'OWNER' | 'ADMIN' | 'CLIENT';
 
@@ -46,19 +48,78 @@ export interface ClientAuthSession {
   userRole?: BossUserRole;
 }
 
-export function generateActiveSessionToken(): string {
-  const bytes = new Uint8Array(12);
-  if (typeof window !== 'undefined' && window.crypto?.getRandomValues) {
-    window.crypto.getRandomValues(bytes);
+/**
+ * Mobile/Capacitor WebView safe UUID v4 generator (never breaks if crypto.randomUUID is unavailable).
+ */
+export function generateSafeUUID(): string {
+  try {
+    if (
+      typeof crypto !== 'undefined' &&
+      typeof crypto.randomUUID === 'function'
+    ) {
+      return crypto.randomUUID();
+    }
+  } catch {
+    // fallback below
+  }
+
+  const bytes = new Uint8Array(16);
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    crypto.getRandomValues(bytes);
   } else {
-    for (let i = 0; i < bytes.length; i++) {
+    for (let i = 0; i < 16; i++) {
       bytes[i] = Math.floor(Math.random() * 256);
     }
   }
-  const hex = Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-  return `SESS-${Date.now().toString(36)}-${hex}`;
+  // Set RFC 4122 version 4 and variant bits
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes).map((b) => b.toString(16).padStart(2, '0'));
+  return `${hex.slice(0, 4).join('')}-${hex.slice(4, 6).join('')}-${hex.slice(6, 8).join('')}-${hex.slice(8, 10).join('')}-${hex.slice(10, 16).join('')}`;
+}
+
+export function loadLastActiveAtMs(): number {
+  if (typeof window === 'undefined') return 0;
+  try {
+    const val = Number(localStorage.getItem(LAST_ACTIVE_AT_KEY) || 0);
+    return Number.isFinite(val) && val > 0 ? val : 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function saveLastActiveAtMs(ms = Date.now()): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (Number.isFinite(ms) && ms > 0) {
+      localStorage.setItem(LAST_ACTIVE_AT_KEY, String(Math.round(ms)));
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function clearLastActiveAtMs(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.removeItem(LAST_ACTIVE_AT_KEY);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function isSessionInactiveExpired(
+  session?: ClientAuthSession | null,
+  nowMs = Date.now()
+): boolean {
+  const lastActive = loadLastActiveAtMs();
+  const effectiveLast = lastActive > 0 ? lastActive : Number(session?.loggedInAt || 0);
+  if (!effectiveLast || effectiveLast <= 0) return false;
+  return nowMs - effectiveLast > INACTIVITY_LIMIT_MS;
+}
+
+export function generateActiveSessionToken(): string {
+  return `SESS-${Date.now().toString(36)}-${generateSafeUUID().slice(0, 18)}`;
 }
 
 export function loadActiveSessionToken(): string {
@@ -225,15 +286,13 @@ export async function sendSupabaseEmailOtp(
   meta?: { name?: string; phone?: string; device_id?: string }
 ): Promise<{ ok: boolean; status: number; error?: string }> {
   const cleanEmail = email.trim().toLowerCase();
-  const emailRedirectTo =
-    typeof window !== 'undefined' && window.location?.origin ? window.location.origin : undefined;
 
   try {
+    // Do NOT pass emailRedirectTo so Supabase sends a 6-digit numeric OTP ({{ .Token }}) instead of a Magic Link
     const { error } = await supabase.auth.signInWithOtp({
       email: cleanEmail,
       options: {
         shouldCreateUser: true,
-        emailRedirectTo,
         data: meta || {},
       },
     });
@@ -339,6 +398,7 @@ export async function verifySupabaseEmailOtp(
   }
 
   // 3) Strict 6-digit Email OTP verification via official supabase.auth.verifyOtp
+  let lastVerifyError = '';
   for (const verifyType of ['email', 'signup', 'magiclink'] as const) {
     try {
       const { data, error } = await supabase.auth.verifyOtp({
@@ -349,12 +409,17 @@ export async function verifySupabaseEmailOtp(
       if (!error && (data?.session || data?.user)) {
         return { ok: true };
       }
-    } catch {
-      // try next type
+      if (error?.message && !lastVerifyError) {
+        lastVerifyError = error.message;
+      }
+    } catch (err: any) {
+      if (err?.message && !lastVerifyError) {
+        lastVerifyError = err.message;
+      }
     }
   }
 
-  return { ok: false, error: 'Email OTP code ghalat ya expire ho chuka hai.' };
+  return { ok: false, error: lastVerifyError || 'Email OTP code ghalat ya expire ho chuka hai.' };
 }
 
 /**
@@ -375,12 +440,13 @@ export async function syncRegisteredUserToAdminUac(_entry: {
 }
 
 /**
- * Compress CNIC/ID images into clean compact JPEG Data URLs (~60-120KB) so Supabase writes stay fast and reliable.
+ * Compress CNIC/ID images on canvas (max 800px width, 0.6 JPEG quality, strictly under 80KB) so Supabase writes never time out.
  */
 export function compressImageToDataUrl(
   file: File,
-  maxWidth = 900,
-  quality = 0.72
+  maxWidth = 800,
+  quality = 0.6,
+  maxBytes = 80 * 1024
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -395,20 +461,39 @@ export function compressImageToDataUrl(
       img.onerror = () => resolve(src);
       img.onload = () => {
         try {
-          const scale = img.width > maxWidth ? maxWidth / img.width : 1;
-          const targetW = Math.max(1, Math.round(img.width * scale));
-          const targetH = Math.max(1, Math.round(img.height * scale));
-          const canvas = document.createElement('canvas');
-          canvas.width = targetW;
-          canvas.height = targetH;
-          const ctx = canvas.getContext('2d');
-          if (!ctx) {
-            resolve(src);
-            return;
+          let currentMaxW = maxWidth;
+          let currentQuality = quality;
+          let bestJpeg = '';
+
+          for (let attempt = 0; attempt < 5; attempt++) {
+            const scale = img.width > currentMaxW ? currentMaxW / img.width : 1;
+            const targetW = Math.max(1, Math.round(img.width * scale));
+            const targetH = Math.max(1, Math.round(img.height * scale));
+            const canvas = document.createElement('canvas');
+            canvas.width = targetW;
+            canvas.height = targetH;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) {
+              resolve(src);
+              return;
+            }
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, targetW, targetH);
+            ctx.drawImage(img, 0, 0, targetW, targetH);
+            const jpeg = canvas.toDataURL('image/jpeg', currentQuality);
+            bestJpeg = !bestJpeg || jpeg.length < bestJpeg.length ? jpeg : bestJpeg;
+            if (jpeg.length <= maxBytes) {
+              resolve(jpeg);
+              return;
+            }
+            if (currentQuality > 0.34) {
+              currentQuality = Math.max(0.28, Number((currentQuality - 0.1).toFixed(2)));
+            } else {
+              currentMaxW = Math.max(420, Math.round(currentMaxW * 0.8));
+            }
           }
-          ctx.drawImage(img, 0, 0, targetW, targetH);
-          const jpeg = canvas.toDataURL('image/jpeg', quality);
-          resolve(jpeg.length < src.length ? jpeg : src);
+
+          resolve(bestJpeg || src);
         } catch {
           resolve(src);
         }
@@ -802,6 +887,38 @@ export interface ExistingComboMatchResult {
 }
 
 /**
+ * Lightweight duplicate-check query fetching ONLY tiny identity/lock columns (no heavy base64 photos).
+ * Falls back gracefully if a table lacks optional columns.
+ */
+export async function fetchDuplicateCheckRows(
+  table: 'users' | 'client_users' | 'subscriptions',
+  timeoutMs = 7000
+): Promise<{ ok: boolean; rows: any[]; error?: string }> {
+  const queries = [
+    'select=id,email,phone,cnic,device_id,allow_multi_account,allow_multiple_accounts&limit=500',
+    'select=id,email,phone,cnic,device_id,allow_multi_account&limit=500',
+    'select=email,phone,cnic,device_id&limit=500',
+  ];
+  let lastRes: any = null;
+  for (const q of queries) {
+    const res = await callSupabaseProxy({
+      table,
+      method: 'GET',
+      query: q,
+      timeoutMs,
+    });
+    lastRes = res;
+    if (res.ok && Array.isArray(res.data)) {
+      return { ok: true, rows: res.data };
+    }
+    if (res.status !== 400) {
+      break;
+    }
+  }
+  return { ok: false, rows: [], error: lastRes?.error };
+}
+
+/**
  * Strict Anti-Fake ID & Duplicate Account Check across users, client_users, subscriptions & userAccessControl:
  * Matches CNIC, Email, Phone Number, Device ID, Public IP Address, or MAC/Device Fingerprint.
  */
@@ -942,8 +1059,10 @@ export function findExistingAccountComboMatch(params: {
       matchedRows.some(
         (r) =>
           r?.allow_multi_account === true ||
+          r?.allow_multiple_accounts === true ||
           r?.allowMultiAccount === true ||
-          String(r?.allow_multi_account || '').toLowerCase() === 'true'
+          String(r?.allow_multi_account || '').toLowerCase() === 'true' ||
+          String(r?.allow_multiple_accounts || '').toLowerCase() === 'true'
       )
   );
 
@@ -1385,6 +1504,8 @@ export interface StoredGpsLocation {
   latitude: number;
   longitude: number;
   locationUrl: string;
+  city?: string;
+  address?: string;
   updatedAt: number;
 }
 
@@ -1418,6 +1539,42 @@ export function saveStoredGpsLocation(gps: StoredGpsLocation): void {
   }
 }
 
+async function reverseGeocodeCoords(
+  latitude: number,
+  longitude: number
+): Promise<{ city: string; address: string }> {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 3200);
+    const resp = await fetch(
+      `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${encodeURIComponent(
+        latitude
+      )}&longitude=${encodeURIComponent(longitude)}&localityLanguage=en`,
+      { signal: ctrl.signal }
+    );
+    clearTimeout(timer);
+    if (resp.ok) {
+      const d = await resp.json().catch(() => null);
+      if (d && typeof d === 'object') {
+        const city = String(d.city || d.locality || d.principalSubdivision || '').trim();
+        const parts = [
+          d.locality || d.city,
+          d.principalSubdivision,
+          d.countryName,
+        ]
+          .map((x) => String(x || '').trim())
+          .filter(Boolean);
+        const uniqueParts = Array.from(new Set(parts));
+        const address = uniqueParts.join(', ');
+        return { city, address };
+      }
+    }
+  } catch {
+    // non-fatal offline/timeout fallback
+  }
+  return { city: '', address: '' };
+}
+
 export async function syncGpsToSupabaseUser(
   deviceId: string,
   gps: StoredGpsLocation
@@ -1432,6 +1589,8 @@ export async function syncGpsToSupabaseUser(
         latitude: gps.latitude,
         longitude: gps.longitude,
         location_url: gps.locationUrl,
+        ...(gps.city ? { gps_city: gps.city } : {}),
+        ...(gps.address ? { gps_address: gps.address } : {}),
       },
       timeoutMs: 6000,
     });
@@ -1454,13 +1613,15 @@ export interface MandatoryGpsResult {
 }
 
 export function requestMandatoryGpsLocation(deviceId?: string): Promise<MandatoryGpsResult> {
+  const mandatoryFailMsg =
+    'Please allow Location access to create your account (GPS Location ON aur Allow karein).';
   return new Promise((resolve) => {
     if (typeof window === 'undefined' || !('geolocation' in navigator)) {
       resolve({
         ok: false,
         gps: null,
         errorReason: 'UNSUPPORTED',
-        message: 'Aapke device ya browser mein GPS Location supported nahi hai.',
+        message: mandatoryFailMsg,
       });
       return;
     }
@@ -1475,26 +1636,30 @@ export function requestMandatoryGpsLocation(deviceId?: string): Promise<Mandator
               ok: false,
               gps: null,
               errorReason: 'POSITION_UNAVAILABLE',
-              message: 'Sahih GPS coordinates nahi mil sakay. Apni Mobile Location ON karein.',
+              message: mandatoryFailMsg,
             });
             return;
           }
           const locationUrl = `https://maps.google.com/?q=${latitude},${longitude}`;
+          const geo = await reverseGeocodeCoords(latitude, longitude);
           const gps: StoredGpsLocation = {
             latitude,
             longitude,
             locationUrl,
+            ...(geo.city ? { city: geo.city } : {}),
+            ...(geo.address ? { address: geo.address } : {}),
             updatedAt: Date.now(),
           };
           saveStoredGpsLocation(gps);
           if (deviceId) {
             await syncGpsToSupabaseUser(deviceId, gps);
           }
+          const locLabel = geo.address || geo.city || `${latitude}, ${longitude}`;
           resolve({
             ok: true,
             gps,
             errorReason: '',
-            message: `GPS Location Verified (${latitude}, ${longitude})`,
+            message: `GPS Location Verified (${locLabel})`,
           });
         },
         (err) => {
@@ -1503,26 +1668,23 @@ export function requestMandatoryGpsLocation(deviceId?: string): Promise<Mandator
               ok: false,
               gps: null,
               errorReason: 'PERMISSION_DENIED',
-              message:
-                'Account banane ke liye Location (GPS) ON karna aur Allow karna zaroori hai. Browser/Mobile Settings se Location Allow karke Retry karein.',
+              message: mandatoryFailMsg,
             });
           } else if (err?.code === 2) {
             resolve({
               ok: false,
               gps: null,
               errorReason: 'POSITION_UNAVAILABLE',
-              message:
-                'Mobile/Device ki GPS Location band hai. Baraye meharbani GPS Location ON karein aur Retry dabain.',
+              message: mandatoryFailMsg,
             });
           } else if (err?.code === 3) {
-            // If GPS permission is granted and we have a recent (<15 min) stored fix, accept it; otherwise ask retry
             const cached = loadStoredGpsLocation();
             if (cached && Date.now() - cached.updatedAt < 15 * 60 * 1000) {
               resolve({
                 ok: true,
                 gps: cached,
                 errorReason: '',
-                message: `GPS Location Verified (${cached.latitude}, ${cached.longitude})`,
+                message: `GPS Location Verified (${cached.address || cached.city || `${cached.latitude}, ${cached.longitude}`})`,
               });
               return;
             }
@@ -1530,15 +1692,14 @@ export function requestMandatoryGpsLocation(deviceId?: string): Promise<Mandator
               ok: false,
               gps: null,
               errorReason: 'TIMEOUT',
-              message:
-                'GPS Location signal hasil karne mein waqt lag raha hai. Apne device ki Location ON karke Retry dabain.',
+              message: mandatoryFailMsg,
             });
           } else {
             resolve({
               ok: false,
               gps: null,
               errorReason: 'ERROR',
-              message: 'Location ON karke permission Allow karein, phir account banayein.',
+              message: mandatoryFailMsg,
             });
           }
         },
@@ -1553,7 +1714,7 @@ export function requestMandatoryGpsLocation(deviceId?: string): Promise<Mandator
         ok: false,
         gps: null,
         errorReason: 'ERROR',
-        message: 'Location permission check karne mein error aaya. GPS ON karke Retry karein.',
+        message: mandatoryFailMsg,
       });
     }
   });
@@ -1571,10 +1732,13 @@ export function requestAndSaveGpsLocation(deviceId?: string): Promise<StoredGpsL
           const latitude = Number(pos.coords.latitude.toFixed(6));
           const longitude = Number(pos.coords.longitude.toFixed(6));
           const locationUrl = `https://maps.google.com/?q=${latitude},${longitude}`;
+          const geo = await reverseGeocodeCoords(latitude, longitude);
           const gps: StoredGpsLocation = {
             latitude,
             longitude,
             locationUrl,
+            ...(geo.city ? { city: geo.city } : {}),
+            ...(geo.address ? { address: geo.address } : {}),
             updatedAt: Date.now(),
           };
           saveStoredGpsLocation(gps);
@@ -1599,7 +1763,7 @@ export function requestAndSaveGpsLocation(deviceId?: string): Promise<StoredGpsL
 }
 
 // ============================================================================
-// BIOMETRIC / FINGERPRINT BINDING & WEBAUTHN PASSKEY HELPERS
+// BIOMETRIC / FINGERPRINT BINDING & STRICT WEBAUTHN PASSKEY HELPERS
 // ============================================================================
 export const BIOMETRIC_BINDING_KEY = 'boss_biometric_binding_v1';
 
@@ -1669,7 +1833,7 @@ export async function enrollBiometricPasskey(params: {
   deviceId: string;
   identifier: string;
   userName: string;
-}): Promise<{ ok: boolean; credentialId?: string; mode: 'WEBAUTHN' | 'DEVICE_PASSKEY' }> {
+}): Promise<{ ok: boolean; credentialId?: string; mode: 'WEBAUTHN'; error?: string }> {
   try {
     if (
       typeof window !== 'undefined' &&
@@ -1698,9 +1862,9 @@ export async function enrollBiometricPasskey(params: {
           ],
           authenticatorSelection: {
             authenticatorAttachment: 'platform',
-            userVerification: 'preferred',
+            userVerification: 'required',
           },
-          timeout: 45000,
+          timeout: 60000,
         },
       })) as PublicKeyCredential | null;
       if (cred?.rawId) {
@@ -1711,52 +1875,77 @@ export async function enrollBiometricPasskey(params: {
         };
       }
     }
-  } catch {
-    // Cross-origin iframe or hardware without biometric sensor — gracefully fall back to device binding
+    return { ok: false, mode: 'WEBAUTHN', error: 'Biometric passkey could not be created.' };
+  } catch (err: any) {
+    return {
+      ok: false,
+      mode: 'WEBAUTHN',
+      error: err?.message || 'Biometric enrollment failed.',
+    };
   }
-  return { ok: true, mode: 'DEVICE_PASSKEY' };
 }
 
 export async function verifyBiometricPasskey(
   credentialId?: string
-): Promise<{ ok: boolean; cancelled?: boolean; mode: 'WEBAUTHN' | 'DEVICE_PASSKEY' }> {
+): Promise<{ ok: boolean; cancelled?: boolean; mode: 'WEBAUTHN'; error?: string }> {
   if (
-    credentialId &&
-    typeof window !== 'undefined' &&
-    window.PublicKeyCredential &&
-    navigator.credentials?.get &&
-    window.isSecureContext
+    typeof window === 'undefined' ||
+    !window.PublicKeyCredential ||
+    !navigator.credentials?.get ||
+    !window.isSecureContext
   ) {
-    try {
-      const challenge = new Uint8Array(32);
-      window.crypto.getRandomValues(challenge);
-      const allowId = base64UrlToUint8Array(credentialId);
-      const assertion = await navigator.credentials.get({
-        publicKey: {
-          challenge,
-          allowCredentials: [
-            {
-              id: allowId.buffer as ArrayBuffer,
-              type: 'public-key',
-              transports: ['internal'],
-            },
-          ],
-          userVerification: 'preferred',
-          timeout: 45000,
-        },
-      });
-      if (assertion) {
-        return { ok: true, mode: 'WEBAUTHN' };
-      }
-    } catch (err: any) {
-      // If user explicitly cancelled the biometric prompt (AbortError / NotAllowedError outside iframe), handle carefully:
-      // In cross-origin iframes (like AI Studio preview), browsers throw SecurityError or NotAllowedError immediately without showing UI.
-      if (err?.name === 'NotAllowedError' && window.self === window.top) {
-        return { ok: false, cancelled: true, mode: 'WEBAUTHN' };
-      }
-    }
+    return {
+      ok: false,
+      mode: 'WEBAUTHN',
+      error: 'Is device/browser par Biometric (Fingerprint/FaceID) available nahi hai. Password ya Google se Login karein.',
+    };
   }
-  return { ok: true, mode: 'DEVICE_PASSKEY' };
+
+  if (!credentialId) {
+    return {
+      ok: false,
+      mode: 'WEBAUTHN',
+      error: 'Biometric passkey registered nahi hai. Pehle Password ya Google se Login karein.',
+    };
+  }
+
+  try {
+    const challenge = new Uint8Array(32);
+    window.crypto.getRandomValues(challenge);
+    const allowId = base64UrlToUint8Array(credentialId);
+    const assertion = await navigator.credentials.get({
+      publicKey: {
+        challenge,
+        allowCredentials: [
+          {
+            id: allowId.buffer as ArrayBuffer,
+            type: 'public-key',
+            transports: ['internal'],
+          },
+        ],
+        userVerification: 'required',
+        timeout: 60000,
+      },
+    });
+    if (assertion) {
+      return { ok: true, mode: 'WEBAUTHN' };
+    }
+    return {
+      ok: false,
+      mode: 'WEBAUTHN',
+      error: 'Fingerprint / FaceID verify nahi ho saka.',
+    };
+  } catch (err: any) {
+    const cancelled = err?.name === 'NotAllowedError' || err?.name === 'AbortError';
+    return {
+      ok: false,
+      cancelled,
+      mode: 'WEBAUTHN',
+      error: cancelled
+        ? 'Fingerprint / Biometric verification cancel ho gayi ya device verify nahi hui.'
+        : err?.message || 'Biometric sensor verify nahi ho saka. Password ya Google se Login karein.',
+    };
+  }
 }
 
 // ============================================================================
