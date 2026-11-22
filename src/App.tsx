@@ -1962,6 +1962,11 @@ export default function App() {
         }
         if (parsed.customSections) setCustomSections(parsed.customSections);
         if (parsed.hiddenSections) setHiddenSections(parsed.hiddenSections);
+        if (typeof parsed.companyName === 'string') setCompanyName(parsed.companyName);
+        if (typeof parsed.companyTagline === 'string') setCompanyTagline(parsed.companyTagline);
+        if (typeof parsed.companyAddress === 'string') setCompanyAddress(parsed.companyAddress);
+        if (typeof parsed.companyPhone === 'string') setCompanyPhone(parsed.companyPhone);
+        if (typeof parsed.companyNtn === 'string') setCompanyNtn(parsed.companyNtn);
         if (typeof parsed.hardwareRate === 'number') setHardwareRate(parsed.hardwareRate);
         if (typeof parsed.markupPct === 'number') setMarkupPct(parsed.markupPct);
         if (typeof parsed.transportRent === 'number') setTransportRent(parsed.transportRent);
@@ -2435,6 +2440,11 @@ export default function App() {
           availableColors,
           customSections,
           hiddenSections,
+          companyName,
+          companyTagline,
+          companyAddress,
+          companyPhone,
+          companyNtn,
           hardwareRate,
           markupPct,
           transportRent,
@@ -2472,6 +2482,11 @@ export default function App() {
     availableColors,
     customSections,
     hiddenSections,
+    companyName,
+    companyTagline,
+    companyAddress,
+    companyPhone,
+    companyNtn,
     hardwareRate,
     markupPct,
     transportRent,

@@ -57,6 +57,8 @@ import {
   LogOut,
   MessageSquarePlus,
   WifiOff,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react';
 import {
   BossUserRole,
@@ -559,6 +561,9 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   } | null>(null);
   const a4WrapperRef = useRef<HTMLDivElement | null>(null);
   const [a4Scale, setA4Scale] = useState<number>(1);
+  const [quoteZoom, setQuoteZoom] = useState<number>(1);
+  const pinchStateRef = useRef<{ startDist: number; startZoom: number } | null>(null);
+  const effectiveA4Scale = Number((a4Scale * quoteZoom).toFixed(4));
 
   useEffect(() => {
     const updateA4Scale = () => {
@@ -1183,22 +1188,15 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
 
   const handleClientScanRateImages = async (fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return;
+    const selectedFiles = Array.from(fileList).slice(0, 3);
     setRateScanLoading(true);
     try {
       const filesPayload: { imageBase64: string; mimeType: string }[] = [];
-      for (let i = 0; i < Math.min(fileList.length, 3); i++) {
-        const f = fileList[i];
-        const base64 = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => {
-            const res = String(reader.result || '');
-            const idx = res.indexOf(',');
-            resolve(idx >= 0 ? res.slice(idx + 1) : res);
-          };
-          reader.onerror = reject;
-          reader.readAsDataURL(f);
-        });
-        filesPayload.push({ imageBase64: base64, mimeType: f.type || 'image/jpeg' });
+      for (const f of selectedFiles) {
+        const compressedDataUrl = await compressFileToJpegDataUrl(f, 1000, 0.7, 150 * 1024);
+        const commaIdx = compressedDataUrl.indexOf(',');
+        const base64 = commaIdx >= 0 ? compressedDataUrl.slice(commaIdx + 1) : compressedDataUrl;
+        filesPayload.push({ imageBase64: base64, mimeType: 'image/jpeg' });
       }
 
       const resp = await fetch('/api/scan-rate-list', {
@@ -1747,7 +1745,13 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     drawTruncatedText(ctx, companyTagline || 'STRONGER · SMARTER · BETTER', 142, 92, 480);
     ctx.fillStyle = '#CBD5E1';
     ctx.font = '13px sans-serif';
-    drawTruncatedText(ctx, `Phone: ${companyPhone} · ${companyAddress}`, 142, 116, 480);
+    drawTruncatedText(
+      ctx,
+      `Phone: ${companyPhone} · ${companyAddress}${companyNtn?.trim() ? ` · NTN: ${companyNtn.trim()}` : ''}`,
+      142,
+      116,
+      480
+    );
 
     ctx.fillStyle = '#F5B738';
     ctx.font = 'bold 18px monospace';
@@ -1933,7 +1937,13 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     drawTruncatedText(ctx, companyTagline || 'STRONGER · SMARTER · BETTER', 142, 92, 480);
     ctx.fillStyle = '#CBD5E1';
     ctx.font = '13px sans-serif';
-    drawTruncatedText(ctx, `Phone: ${companyPhone} · ${companyAddress}`, 142, 116, 480);
+    drawTruncatedText(
+      ctx,
+      `Phone: ${companyPhone} · ${companyAddress}${companyNtn?.trim() ? ` · NTN: ${companyNtn.trim()}` : ''}`,
+      142,
+      116,
+      480
+    );
 
     const title = 'SAVED OFFICIAL QUOTATION';
     ctx.fillStyle = '#F5B738';
@@ -5883,13 +5893,83 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
             </div>
           )}
 
-          {/* Official Printable Quotation Sheet - STRICTLY LOCKED ALWAYS TO AUTHENTIC A4 PORTRAIT (210mm x 297mm / 794x1123 scaled cleanly for any screen) */}
-          <div ref={a4WrapperRef} className="w-full max-w-full flex justify-center py-2 sm:py-3 overflow-hidden">
+          {/* Mobile & Desktop Quotation Sheet Zoom Toolbar (Pinch or +/- to zoom) */}
+          <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl bg-[#14181F] border border-[#2B3441] text-[11px] no-print">
+            <span className="text-slate-300 font-semibold truncate">
+              Quotation Preview Zoom ({Math.round(quoteZoom * 100)}%)
+            </span>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => setQuoteZoom((z) => Math.max(0.7, Number((z - 0.25).toFixed(2))))}
+                className="boss-flat-btn w-7 h-7 rounded-lg bg-[#0C0F14] border border-slate-700 hover:border-[#F5B738] text-slate-200 flex items-center justify-center cursor-pointer"
+                title="Zoom Out Quotation"
+                aria-label="Zoom Out Quotation"
+              >
+                <ZoomOut className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setQuoteZoom(1)}
+                className="boss-flat-btn px-2 h-7 rounded-lg bg-[#0C0F14] border border-slate-700 hover:border-[#F5B738] text-[#F5B738] font-mono font-bold text-[10px] cursor-pointer"
+                title="Reset Zoom to Fit Screen"
+              >
+                Fit
+              </button>
+              <button
+                type="button"
+                onClick={() => setQuoteZoom((z) => Math.min(2.8, Number((z + 0.25).toFixed(2))))}
+                className="boss-flat-btn w-7 h-7 rounded-lg bg-[#0C0F14] border border-slate-700 hover:border-[#F5B738] text-slate-200 flex items-center justify-center cursor-pointer"
+                title="Zoom In Quotation"
+                aria-label="Zoom In Quotation"
+              >
+                <ZoomIn className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+
+          {/* Official Printable Quotation Sheet - STRICTLY LOCKED ALWAYS TO AUTHENTIC A4 PORTRAIT (210mm x 297mm / 794x1123 scaled cleanly with mobile pinch & pan zoom) */}
+          <div
+            ref={a4WrapperRef}
+            onTouchStart={(e) => {
+              if (e.touches.length === 2) {
+                const dx = e.touches[0].clientX - e.touches[1].clientX;
+                const dy = e.touches[0].clientY - e.touches[1].clientY;
+                pinchStateRef.current = {
+                  startDist: Math.hypot(dx, dy) || 1,
+                  startZoom: quoteZoom,
+                };
+              }
+            }}
+            onTouchMove={(e) => {
+              if (e.touches.length === 2 && pinchStateRef.current) {
+                const dx = e.touches[0].clientX - e.touches[1].clientX;
+                const dy = e.touches[0].clientY - e.touches[1].clientY;
+                const dist = Math.hypot(dx, dy);
+                if (dist > 0) {
+                  const next = pinchStateRef.current.startZoom * (dist / pinchStateRef.current.startDist);
+                  setQuoteZoom(Math.min(2.8, Math.max(0.7, Number(next.toFixed(2)))));
+                }
+              }
+            }}
+            onTouchEnd={(e) => {
+              if (e.touches.length < 2) {
+                pinchStateRef.current = null;
+              }
+            }}
+            onTouchCancel={() => {
+              pinchStateRef.current = null;
+            }}
+            style={{
+              touchAction: quoteZoom > 1 ? 'pan-x pan-y' : 'pan-y',
+            }}
+            className="w-full max-w-full py-2 sm:py-3 overflow-auto"
+          >
             <div
-              className="boss-a4-scale-outer relative shrink-0 overflow-hidden rounded-2xl shadow-2xl"
+              className="boss-a4-scale-outer relative mx-auto shrink-0 overflow-hidden rounded-2xl shadow-2xl"
               style={{
-                width: `${Math.round(794 * a4Scale)}px`,
-                height: `${Math.round(1123 * a4Scale)}px`,
+                width: `${Math.round(794 * effectiveA4Scale)}px`,
+                height: `${Math.round(1123 * effectiveA4Scale)}px`,
               }}
             >
               <div
@@ -5898,7 +5978,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                 style={{
                   width: '794px',
                   height: '1123px',
-                  transform: `scale(${a4Scale})`,
+                  transform: `scale(${effectiveA4Scale})`,
                   transformOrigin: 'top left',
                   aspectRatio: '210 / 297',
                   padding: 0,
@@ -5977,7 +6057,8 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                           </h2>
                           <p className="text-xs text-amber-100 font-semibold">{companyTagline}</p>
                           <p className="text-[11px] text-slate-200">
-                            Phone: {companyPhone} · Factory: {companyAddress} · NTN: {companyNtn}
+                            Phone: {companyPhone} · Factory: {companyAddress}
+                            {companyNtn?.trim() ? ` · NTN: ${companyNtn.trim()}` : ''}
                           </p>
                         </div>
                       </div>
@@ -7850,6 +7931,27 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                     className="w-full px-3 py-2 rounded-lg bg-[#0C0F14] border border-slate-700 text-xs text-white"
                   />
                 </div>
+
+                <div>
+                  <label className="block text-[10px] text-slate-400 mb-1">
+                    NTN Number (Optional — Shown on PDF Bill)
+                  </label>
+                  <input
+                    type="text"
+                    value={companyNtn}
+                    onChange={(e) =>
+                      onUpdateCompanyInfo({
+                        name: companyName,
+                        tagline: companyTagline,
+                        address: companyAddress,
+                        phone: companyPhone,
+                        ntn: e.target.value,
+                      })
+                    }
+                    placeholder="e.g. 1234567-8"
+                    className="w-full px-3 py-2 rounded-lg bg-[#0C0F14] border border-slate-700 text-xs font-mono text-white"
+                  />
+                </div>
               </div>
 
               {/* Client Cloud Profile Photos & Sync */}
@@ -8051,7 +8153,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                 </button>
               </div>
 
-              {/* 2x2 Hardware, Discount, Labour, Transport Grid */}
+              {/* Hardware, Discount, Labour, Transport & NTN Number Grid */}
               <div className="grid grid-cols-2 gap-2.5">
                 <div>
                   <label className="block text-[10px] text-slate-400 mb-1">
@@ -8063,6 +8165,27 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                     value={draftHardwareStr}
                     onChange={(e) => handleHardwareTextChange(e.target.value)}
                     placeholder="0"
+                    className="w-full px-3 py-2 rounded-lg bg-[#0C0F14] border border-slate-700 focus:border-[#F5B738] outline-none font-mono font-bold text-white text-xs"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] text-amber-300 font-bold mb-1">
+                    NTN Number (Bill / PDF)
+                  </label>
+                  <input
+                    type="text"
+                    value={companyNtn}
+                    onChange={(e) =>
+                      onUpdateCompanyInfo({
+                        name: companyName,
+                        tagline: companyTagline,
+                        address: companyAddress,
+                        phone: companyPhone,
+                        ntn: e.target.value,
+                      })
+                    }
+                    placeholder="e.g. 1234567-8"
                     className="w-full px-3 py-2 rounded-lg bg-[#0C0F14] border border-slate-700 focus:border-[#F5B738] outline-none font-mono font-bold text-white text-xs"
                   />
                 </div>
@@ -8095,7 +8218,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   />
                 </div>
 
-                <div>
+                <div className="col-span-2">
                   <label className="block text-[10px] text-slate-400 mb-1">
                     Transport Rent (Rs)
                   </label>

@@ -1125,7 +1125,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         deviceId: clientDeviceId,
         tag: side.toLowerCase(),
       });
-      const finalVal = uploaded.url || (await compressImageToDataUrl(file, 800, 0.6, 80 * 1024));
+      const finalVal =
+        uploaded.url ||
+        (side === 'SELFIE' || side === 'SHOP'
+          ? await compressImageToDataUrl(file, 800, 0.65, 120 * 1024)
+          : await compressImageToDataUrl(file, 800, 0.6, 80 * 1024));
       if (side === 'FRONT') setCnicFrontPhoto(finalVal);
       else if (side === 'BACK') setCnicBackPhoto(finalVal);
       else if (side === 'SELFIE') setSelfiePhoto(finalVal);

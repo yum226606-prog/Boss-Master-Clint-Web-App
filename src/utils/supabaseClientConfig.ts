@@ -481,10 +481,12 @@ export function compressFileToJpegDataUrl(
               resolve(jpeg);
               return;
             }
-            if (currentQuality > 0.34) {
-              currentQuality = Math.max(0.28, Number((currentQuality - 0.1).toFixed(2)));
+            const minQ = maxWidth >= 900 ? 0.45 : 0.28;
+            const minW = maxWidth >= 900 ? 720 : 420;
+            if (currentQuality > minQ + 0.06) {
+              currentQuality = Math.max(minQ, Number((currentQuality - 0.08).toFixed(2)));
             } else {
-              currentMaxW = Math.max(420, Math.round(currentMaxW * 0.8));
+              currentMaxW = Math.max(minW, Math.round(currentMaxW * 0.85));
             }
           }
 
@@ -511,10 +513,11 @@ export async function uploadImageToUserUploadsBucket(params: {
   tag?: string;
 }): Promise<{ url: string; base64DataUrl: string; storedInBucket: boolean }> {
   const isReceipt = params.folder === 'receipts';
+  const isSelfieOrShop = params.folder === 'selfies' || params.folder === 'shops';
   const dataUrl =
     typeof params.fileOrDataUrl === 'string'
       ? params.fileOrDataUrl
-      : isReceipt
+      : isReceipt || isSelfieOrShop
       ? await compressFileToJpegDataUrl(params.fileOrDataUrl, 800, 0.65, 120 * 1024)
       : await compressFileToJpegDataUrl(params.fileOrDataUrl, 800, 0.6, 80 * 1024);
 
