@@ -209,6 +209,33 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
   const [isGoogleAuthenticating, setIsGoogleAuthenticating] = useState(false);
   const processedGoogleUserIdRef = useRef<string | null>(null);
   const [pendingGoogleUser, setPendingGoogleUser] = useState<any | null>(null);
+  const [googleProfileStep, setGoogleProfileStep] = useState<{
+    supaUser: any;
+    email: string;
+    name: string;
+    activeDeviceId: string;
+    macAddress: string;
+    deviceModel: string;
+    publicIp: string;
+    masterCfg: Record<string, any>;
+    gps: StoredGpsLocation | null;
+    serverNowMs: number;
+    existingMatch?: {
+      matchedUser: any;
+      matchedClientUser: any;
+      matchedSub: any;
+      matchedUac: any;
+    } | null;
+  } | null>(null);
+  const [gpName, setGpName] = useState('');
+  const [gpPhone, setGpPhone] = useState('');
+  const [gpCompany, setGpCompany] = useState('');
+  const [gpCnic, setGpCnic] = useState('');
+  const [gpAddress, setGpAddress] = useState('');
+  const [gpCnicFront, setGpCnicFront] = useState('');
+  const [gpCnicBack, setGpCnicBack] = useState('');
+  const [isCompressingGpPhoto, setIsCompressingGpPhoto] = useState<'FRONT' | 'BACK' | null>(null);
+  const [isSavingGoogleProfile, setIsSavingGoogleProfile] = useState(false);
 
   // Mandatory GPS Location State for New Account Creation
   const [liveGps, setLiveGps] = useState<StoredGpsLocation | null>(() => loadStoredGpsLocation());
@@ -737,6 +764,104 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           (Array.isArray(fullSub.data) && fullSub.data[0]) || emailMatch.matchedSub;
 
         setPendingGoogleUser(null);
+
+        const existingPhoneDigits = normalizePhoneDigits(
+          String(
+            fullMatchedUser?.phone ||
+              fullMatchedClientUser?.phone ||
+              fullMatchedSub?.phone ||
+              ''
+          )
+        );
+        const existingCnicDigits = normalizeCnicDigits(
+          String(
+            fullMatchedUser?.cnic ||
+              fullMatchedClientUser?.cnic ||
+              fullMatchedSub?.cnic ||
+              ''
+          )
+        );
+        const existingFront = String(
+          fullMatchedUser?.cnic_front_url || fullMatchedUser?.cnic_front || ''
+        ).trim();
+        const existingBack = String(
+          fullMatchedUser?.cnic_back_url || fullMatchedUser?.cnic_back || ''
+        ).trim();
+
+        if (
+          !isOwner &&
+          (existingPhoneDigits.length < 10 ||
+            existingCnicDigits.length !== 13 ||
+            !existingFront ||
+            !existingBack)
+        ) {
+          const existingBlocked =
+            String(fullMatchedUser?.account_status || fullMatchedUser?.status || '')
+              .trim()
+              .toUpperCase() === 'BLOCKED' || Boolean(fullMatchedUser?.is_blocked);
+          if (existingBlocked) {
+            await supabase.auth.signOut().catch(() => {});
+            setErrorMsg(
+              `Account Blocked: ${fullMatchedUser?.block_reason || 'Suspended by Master Admin'}`
+            );
+            setInfoMsg(null);
+            return;
+          }
+
+          const prefillName = String(
+            fullMatchedUser?.name || fullMatchedClientUser?.name || gName
+          ).trim();
+          const prefillCompany = String(
+            fullMatchedUser?.company_name ||
+              fullMatchedClientUser?.company_name ||
+              `${prefillName} Aluminium & Glass`
+          ).trim();
+          const prefillPhone = String(
+            fullMatchedUser?.phone ||
+              fullMatchedClientUser?.phone ||
+              fullMatchedSub?.phone ||
+              ''
+          ).trim();
+          const prefillCnic = String(
+            fullMatchedUser?.cnic ||
+              fullMatchedClientUser?.cnic ||
+              fullMatchedSub?.cnic ||
+              ''
+          ).trim();
+          const prefillAddr = String(
+            fullMatchedUser?.shop_address || fullMatchedClientUser?.shop_address || ''
+          ).trim();
+
+          setGpName(prefillName);
+          setGpPhone(prefillPhone);
+          setGpCompany(prefillCompany);
+          setGpCnic(prefillCnic);
+          setGpAddress(prefillAddr);
+          setGpCnicFront(existingFront);
+          setGpCnicBack(existingBack);
+          setInfoMsg(null);
+          setErrorMsg(null);
+          setGoogleProfileStep({
+            supaUser,
+            email: gEmail,
+            name: prefillName,
+            activeDeviceId,
+            macAddress,
+            deviceModel,
+            publicIp,
+            masterCfg,
+            gps: loadStoredGpsLocation(),
+            serverNowMs,
+            existingMatch: {
+              matchedUser: fullMatchedUser,
+              matchedClientUser: fullMatchedClientUser,
+              matchedSub: fullMatchedSub,
+              matchedUac: emailMatch.matchedUac,
+            },
+          });
+          return;
+        }
+
         await loginIntoMatchedExistingRecord({
           matchedUser: fullMatchedUser,
           matchedClientUser: fullMatchedClientUser,
@@ -807,6 +932,34 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       }
       setPendingGoogleUser(null);
 
+      // Non-Owner brand-new Google user MUST complete Shop Name, Mobile Number (no SMS OTP), CNIC & CNIC Front/Back photos first
+      if (!isOwner) {
+        const resolvedGpsAddress = gps?.address || gps?.city || '';
+        setGpName(gName);
+        setGpPhone('');
+        setGpCompany(`${gName} Aluminium & Glass`);
+        setGpCnic('');
+        setGpAddress(resolvedGpsAddress);
+        setGpCnicFront('');
+        setGpCnicBack('');
+        setInfoMsg(null);
+        setErrorMsg(null);
+        setGoogleProfileStep({
+          supaUser,
+          email: gEmail,
+          name: gName,
+          activeDeviceId,
+          macAddress,
+          deviceModel,
+          publicIp,
+          masterCfg,
+          gps,
+          serverNowMs,
+          existingMatch: null,
+        });
+        return;
+      }
+
       const now = serverNowMs > 0 ? serverNowMs : getEffectiveServerNowMs() || Date.now();
       const nowIso = new Date(now).toISOString();
       const sessionToken = generateActiveSessionToken();
@@ -814,8 +967,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       const recordUuid = generateSafeUUID();
       const resolvedGpsAddress = gps?.address || gps?.city || '';
 
-      // Brand-new Google user: Auto-create Verified account with trial_used = true
-      const expiry = isOwner ? 0 : now + TWO_DAYS_MS;
+      // Owner VIP Google login: Auto-create / sign-in Verified LIFETIME_VIP account
+      const expiry = 0;
       const newUserPayload: Record<string, any> = {
         id: recordUuid,
         device_id: activeDeviceId,
@@ -835,16 +988,15 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         last_seen: nowIso,
         is_registered: true,
         trial_used: true,
-        account_status: isOwner ? 'ACTIVE' : 'TRIAL',
-        status: isOwner ? 'ACTIVE' : 'TRIAL',
-        is_activated: isOwner,
-        is_lifetime: isOwner,
+        account_status: 'ACTIVE',
+        status: 'ACTIVE',
+        is_activated: true,
+        is_lifetime: true,
         is_blocked: false,
         block_reason: '',
-        subscription_tier: isOwner ? 'LIFETIME_VIP' : 'TRIAL',
-        ...(isOwner ? { package_name: 'Lifetime Free VIP Package' } : {}),
+        subscription_tier: 'LIFETIME_VIP',
+        package_name: 'Lifetime Free VIP Package',
         trial_start: nowIso,
-        ...(isOwner ? {} : { trial_end: new Date(expiry).toISOString() }),
         trial_start_time: now,
         activated_until: expiry,
         activated_until_ms: expiry,
@@ -869,12 +1021,12 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         phone: '',
         cnic: '',
         trial_used: true,
-        status: isOwner ? 'ACTIVE' : 'TRIAL',
-        is_activated: isOwner,
-        is_lifetime: isOwner,
+        status: 'ACTIVE',
+        is_activated: true,
+        is_lifetime: true,
         is_blocked: false,
-        subscription_tier: isOwner ? 'LIFETIME_VIP' : 'TRIAL',
-        ...(isOwner ? { package_name: 'Lifetime Free VIP Package' } : {}),
+        subscription_tier: 'LIFETIME_VIP',
+        package_name: 'Lifetime Free VIP Package',
         activated_until: expiry,
         activated_until_ms: expiry,
         last_updated: now,
@@ -946,14 +1098,10 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         trialExpiresAt: expiry,
         activeSessionToken: sessionToken,
         userRole,
-        ...(isOwner
-          ? {
-              isLifetimeFree: true,
-              isActivated: true,
-              packagePlan: 'LIFETIME_VIP',
-              isBlocked: false,
-            }
-          : {}),
+        isLifetimeFree: true,
+        isActivated: true,
+        packagePlan: 'LIFETIME_VIP',
+        isBlocked: false,
       };
 
       const bioEnrolled = await enrollBiometricPasskey({
@@ -986,6 +1134,515 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       setInfoMsg(null);
     } finally {
       setIsGoogleAuthenticating(false);
+    }
+  };
+
+  const handleGpPhotoUpload = async (
+    e: React.ChangeEvent<HTMLInputElement>,
+    side: 'FRONT' | 'BACK'
+  ) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setErrorMsg(null);
+    setIsCompressingGpPhoto(side);
+    try {
+      const validation = await validateCnicPhotoFile(file);
+      if (!validation.ok) {
+        setErrorMsg(validation.error || 'Please upload a clear CNIC ID Card photo');
+        return;
+      }
+      const uploaded = await uploadImageToUserUploadsBucket({
+        fileOrDataUrl: file,
+        folder: 'cnic',
+        deviceId: googleProfileStep?.activeDeviceId || clientDeviceId,
+        tag: `google_cnic_${side.toLowerCase()}`,
+      });
+      const finalVal = uploaded.url || (await compressImageToDataUrl(file, 800, 0.6, 80 * 1024));
+      if (side === 'FRONT') setGpCnicFront(finalVal);
+      else setGpCnicBack(finalVal);
+    } catch {
+      setErrorMsg('Please upload a clear CNIC ID Card photo');
+    } finally {
+      setIsCompressingGpPhoto(null);
+    }
+  };
+
+  const handleCompleteGoogleProfileSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!googleProfileStep) return;
+    setErrorMsg(null);
+    setInfoMsg(null);
+
+    const cleanName = gpName.trim() || googleProfileStep.name;
+    const cleanCompany = gpCompany.trim();
+    const phoneDigits = normalizePhoneDigits(gpPhone);
+    const cleanPhone = formatPakPhone(gpPhone);
+    const cnicDigits = normalizeCnicDigits(gpCnic);
+    const cleanCnic = formatPakCnic(gpCnic);
+    const cleanAddress = gpAddress.trim();
+    const gEmail = googleProfileStep.email;
+
+    if (cleanName.length < 2) {
+      setErrorMsg('Apna mukammal naam darj karein.');
+      return;
+    }
+    if (!cleanCompany || cleanCompany.length < 2) {
+      setErrorMsg('Apni Shop / Company ka naam darj karein.');
+      return;
+    }
+    if (phoneDigits.length < 10) {
+      setErrorMsg('Sahi Pakistani Mobile Number darj karein (maslan 0300-1234567).');
+      return;
+    }
+    if (cnicDigits.length !== 13) {
+      setErrorMsg('13 digits ka sahi CNIC Number darj karein (maslan 37405-1234567-1).');
+      return;
+    }
+    if (!gpCnicFront || !gpCnicBack) {
+      setErrorMsg('CNIC ki Front aur Back dono tasveerein upload karna lazmi hai.');
+      return;
+    }
+
+    setIsSavingGoogleProfile(true);
+    try {
+      const activeDeviceId = googleProfileStep.activeDeviceId || getOrCreateClientDeviceId();
+      const [usersDupRes, clientUsersDupRes, subsDupRes, masterCfg, publicIp, serverNowMs] =
+        await Promise.all([
+          fetchDuplicateCheckRows('users', 8000),
+          fetchDuplicateCheckRows('client_users', 8000),
+          fetchDuplicateCheckRows('subscriptions', 8000),
+          fetchMasterEngineConfigFromSupabase(),
+          getClientPublicIpAddress(),
+          fetchSupabaseServerTimeMs(),
+        ]);
+
+      if (!usersDupRes.ok && !clientUsersDupRes.ok) {
+        setErrorMsg(
+          `Database connection error (${usersDupRes.error || clientUsersDupRes.error || 'Supabase unreachable'}). Profile save nahi hua.`
+        );
+        return;
+      }
+
+      const effectiveMasterCfg =
+        Object.keys(masterCfg || {}).length > 0 ? masterCfg : googleProfileStep.masterCfg;
+      const uacList = Array.isArray(effectiveMasterCfg?.userAccessControl)
+        ? effectiveMasterCfg.userAccessControl
+        : Object.values(effectiveMasterCfg?.userAccessControl || {});
+
+      const existingOwnDev = String(
+        googleProfileStep.existingMatch?.matchedUser?.device_id ||
+          googleProfileStep.existingMatch?.matchedClientUser?.device_id ||
+          googleProfileStep.existingMatch?.matchedSub?.device_id ||
+          ''
+      ).trim();
+
+      const excludeSelfRows = (rows: any[]) =>
+        rows.filter((r: any) => {
+          const rEmail = String(r?.email || '').trim().toLowerCase();
+          const rDev = String(r?.device_id || '').trim();
+          if (rEmail && rEmail === gEmail) return false;
+          if (existingOwnDev && rDev && rDev === existingOwnDev) return false;
+          return true;
+        });
+
+      const otherUsers = excludeSelfRows(usersDupRes.rows);
+      const otherClientUsers = excludeSelfRows(clientUsersDupRes.rows);
+      const otherSubs = excludeSelfRows(subsDupRes.rows);
+      const otherUac = excludeSelfRows(uacList);
+
+      // Strict Duplicate CNIC, Phone, and Device check against all OTHER users (prevents duplicate trial abuse)
+      const dupMatch = findExistingAccountComboMatch({
+        email: gEmail,
+        phone: cleanPhone,
+        cnic: cleanCnic,
+        deviceId: googleProfileStep.existingMatch ? undefined : activeDeviceId,
+        ipAddress: googleProfileStep.existingMatch ? undefined : publicIp,
+        macAddress: googleProfileStep.existingMatch ? undefined : googleProfileStep.macAddress,
+        usersList: otherUsers,
+        clientUsersList: otherClientUsers,
+        subsList: otherSubs,
+        uacList: otherUac,
+        identityOnly: false,
+      });
+
+      if (
+        (dupMatch.matchedUser ||
+          dupMatch.matchedClientUser ||
+          dupMatch.matchedSub ||
+          dupMatch.matchedUac) &&
+        !dupMatch.allowMultiAccount
+      ) {
+        const dupLabels = dupMatch.matchedFields.join(', ') || 'CNIC / Phone / Device';
+        setErrorMsg(
+          `Duplicate Account Detected (${dupLabels}): Yeh CNIC ya Mobile Number pehle se kisi aur account par registered hai. Same CNIC se dobara free trial lena allowed nahi!`
+        );
+        return;
+      }
+
+      // Ensure GPS location for non-owner signup completion
+      let gps = googleProfileStep.gps || liveGps || loadStoredGpsLocation();
+      if (!gps) {
+        const gpsRes = await requestMandatoryGpsLocation();
+        if (!gpsRes.ok || !gpsRes.gps) {
+          setGpsStatus('ERROR');
+          setGpsStatusMsg(gpsRes.message);
+          setErrorMsg(gpsRes.message || 'Please allow Location access to complete your account.');
+          return;
+        }
+        gps = gpsRes.gps;
+        setLiveGps(gps);
+        setGpsStatus('READY');
+        setGpsStatusMsg(gpsRes.message);
+      }
+
+      const now =
+        serverNowMs > 0
+          ? serverNowMs
+          : googleProfileStep.serverNowMs > 0
+          ? googleProfileStep.serverNowMs
+          : getEffectiveServerNowMs() || Date.now();
+      const nowIso = new Date(now).toISOString();
+      const resolvedAddress = cleanAddress || gps?.address || gps?.city || '';
+
+      // Case 1: Returning incomplete Google user — patch existing record & sign in preserving original trial
+      if (googleProfileStep.existingMatch) {
+        const { matchedUser, matchedClientUser, matchedSub, matchedUac } =
+          googleProfileStep.existingMatch;
+
+        const targetEmail = String(
+          matchedUser?.email || matchedClientUser?.email || gEmail
+        ).trim();
+        const targetDev = String(
+          matchedUser?.device_id || matchedClientUser?.device_id || ''
+        ).trim();
+        const userPatchQuery = targetDev
+          ? `device_id=eq.${encodeURIComponent(targetDev)}`
+          : `email=ilike.${encodeURIComponent(targetEmail)}`;
+
+        const [uPatchRes, cuPatchRes] = await Promise.all([
+          matchedUser
+            ? callSupabaseProxy({
+                table: 'users',
+                method: 'PATCH',
+                query: userPatchQuery,
+                payload: {
+                  name: cleanName,
+                  company_name: cleanCompany,
+                  phone: cleanPhone,
+                  cnic: cleanCnic,
+                  shop_address: resolvedAddress,
+                  cnic_front_url: gpCnicFront,
+                  cnic_back_url: gpCnicBack,
+                  last_cloud_sync: now,
+                  last_seen: nowIso,
+                },
+                timeoutMs: 12000,
+              })
+            : callSupabaseProxy({
+                table: 'users',
+                method: 'POST',
+                upsert: true,
+                payload: {
+                  id: generateSafeUUID(),
+                  device_id: targetDev || activeDeviceId,
+                  user_id: targetDev || activeDeviceId,
+                  name: cleanName,
+                  company_name: cleanCompany,
+                  phone: cleanPhone,
+                  email: gEmail,
+                  cnic: cleanCnic,
+                  shop_address: resolvedAddress,
+                  cnic_front_url: gpCnicFront,
+                  cnic_back_url: gpCnicBack,
+                  trial_used: true,
+                  is_registered: true,
+                  created_at: nowIso,
+                },
+                timeoutMs: 12000,
+              }),
+          callSupabaseProxy({
+            table: 'client_users',
+            method: matchedClientUser ? 'PATCH' : 'POST',
+            ...(matchedClientUser
+              ? { query: userPatchQuery }
+              : { upsert: true }),
+            payload: {
+              ...(matchedClientUser ? {} : { id: generateSafeUUID(), device_id: targetDev || activeDeviceId, email: gEmail, created_at: nowIso }),
+              name: cleanName,
+              company_name: cleanCompany,
+              phone: cleanPhone,
+              cnic: cleanCnic,
+              shop_address: resolvedAddress,
+              last_seen: nowIso,
+            },
+            timeoutMs: 10000,
+          }),
+          matchedSub
+            ? callSupabaseProxy({
+                table: 'subscriptions',
+                method: 'PATCH',
+                query: matchedSub?.device_id
+                  ? `device_id=eq.${encodeURIComponent(String(matchedSub.device_id))}`
+                  : userPatchQuery,
+                payload: {
+                  user_name: cleanName,
+                  phone: cleanPhone,
+                  cnic: cleanCnic,
+                  updated_at: nowIso,
+                  last_updated: now,
+                },
+                timeoutMs: 8000,
+              })
+            : Promise.resolve({ ok: true }),
+        ]);
+
+        if (!uPatchRes.ok && !cuPatchRes.ok) {
+          setErrorMsg(
+            `Database save error — profile update nahi hua (${uPatchRes.error || cuPatchRes.error || 'Network error'}).`
+          );
+          return;
+        }
+
+        const updatedMatchedUser = {
+          ...(matchedUser || {}),
+          name: cleanName,
+          company_name: cleanCompany,
+          phone: cleanPhone,
+          email: gEmail,
+          cnic: cleanCnic,
+          shop_address: resolvedAddress,
+          cnic_front_url: gpCnicFront,
+          cnic_back_url: gpCnicBack,
+        };
+        const updatedMatchedClient = {
+          ...(matchedClientUser || {}),
+          name: cleanName,
+          company_name: cleanCompany,
+          phone: cleanPhone,
+          email: gEmail,
+          cnic: cleanCnic,
+          shop_address: resolvedAddress,
+        };
+
+        setGoogleProfileStep(null);
+        await loginIntoMatchedExistingRecord({
+          matchedUser: updatedMatchedUser,
+          matchedClientUser: updatedMatchedClient,
+          matchedSub,
+          matchedUac,
+          usersList: [updatedMatchedUser],
+          clientUsersList: [updatedMatchedClient],
+          subsList: matchedSub ? [matchedSub] : subsDupRes.rows,
+          masterCfg: effectiveMasterCfg,
+          publicIp: publicIp || googleProfileStep.publicIp,
+          macAddress: googleProfileStep.macAddress,
+          deviceModel: googleProfileStep.deviceModel,
+          gps,
+          serverNowMs: now,
+          fallbackName: cleanName,
+          fallbackEmail: gEmail,
+          fallbackPhone: cleanPhone,
+          fallbackCnic: cleanCnic,
+          fallbackAddress: resolvedAddress,
+        });
+        return;
+      }
+
+      // Case 2: Brand-new Google user — strict insert into users, client_users, subscriptions
+      const sessionToken = generateActiveSessionToken();
+      const userRole = resolveUserRole({
+        email: gEmail,
+        phone: cleanPhone,
+        cnic: cleanCnic,
+        masterCfg: effectiveMasterCfg,
+      });
+      const recordUuid = generateSafeUUID();
+      const expiry = now + TWO_DAYS_MS;
+
+      const newUserPayload: Record<string, any> = {
+        id: recordUuid,
+        device_id: activeDeviceId,
+        user_id: activeDeviceId,
+        name: cleanName,
+        company_name: cleanCompany,
+        phone: cleanPhone,
+        email: gEmail,
+        cnic: cleanCnic,
+        shop_address: resolvedAddress,
+        cnic_front_url: gpCnicFront,
+        cnic_back_url: gpCnicBack,
+        ip_address: publicIp || googleProfileStep.publicIp || '',
+        mac_address: googleProfileStep.macAddress,
+        device_model: googleProfileStep.deviceModel,
+        fingerprint_enabled: true,
+        active_session_token: sessionToken,
+        is_online: true,
+        last_seen: nowIso,
+        is_registered: true,
+        trial_used: true,
+        account_status: 'TRIAL',
+        status: 'TRIAL',
+        is_activated: false,
+        is_lifetime: false,
+        is_blocked: false,
+        block_reason: '',
+        subscription_tier: 'TRIAL',
+        trial_start: nowIso,
+        trial_end: new Date(expiry).toISOString(),
+        trial_start_time: now,
+        activated_until: expiry,
+        activated_until_ms: expiry,
+        subscription_expiry: expiry,
+        last_cloud_sync: now,
+        created_at: nowIso,
+        ...(gps
+          ? {
+              latitude: gps.latitude,
+              longitude: gps.longitude,
+              location_url: gps.locationUrl,
+              ...(gps.city ? { gps_city: gps.city } : {}),
+              ...(gps.address ? { gps_address: gps.address } : {}),
+            }
+          : {}),
+      };
+
+      const newSubPayload = {
+        device_id: activeDeviceId,
+        user_name: cleanName,
+        email: gEmail,
+        phone: cleanPhone,
+        cnic: cleanCnic,
+        trial_used: true,
+        status: 'TRIAL',
+        is_activated: false,
+        is_lifetime: false,
+        is_blocked: false,
+        subscription_tier: 'TRIAL',
+        activated_until: expiry,
+        activated_until_ms: expiry,
+        last_updated: now,
+        updated_at: nowIso,
+        created_at: nowIso,
+      };
+
+      const [uRes, cuRes, subRes] = await Promise.all([
+        callSupabaseProxy({
+          table: 'users',
+          method: 'POST',
+          upsert: true,
+          payload: newUserPayload,
+          timeoutMs: 14000,
+        }),
+        callSupabaseProxy({
+          table: 'client_users',
+          method: 'POST',
+          upsert: true,
+          payload: {
+            id: recordUuid,
+            device_id: activeDeviceId,
+            name: cleanName,
+            email: gEmail,
+            phone: cleanPhone,
+            cnic: cleanCnic,
+            shop_address: resolvedAddress,
+            company_name: cleanCompany,
+            role: userRole,
+            active_session_token: sessionToken,
+            is_online: true,
+            last_seen: nowIso,
+            created_at: nowIso,
+          },
+          timeoutMs: 10000,
+        }),
+        callSupabaseProxy({
+          table: 'subscriptions',
+          method: 'POST',
+          upsert: true,
+          payload: newSubPayload,
+          timeoutMs: 10000,
+        }),
+      ]);
+
+      if (!uRes.ok || !cuRes.ok) {
+        const errs: string[] = [];
+        if (!uRes.ok) errs.push(`users: ${uRes.error || `HTTP ${uRes.status}`}`);
+        if (!cuRes.ok) errs.push(`client_users: ${cuRes.error || `HTTP ${cuRes.status}`}`);
+        setErrorMsg(`Database save error — profile create nahi hua (${errs.join(' | ')}).`);
+        return;
+      }
+
+      if (!subRes.ok) {
+        await callSupabaseProxy({
+          table: 'subscriptions',
+          method: 'POST',
+          upsert: true,
+          payload: {
+            device_id: activeDeviceId,
+            user_name: cleanName,
+            email: gEmail,
+            phone: cleanPhone,
+            cnic: cleanCnic,
+            trial_used: true,
+            status: 'TRIAL',
+            is_activated: false,
+            is_lifetime: false,
+            subscription_tier: 'TRIAL',
+            updated_at: nowIso,
+          },
+          timeoutMs: 8000,
+        });
+      }
+
+      saveActiveSessionToken(sessionToken);
+
+      const session: ClientAuthSession = {
+        verified: true,
+        deviceId: activeDeviceId,
+        userId: activeDeviceId,
+        name: cleanName,
+        phone: cleanPhone,
+        email: gEmail,
+        cnic: cleanCnic,
+        shopAddress: resolvedAddress,
+        companyName: cleanCompany,
+        loggedInAt: now,
+        trialStartTime: now,
+        trialExpiresAt: expiry,
+        activeSessionToken: sessionToken,
+        userRole,
+      };
+
+      const bioEnrolled = await enrollBiometricPasskey({
+        deviceId: activeDeviceId,
+        identifier: gEmail,
+        userName: cleanName,
+      });
+      if (bioEnrolled.ok && bioEnrolled.credentialId) {
+        const binding: BiometricBinding = {
+          deviceId: activeDeviceId,
+          identifier: gEmail,
+          userName: cleanName,
+          email: gEmail,
+          phone: cleanPhone,
+          cnic: cleanCnic,
+          credentialId: bioEnrolled.credentialId,
+          enrolledAt: now,
+        };
+        saveBiometricBinding(binding);
+        setBiometricBinding(binding);
+      }
+
+      if (typeof window !== 'undefined' && window.history?.replaceState) {
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }
+      setGoogleProfileStep(null);
+      saveAuthSession(session);
+      onAuthenticated(session);
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Profile save karte waqt network error aaya. Dobara try karein.');
+    } finally {
+      setIsSavingGoogleProfile(false);
     }
   };
 
@@ -2505,44 +3162,46 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           </span>
         </div>
 
-        {/* 2 Clean Tabs: Login vs Create Account */}
-        <div className="grid grid-cols-2 gap-1.5 p-2.5 bg-[#090C12] border-b border-slate-800">
-          <button
-            type="button"
-            onClick={() => {
-              setActiveTab('LOGIN');
-              setErrorMsg(null);
-              setShowSwitchToRegisterHint(false);
-              setShowSwitchToLoginHint(false);
-            }}
-            className={`boss-flat-btn py-2 px-2 rounded-xl text-[11px] sm:text-xs font-black flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
-              activeTab === 'LOGIN'
-                ? 'bg-[#F5B738] text-black shadow-md'
-                : 'bg-[#14181F] text-slate-300 border border-slate-800 hover:border-[#F5B738]/50'
-            }`}
-          >
-            <LogIn className="w-3.5 h-3.5 shrink-0" />
-            <span className="truncate">Login (Pehle Se Account Hai)</span>
-          </button>
+        {/* 2 Clean Tabs: Login vs Create Account (hidden while completing mandatory Google Shop & CNIC Profile) */}
+        {!googleProfileStep && (
+          <div className="grid grid-cols-2 gap-1.5 p-2.5 bg-[#090C12] border-b border-slate-800">
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('LOGIN');
+                setErrorMsg(null);
+                setShowSwitchToRegisterHint(false);
+                setShowSwitchToLoginHint(false);
+              }}
+              className={`boss-flat-btn py-2 px-2 rounded-xl text-[11px] sm:text-xs font-black flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                activeTab === 'LOGIN'
+                  ? 'bg-[#F5B738] text-black shadow-md'
+                  : 'bg-[#14181F] text-slate-300 border border-slate-800 hover:border-[#F5B738]/50'
+              }`}
+            >
+              <LogIn className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Login (Pehle Se Account Hai)</span>
+            </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              setActiveTab('REGISTER');
-              setErrorMsg(null);
-              setShowSwitchToRegisterHint(false);
-              setShowSwitchToLoginHint(false);
-            }}
-            className={`boss-flat-btn py-2 px-2 rounded-xl text-[11px] sm:text-xs font-black flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
-              activeTab === 'REGISTER'
-                ? 'bg-[#F5B738] text-black shadow-md'
-                : 'bg-[#14181F] text-slate-300 border border-slate-800 hover:border-[#F5B738]/50'
-            }`}
-          >
-            <UserPlus className="w-3.5 h-3.5 shrink-0" />
-            <span className="truncate">Create Account (Naya Account)</span>
-          </button>
-        </div>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('REGISTER');
+                setErrorMsg(null);
+                setShowSwitchToRegisterHint(false);
+                setShowSwitchToLoginHint(false);
+              }}
+              className={`boss-flat-btn py-2 px-2 rounded-xl text-[11px] sm:text-xs font-black flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                activeTab === 'REGISTER'
+                  ? 'bg-[#F5B738] text-black shadow-md'
+                  : 'bg-[#14181F] text-slate-300 border border-slate-800 hover:border-[#F5B738]/50'
+              }`}
+            >
+              <UserPlus className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Create Account (Naya Account)</span>
+            </button>
+          </div>
+        )}
 
         {/* Modal Body */}
         <div className="p-4 sm:p-5 space-y-3.5 max-h-[78vh] overflow-y-auto">
@@ -2601,9 +3260,206 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           )}
 
           {/* =============================================================== */}
+          {/* MANDATORY GOOGLE SIGN-IN COMPLETION: SHOP & CNIC PROFILE POPUP  */}
+          {/* =============================================================== */}
+          {googleProfileStep && (
+            <form onSubmit={handleCompleteGoogleProfileSubmit} className="space-y-3">
+              <div className="p-3 rounded-xl bg-emerald-950/35 border border-emerald-500/50 space-y-1">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-xs font-black text-[#F5B738] flex items-center gap-1.5">
+                    <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>Complete Your Shop &amp; CNIC Profile</span>
+                  </div>
+                  <span className="px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 text-[9.5px] font-bold">
+                    Google Verified ✓
+                  </span>
+                </div>
+                <p className="text-[10.5px] text-slate-300 leading-snug">
+                  <strong className="text-white">{googleProfileStep.email}</strong> verify ho chuka hai. App use karne se pehle apna Mobile Number (bina SMS OTP ke), Shop Name, aur CNIC verification mukammal karein.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-[10.5px] font-bold text-slate-300 mb-1">
+                    Full Name <span className="text-[#F5B738]">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={gpName}
+                    onChange={(e) => setGpName(e.target.value)}
+                    placeholder="Muhammad Kashif"
+                    className="w-full px-3 py-2 rounded-lg bg-[#14181F] border border-slate-700 text-white text-xs focus:border-[#F5B738] outline-none"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10.5px] font-bold text-slate-300 mb-1">
+                    Mobile Number (No SMS OTP) <span className="text-[#F5B738]">*</span>
+                  </label>
+                  <input
+                    type="tel"
+                    value={gpPhone}
+                    onChange={(e) => setGpPhone(e.target.value)}
+                    placeholder="0300-1234567"
+                    className="w-full px-3 py-2 rounded-lg bg-[#14181F] border border-slate-700 text-white text-xs font-mono focus:border-[#F5B738] outline-none"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10.5px] font-bold text-slate-300 mb-1">
+                    Shop / Company Name <span className="text-[#F5B738]">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={gpCompany}
+                    onChange={(e) => setGpCompany(e.target.value)}
+                    placeholder="e.g. Bismillah Aluminium & Glass"
+                    className="w-full px-3 py-2 rounded-lg bg-[#14181F] border border-slate-700 text-white text-xs focus:border-[#F5B738] outline-none"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10.5px] font-bold text-slate-300 mb-1">
+                    CNIC Number (13 Digits) <span className="text-[#F5B738]">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={gpCnic}
+                    onChange={(e) => setGpCnic(e.target.value)}
+                    placeholder="37405-1234567-1"
+                    className="w-full px-3 py-2 rounded-lg bg-[#14181F] border border-slate-700 text-white text-xs font-mono focus:border-[#F5B738] outline-none"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[10.5px] font-bold text-slate-300 mb-1">
+                  Shop / Factory Address
+                </label>
+                <input
+                  type="text"
+                  value={gpAddress}
+                  onChange={(e) => setGpAddress(e.target.value)}
+                  placeholder="Main Aluminium Market, City"
+                  className="w-full px-3 py-2 rounded-lg bg-[#14181F] border border-slate-700 text-white text-xs focus:border-[#F5B738] outline-none"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2.5">
+                <label className="cursor-pointer rounded-xl bg-[#14181F] border border-dashed border-slate-700 hover:border-[#F5B738] p-2.5 flex flex-col items-center justify-center text-center gap-1.5 min-h-[92px] overflow-hidden">
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => handleGpPhotoUpload(e, 'FRONT')}
+                    className="hidden"
+                  />
+                  {gpCnicFront ? (
+                    <>
+                      <img
+                        src={gpCnicFront}
+                        alt="CNIC Front"
+                        className="w-full h-14 object-cover rounded-lg border border-emerald-500/60"
+                      />
+                      <span className="text-[10px] font-bold text-emerald-400 flex items-center gap-1">
+                        <CheckCircle2 className="w-3 h-3" /> CNIC Front Ready
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      {isCompressingGpPhoto === 'FRONT' ? (
+                        <RefreshCw className="w-5 h-5 text-[#F5B738] animate-spin" />
+                      ) : (
+                        <Camera className="w-5 h-5 text-[#F5B738]" />
+                      )}
+                      <span className="text-[10.5px] font-bold text-white">CNIC Front Photo *</span>
+                      <span className="text-[9.5px] text-slate-400 flex items-center gap-1">
+                        <Upload className="w-3 h-3" /> Camera / Gallery (&lt;80KB)
+                      </span>
+                    </>
+                  )}
+                </label>
+
+                <label className="cursor-pointer rounded-xl bg-[#14181F] border border-dashed border-slate-700 hover:border-[#F5B738] p-2.5 flex flex-col items-center justify-center text-center gap-1.5 min-h-[92px] overflow-hidden">
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => handleGpPhotoUpload(e, 'BACK')}
+                    className="hidden"
+                  />
+                  {gpCnicBack ? (
+                    <>
+                      <img
+                        src={gpCnicBack}
+                        alt="CNIC Back"
+                        className="w-full h-14 object-cover rounded-lg border border-emerald-500/60"
+                      />
+                      <span className="text-[10px] font-bold text-emerald-400 flex items-center gap-1">
+                        <CheckCircle2 className="w-3 h-3" /> CNIC Back Ready
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      {isCompressingGpPhoto === 'BACK' ? (
+                        <RefreshCw className="w-5 h-5 text-[#F5B738] animate-spin" />
+                      ) : (
+                        <Camera className="w-5 h-5 text-[#F5B738]" />
+                      )}
+                      <span className="text-[10.5px] font-bold text-white">CNIC Back Photo *</span>
+                      <span className="text-[9.5px] text-slate-400 flex items-center gap-1">
+                        <Upload className="w-3 h-3" /> Camera / Gallery (&lt;80KB)
+                      </span>
+                    </>
+                  )}
+                </label>
+              </div>
+
+              <div className="flex items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  disabled={isSavingGoogleProfile}
+                  onClick={async () => {
+                    setGoogleProfileStep(null);
+                    setErrorMsg(null);
+                    setInfoMsg(null);
+                    processedGoogleUserIdRef.current = null;
+                    await supabase.auth.signOut().catch(() => {});
+                  }}
+                  className="boss-flat-btn px-3 py-2.5 rounded-xl bg-[#14181F] border border-slate-700 text-slate-300 hover:text-white text-xs font-bold flex items-center gap-1 cursor-pointer"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <span>Cancel</span>
+                </button>
+
+                <button
+                  type="submit"
+                  disabled={isSavingGoogleProfile || isCompressingGpPhoto !== null}
+                  className="boss-flat-btn flex-1 py-2.5 px-3 rounded-xl bg-[#F5B738] hover:bg-amber-400 text-black font-black text-xs flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+                >
+                  {isSavingGoogleProfile ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>Verifying CNIC &amp; Saving Profile...</span>
+                    </>
+                  ) : (
+                    <>
+                      <ShieldCheck className="w-4 h-4" />
+                      <span>Save Shop &amp; CNIC Profile &amp; Enter App</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          )}
+
+          {/* =============================================================== */}
           {/* TAB A: LOGIN (UNIVERSAL EMAIL/PHONE/CNIC + PASSWORD + BIOMETRIC) */}
           {/* =============================================================== */}
-          {activeTab === 'LOGIN' && (
+          {!googleProfileStep && activeTab === 'LOGIN' && (
             <form onSubmit={handleLoginSubmit} className="space-y-3">
               {/* Continue with Google Button */}
               <button
@@ -2747,7 +3603,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           {/* =============================================================== */}
           {/* TAB B: CREATE ACCOUNT (GOOGLE + PASSWORD + CNIC + EMAIL OTP)    */}
           {/* =============================================================== */}
-          {activeTab === 'REGISTER' && regStep === 'FORM' && (
+          {!googleProfileStep && activeTab === 'REGISTER' && regStep === 'FORM' && (
             <form onSubmit={handleSendOtpStep} className="space-y-3">
               {/* Continue with Google Button */}
               <button
@@ -3105,7 +3961,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           {/* =============================================================== */}
           {/* TAB B STEP 2: EMAIL OTP VERIFICATION (NO ON-SCREEN OTP)         */}
           {/* =============================================================== */}
-          {activeTab === 'REGISTER' && regStep === 'OTP' && (
+          {!googleProfileStep && activeTab === 'REGISTER' && regStep === 'OTP' && (
             <form onSubmit={handleVerifyOtpAndRegister} className="space-y-3.5">
               <div className="p-3 rounded-xl bg-[#14181F] border border-[#F5B738]/40 space-y-1 text-xs">
                 <div className="font-bold text-[#F5B738] flex items-center gap-1.5">
