@@ -562,6 +562,9 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   const a4WrapperRef = useRef<HTMLDivElement | null>(null);
   const [a4Scale, setA4Scale] = useState<number>(1);
   const [quoteZoom, setQuoteZoom] = useState<number>(1);
+  const [quoteRefNumber] = useState<string>(
+    () => `#BOSS-${Math.floor(Date.now() / 1000).toString().slice(-4)}`
+  );
   const pinchStateRef = useRef<{ startDist: number; startZoom: number } | null>(null);
   const effectiveA4Scale = Number((a4Scale * quoteZoom).toFixed(4));
 
@@ -1755,7 +1758,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
 
     ctx.fillStyle = '#F5B738';
     ctx.font = 'bold 18px monospace';
-    drawTruncatedText(ctx, title, width - 44, 68, 430, 'right');
+    drawTruncatedText(ctx, `${title} (${quoteRefNumber})`, width - 44, 68, 430, 'right');
     ctx.fillStyle = '#E2E8F0';
     ctx.font = '13px monospace';
     drawTruncatedText(ctx, `Date: ${new Date().toLocaleDateString('en-GB')}`, width - 44, 94, 430, 'right');
@@ -6038,7 +6041,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                           Date: {new Date().toLocaleDateString('en-GB')}
                         </span>
                         <span className="px-2.5 py-1 rounded bg-amber-500/20 border border-amber-500/40 text-[#F5B738] font-black">
-                          #BOSS-{Math.floor(Date.now() / 1000).toString().slice(-4)}
+                          {quoteRefNumber}
                         </span>
                       </div>
                     </div>
@@ -6062,10 +6065,15 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                           </p>
                         </div>
                       </div>
-                      <div className="text-right font-mono text-xs">
+                      <div className="text-right font-mono text-xs space-y-1">
                         <div className="text-[#F5B738] font-black text-sm">OFFICIAL QUOTATION</div>
-                        <div className="text-slate-200">
-                          Date: {new Date().toLocaleDateString('en-GB')}
+                        <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                          <span className="px-2 py-0.5 rounded bg-[#0C1017]/90 border border-amber-500/40 text-slate-200 font-semibold">
+                            Date: {new Date().toLocaleDateString('en-GB')}
+                          </span>
+                          <span className="px-2.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-[#F5B738] font-black">
+                            {quoteRefNumber}
+                          </span>
                         </div>
                       </div>
                     </div>
