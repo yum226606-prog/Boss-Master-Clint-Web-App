@@ -102,6 +102,7 @@ interface ClientProfileHubModalProps {
   onUpdateLayoutConfig: (cfg: ClientAppLayoutControlConfig) => void;
   mainLogoUrl: string;
   letterheadBgUrl: string;
+  isCustomLetterhead?: boolean;
   onUpdateLetterheadBgUrl: (url: string) => void;
   onRestoreDefaultBrandingAssets?: () => void;
   onSyncUserProfileToCloud?: (profilePatch: {
@@ -174,6 +175,7 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
   onUpdateLayoutConfig,
   mainLogoUrl,
   letterheadBgUrl,
+  isCustomLetterhead = false,
   onUpdateLetterheadBgUrl,
   onRestoreDefaultBrandingAssets,
   onSyncUserProfileToCloud,
@@ -1443,7 +1445,20 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
                 {/* Quotation Letterhead Background */}
                 <div className="p-3 rounded-xl bg-[#14181F] border border-slate-800 space-y-2">
                   <div className="flex items-center justify-between gap-1">
-                    <span className="text-[11px] font-bold text-[#F5B738]">Letterhead BG</span>
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="text-[11px] font-bold text-[#F5B738] truncate">
+                        Letterhead BG
+                      </span>
+                      <span
+                        className={`px-1.5 py-0.5 rounded text-[9px] font-black shrink-0 ${
+                          isCustomLetterhead
+                            ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
+                            : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                        }`}
+                      >
+                        {isCustomLetterhead ? 'Custom' : 'Admin Default'}
+                      </span>
+                    </div>
                     <button
                       type="button"
                       onClick={() =>
@@ -1452,7 +1467,7 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
                           showLetterheadBackground: !layoutConfig.showLetterheadBackground,
                         })
                       }
-                      className={`px-2 py-0.5 rounded text-[9.5px] font-black cursor-pointer ${
+                      className={`px-2 py-0.5 rounded text-[9.5px] font-black cursor-pointer shrink-0 ${
                         layoutConfig.showLetterheadBackground
                           ? 'bg-emerald-500 text-black'
                           : 'bg-slate-800 text-slate-300'
@@ -1462,11 +1477,13 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
                     </button>
                   </div>
                   <div className="flex items-center gap-2">
-                    <img
-                      src={letterheadBgUrl}
-                      alt="Letterhead"
-                      className="w-12 h-12 rounded-lg object-cover border border-slate-700 shrink-0"
-                    />
+                    <div className="w-11 h-[62px] rounded-md overflow-hidden border border-[#F5B738]/50 bg-[#0C1017] shrink-0">
+                      <img
+                        src={letterheadBgUrl}
+                        alt="Letterhead"
+                        className="w-full h-full object-fill"
+                      />
+                    </div>
                     <label className="boss-flat-btn flex-1 py-2 px-2.5 rounded-lg bg-[#0C1017] border border-slate-700 hover:border-[#F5B738] text-center font-bold cursor-pointer">
                       <input
                         type="file"
@@ -1480,7 +1497,12 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
                           try {
                             const url = await compressFileToJpegDataUrl(f, 800, 0.65, 120 * 1024);
                             onUpdateLetterheadBgUrl(url);
-                            showToast('✅ Letterhead BG compressed (<120KB) & updated!');
+                            onUpdateLayoutConfig({
+                              ...layoutConfig,
+                              showLetterheadBackground: true,
+                              backgroundFitStyle: 'FILL',
+                            });
+                            showToast('✅ Custom Letterhead BG compressed (<120KB) & updated!');
                           } finally {
                             setIsUploadingShopImg(null);
                           }
@@ -1494,24 +1516,33 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
                     <input
                       type="range"
                       min={0.12}
-                      max={0.75}
+                      max={1}
                       step={0.03}
-                      value={layoutConfig.letterheadOpacity || 0.28}
-                      onChange={(e) =>
+                      value={
+                        layoutConfig.watermarkOpacity != null
+                          ? layoutConfig.watermarkOpacity / 100
+                          : layoutConfig.letterheadOpacity ?? 0.95
+                      }
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value) || 0.95;
                         onUpdateLayoutConfig({
                           ...layoutConfig,
-                          letterheadOpacity: parseFloat(e.target.value) || 0.28,
-                        })
-                      }
+                          letterheadOpacity: val,
+                          watermarkOpacity: Math.round(val * 100),
+                        });
+                      }}
                       className="accent-[#F5B738] flex-1"
                     />
                     {onRestoreDefaultBrandingAssets && (
                       <button
                         type="button"
-                        onClick={onRestoreDefaultBrandingAssets}
-                        className="text-slate-400 hover:text-white underline cursor-pointer"
+                        onClick={() => {
+                          onRestoreDefaultBrandingAssets();
+                          showToast('✅ Admin Default Letterhead (100% Full-Page) restore ho gaya!');
+                        }}
+                        className="text-amber-300 hover:text-white underline cursor-pointer font-bold"
                       >
-                        Reset
+                        Reset Default
                       </button>
                     )}
                   </div>

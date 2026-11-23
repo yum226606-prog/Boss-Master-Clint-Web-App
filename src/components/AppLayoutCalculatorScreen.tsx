@@ -230,6 +230,7 @@ interface AppLayoutCalculatorScreenProps {
   onOpenThemeStudio: () => void;
   mainLogoUrl: string;
   letterheadBgUrl: string;
+  isCustomLetterhead?: boolean;
   onUpdateLetterheadBgUrl?: (url: string) => void;
   onRestoreDefaultBrandingAssets?: () => void;
   rateListSavedAt?: number | null;
@@ -380,6 +381,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     onOpenThemeStudio,
     mainLogoUrl,
     letterheadBgUrl,
+    isCustomLetterhead = false,
     onUpdateLetterheadBgUrl = () => {},
     onRestoreDefaultBrandingAssets = () => {},
     rateListSavedAt = null,
@@ -454,6 +456,21 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     }
   };
   const [showBackgroundAdjustments, setShowBackgroundAdjustments] = useState(false);
+  const [showClearQuotationModal, setShowClearQuotationModal] = useState(false);
+
+  const handleConfirmClearQuotation = () => {
+    onUpdateWindows([]);
+    onUpdateDgWindows([]);
+    onUpdateDoors([]);
+    onUpdateFixFrames([]);
+    onUpdateOpenableWindows([]);
+    onUpdateSlidingDoors([]);
+    onUpdateProjectExtras([]);
+    onSetCustomerInfo('', '');
+    onUpdateDefaults(hardwareRate, 0, 0, 0);
+    setShowClearQuotationModal(false);
+    showSettingsToast('✅ Quotation clear ho gayi! Ab nayi quotation shuru karein.');
+  };
   const [draftHardwareStr, setDraftHardwareStr] = useState<string>(() =>
     hardwareRate > 0 ? String(hardwareRate) : ''
   );
@@ -2562,6 +2579,17 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
 
             <button
               type="button"
+              onClick={() => setShowClearQuotationModal(true)}
+              className="boss-flat-btn h-6 px-2 rounded-full bg-rose-500/15 border border-rose-500/50 text-rose-300 hover:bg-rose-500 hover:text-white flex items-center gap-1 cursor-pointer text-[9px] font-black shrink-0"
+              title="Clear / New Quotation"
+              aria-label="Clear / New Quotation"
+            >
+              <RotateCcw className="w-2.5 h-2.5 shrink-0" />
+              <span className="hidden sm:inline">New Quote</span>
+            </button>
+
+            <button
+              type="button"
               disabled={isSyncingCloud}
               onClick={() => onSyncFromSupabase?.({ forceRates: true, silent: false })}
               className="boss-flat-btn h-6 px-2 rounded-full bg-sky-500/15 border border-sky-500/50 text-sky-300 hover:bg-sky-500 hover:text-black flex items-center gap-1 cursor-pointer text-[9px] font-black shrink-0"
@@ -2717,17 +2745,28 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               <button
                 type="button"
                 onClick={handleAddStandardWindow}
-                className="boss-flat-btn w-7 h-7 rounded-lg bg-[#F5B738] text-black hover:bg-amber-400 flex items-center justify-center shrink-0 cursor-pointer shadow"
+                className="boss-flat-btn h-7 px-2.5 rounded-lg bg-[#F5B738] text-black hover:bg-amber-400 flex items-center justify-center gap-1 text-[11px] font-extrabold shrink-0 cursor-pointer shadow"
                 title="Add Window"
                 aria-label="Add Window"
               >
-                <Plus className="w-4 h-4 stroke-[2.5]" />
+                <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
+                <span>Add Window</span>
               </button>
             </div>
 
             {standardWindows.length === 0 ? (
-              <div className="p-6 sm:p-10 rounded-xl bg-[#14181F] border border-[#2B3441] text-center text-xs text-slate-400">
-                No windows added yet. Tap &quot;+ Add Window&quot; above to start calculating.
+              <div className="p-6 sm:p-10 rounded-xl bg-[#14181F] border border-[#2B3441] text-center space-y-3">
+                <p className="text-xs text-slate-400">
+                  No windows added yet. Tap &quot;+ Add Window&quot; to start calculating.
+                </p>
+                <button
+                  type="button"
+                  onClick={handleAddStandardWindow}
+                  className="boss-flat-btn inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#F5B738] hover:bg-amber-400 text-black text-xs font-extrabold cursor-pointer shadow"
+                >
+                  <Plus className="w-4 h-4 stroke-[2.5]" />
+                  <span>+ Add Window</span>
+                </button>
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
@@ -3653,11 +3692,20 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               <button
                 type="button"
                 onClick={handleAddDoorTabItem}
-                className="boss-flat-btn w-7 h-7 rounded-lg bg-[#F5B738] text-black hover:bg-amber-400 flex items-center justify-center shrink-0 cursor-pointer shadow"
+                className="boss-flat-btn h-7 px-2.5 rounded-lg bg-[#F5B738] text-black hover:bg-amber-400 flex items-center justify-center gap-1 text-[11px] font-extrabold shrink-0 cursor-pointer shadow"
                 title="Add Item"
                 aria-label="Add Item"
               >
-                <Plus className="w-4 h-4 stroke-[2.5]" />
+                <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
+                <span>
+                  {doorSubTab === 'DOORS'
+                    ? 'Add Door'
+                    : doorSubTab === 'FIX'
+                    ? 'Add Fix'
+                    : doorSubTab === 'OP_WIN'
+                    ? 'Add Open Win'
+                    : 'Add Sliding'}
+                </span>
               </button>
             </div>
 
@@ -3705,8 +3753,18 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
 
                 if (currentList.length === 0) {
                   return (
-                    <div className="p-8 rounded-xl bg-[#14181F] border border-[#2B3441] text-center text-xs text-slate-400">
-                      No {labelPrefix.toLowerCase()}s added yet. Tap &quot;+ Add Item&quot; above.
+                    <div className="p-8 rounded-xl bg-[#14181F] border border-[#2B3441] text-center space-y-3">
+                      <p className="text-xs text-slate-400">
+                        No {labelPrefix.toLowerCase()}s added yet. Tap &quot;+ Add {labelPrefix}&quot; to start.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={handleAddDoorTabItem}
+                        className="boss-flat-btn inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#F5B738] hover:bg-amber-400 text-black text-xs font-extrabold cursor-pointer shadow"
+                      >
+                        <Plus className="w-4 h-4 stroke-[2.5]" />
+                        <span>+ Add {labelPrefix}</span>
+                      </button>
                     </div>
                   );
                 }
@@ -3963,8 +4021,18 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                 );
               })()
             ) : slidingDoors.length === 0 ? (
-              <div className="p-8 rounded-xl bg-[#14181F] border border-[#2B3441] text-center text-xs text-slate-400">
-                No sliding doors added yet. Tap &quot;+ Add Item&quot; above.
+              <div className="p-8 rounded-xl bg-[#14181F] border border-[#2B3441] text-center space-y-3">
+                <p className="text-xs text-slate-400">
+                  No sliding doors added yet. Tap &quot;+ Add Sliding Door&quot; to start.
+                </p>
+                <button
+                  type="button"
+                  onClick={handleAddDoorTabItem}
+                  className="boss-flat-btn inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#F5B738] hover:bg-amber-400 text-black text-xs font-extrabold cursor-pointer shadow"
+                >
+                  <Plus className="w-4 h-4 stroke-[2.5]" />
+                  <span>+ Add Sliding Door</span>
+                </button>
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
@@ -5094,7 +5162,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   type="text"
                   value={customerName}
                   onChange={(e) => onSetCustomerInfo(e.target.value, customerPhone)}
-                  placeholder="Tariq Mehmood"
+                  placeholder="Customer Name"
                   className="w-full h-7 px-1.5 sm:px-2 rounded-lg bg-[#0C0F14] border border-slate-700 focus:border-[#F5B738] outline-none text-[10.5px] sm:text-[11px] text-white"
                 />
               </div>
@@ -5287,6 +5355,17 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                 >
                   <Sliders className="w-4 h-4" />
                 </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowClearQuotationModal(true)}
+                  className="boss-flat-btn h-8 px-2.5 rounded-lg bg-rose-500/15 border border-rose-500/60 text-rose-300 hover:bg-rose-500 hover:text-white flex items-center justify-center gap-1 text-[10.5px] font-black transition-colors cursor-pointer shrink-0"
+                  title="Clear / New Quotation"
+                  aria-label="Clear / New Quotation"
+                >
+                  <RotateCcw className="w-3.5 h-3.5 shrink-0" />
+                  <span className="hidden sm:inline">Clear / New</span>
+                </button>
               </div>
 
               <div className="text-[11px] font-mono font-black text-[#F5B738] truncate shrink-0">
@@ -5386,9 +5465,20 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
 
               {/* Compact Icon Smart Action Strip: Upload Background | Save Default | Reset Logo | Reset BG */}
               <div className="flex items-center justify-between gap-2 p-2 rounded-xl bg-[#141A24] border border-slate-800">
-                <span className="text-[11px] font-bold text-slate-300 truncate">
-                  Sheet BG &amp; Actions
-                </span>
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="text-[11px] font-bold text-slate-300 truncate">
+                    Sheet BG &amp; Actions
+                  </span>
+                  <span
+                    className={`px-1.5 py-0.5 rounded text-[9.5px] font-black shrink-0 ${
+                      isCustomLetterhead
+                        ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
+                        : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                    }`}
+                  >
+                    {isCustomLetterhead ? 'Custom' : 'Admin Default'}
+                  </span>
+                </div>
                 <div className="flex items-center gap-1.5 shrink-0">
                   <label
                     className="boss-flat-btn w-8 h-8 rounded-lg bg-[#F5B738] hover:bg-amber-400 text-black flex items-center justify-center cursor-pointer shadow-sm transition-all"
@@ -5841,8 +5931,14 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                       opacity: (layoutConfig.watermarkOpacity ?? 95) / 100,
                       width: '100%',
                       height: '100%',
-                      objectFit: layoutConfig.backgroundFitStyle === 'CROP' ? 'cover' : 'fill',
-                      objectPosition: layoutConfig.backgroundFitStyle === 'CROP' ? 'top center' : 'center',
+                      objectFit:
+                        layoutConfig.backgroundFitStyle === 'CROP'
+                          ? 'cover'
+                          : layoutConfig.backgroundFitStyle === 'FIT'
+                          ? 'contain'
+                          : 'fill',
+                      objectPosition:
+                        layoutConfig.backgroundFitStyle === 'CROP' ? 'top center' : 'center',
                     }}
                     className="pointer-events-none select-none absolute inset-0 w-full h-full z-0 transition-opacity"
                   />
@@ -7844,6 +7940,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
           onUpdateLayoutConfig={onUpdateLayoutConfig}
           mainLogoUrl={mainLogoUrl}
           letterheadBgUrl={letterheadBgUrl}
+          isCustomLetterhead={isCustomLetterhead}
           onUpdateLetterheadBgUrl={onUpdateLetterheadBgUrl}
           onRestoreDefaultBrandingAssets={onRestoreDefaultBrandingAssets}
           onSyncUserProfileToCloud={onSyncUserProfileToCloud}
@@ -8024,6 +8121,71 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                 <Download className="w-4 h-4" />
                 <span>Save PDF</span>
               </a>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =================================================================== */}
+      {/* MODAL: CLEAR / NEW QUOTATION CONFIRMATION                           */}
+      {/* =================================================================== */}
+      {showClearQuotationModal && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-3 overflow-y-auto no-print">
+          <div className="bg-[#0C1017] border-2 border-rose-500/80 rounded-2xl max-w-md w-full p-4 sm:p-5 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-9 h-9 rounded-xl bg-rose-500/20 border border-rose-500/50 text-rose-400 flex items-center justify-center shrink-0">
+                  <RotateCcw className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-sm font-black text-white truncate">
+                    Clear / New Quotation?
+                  </h3>
+                  <p className="text-[10.5px] text-slate-400 truncate">
+                    Nayi quotation start karne ki confirmation
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowClearQuotationModal(false)}
+                className="boss-flat-btn w-7 h-7 rounded-lg bg-slate-800/80 text-slate-300 hover:text-white flex items-center justify-center cursor-pointer"
+                aria-label="Close"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-3 rounded-xl bg-[#14181F] border border-slate-800 text-xs text-slate-200 space-y-1.5 leading-relaxed">
+              <p>
+                Is action se aap ke maujooda project ke tamam items clear ho jayenge:
+              </p>
+              <ul className="list-disc pl-4 text-[11px] text-slate-300 space-y-0.5">
+                <li>Windows ({windows.length}) aur DG Windows ({dgWindows.length})</li>
+                <li>Doors, Fix, Openable &amp; Sliding ({doors.length + fixframes.length + openableWindows.length + slidingDoors.length})</li>
+                <li>Extra Pieces ({projectExtras.length}) aur Client Name / Phone</li>
+              </ul>
+              <p className="text-[10.5px] text-emerald-300 font-semibold pt-1">
+                ✓ Aap ke Rates, Formulas, Saved History aur Admin Letterhead bilkul mehfooz rahenge.
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowClearQuotationModal(false)}
+                className="boss-flat-btn px-4 py-2 rounded-xl bg-[#14181F] border border-slate-700 text-slate-200 hover:border-slate-500 text-xs font-bold cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmClearQuotation}
+                className="boss-flat-btn px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-black flex items-center gap-1.5 cursor-pointer shadow"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Yes, Clear &amp; Start New</span>
+              </button>
             </div>
           </div>
         </div>

@@ -272,6 +272,52 @@ function saveLastSeenSupportMs(ms: number): void {
   }
 }
 
+function isBundledFallbackLetterhead(url: string, bundledAssetUrl: string): boolean {
+  const s = String(url || '').trim();
+  if (!s) return true;
+  if (s === bundledAssetUrl) return true;
+  if (s.includes('boss_letterhead_bg_')) return true;
+  return false;
+}
+
+function extractAdminLetterheadBgUrl(
+  globalCfg: any,
+  brandingCfg?: any,
+  layoutCfg?: any,
+  directRow?: any
+): string {
+  const directVal =
+    typeof directRow === 'string'
+      ? directRow
+      : directRow?.letterhead_bg_url || directRow?.letterheadBgUrl || directRow?.url || '';
+  const candidates = [
+    globalCfg?.letterhead_bg_url,
+    globalCfg?.letterheadBgUrl,
+    globalCfg?.companyBranding?.letterhead_bg_url,
+    globalCfg?.companyBranding?.letterheadBgUrl,
+    globalCfg?.branding?.letterhead_bg_url,
+    globalCfg?.branding?.letterheadBgUrl,
+    globalCfg?.layoutConfig?.letterhead_bg_url,
+    globalCfg?.layoutConfig?.letterheadBgUrl,
+    brandingCfg?.letterhead_bg_url,
+    brandingCfg?.letterheadBgUrl,
+    brandingCfg?.companyBranding?.letterhead_bg_url,
+    brandingCfg?.companyBranding?.letterheadBgUrl,
+    brandingCfg?.value?.letterhead_bg_url,
+    brandingCfg?.value?.letterheadBgUrl,
+    layoutCfg?.letterhead_bg_url,
+    layoutCfg?.letterheadBgUrl,
+    layoutCfg?.layoutConfig?.letterhead_bg_url,
+    layoutCfg?.layoutConfig?.letterheadBgUrl,
+    directVal,
+  ];
+  for (const c of candidates) {
+    const s = typeof c === 'string' ? c.trim() : '';
+    if (s) return s;
+  }
+  return '';
+}
+
 export default function App() {
   const [initialBootAuth] = useState<{
     session: ClientAuthSession | null;
@@ -357,46 +403,10 @@ export default function App() {
     getDefaultGlassFormulas()
   );
 
-  // Project Calculator Items
-  const [windows, setWindows] = useState<WindowItem[]>([
-    {
-      id: 'win-starter-1',
-      width: 48,
-      height: 60,
-      qty: 1,
-      frameType: 'C',
-      sectionGauge: '1.6',
-      glassGauge: '5',
-      glassColor: 'CLEAR',
-      glassEnabled: true,
-      m24Qty: 4,
-      m24aQty: 0,
-      d29HeightQty: 2,
-      d29WidthQty: 2,
-      extras: [],
-      outerSection: 'DC30C',
-      panelCount: 2,
-      lockType: 'LATCH',
-    },
-  ]);
+  // Project Calculator Items (Clean empty workspace on fresh open)
+  const [windows, setWindows] = useState<WindowItem[]>([]);
   const [dgWindows, setDgWindows] = useState<DgWindowItem[]>([]);
-  const [doors, setDoors] = useState<DoorItem[]>([
-    {
-      id: 'door-starter-1',
-      width: 36,
-      height: 84,
-      qty: 1,
-      outer: 'D54A',
-      sectionGauge: '1.6',
-      glassGauge: '5',
-      glassColor: 'CLEAR',
-      glassEnabled: true,
-      d59Qty: 0,
-      d59aQty: 0,
-      d52Qty: 1,
-      extras: [],
-    },
-  ]);
+  const [doors, setDoors] = useState<DoorItem[]>([]);
   const [fixframes, setFixFrames] = useState<FixFrameItem[]>([]);
   const [openableWindows, setOpenableWindows] = useState<OpenableWindowItem[]>([]);
   const [slidingDoors, setSlidingDoors] = useState<SlidingDoorItem[]>([]);
@@ -410,8 +420,8 @@ export default function App() {
   const [companyAddress, setCompanyAddress] = useState('Main Market, Pakistan');
   const [companyPhone, setCompanyPhone] = useState('+92 310 5524225');
   const [companyNtn, setCompanyNtn] = useState('1234567-8');
-  const [customerName, setCustomerName] = useState('Tariq Mehmood');
-  const [customerPhone, setCustomerPhone] = useState('0300-4419283');
+  const [customerName, setCustomerName] = useState('');
+  const [customerPhone, setCustomerPhone] = useState('');
   const [hardwareRate, setHardwareRate] = useState<number>(3000);
   const [markupPct, setMarkupPct] = useState<number>(0);
   const [transportRent, setTransportRent] = useState<number>(0);
@@ -438,7 +448,44 @@ export default function App() {
     }
   });
   const [mainLogoUrl, setMainLogoUrl] = useState<string>(bossLionLogoImg);
-  const [letterheadBgUrl, setLetterheadBgUrl] = useState<string>(bossLetterheadCleanImg);
+  const [adminLetterheadBgUrl, setAdminLetterheadBgUrl] = useState<string>(() => {
+    const cachedM = loadCachedMasterEngineConfig();
+    const fromMaster = extractAdminLetterheadBgUrl(cachedM);
+    if (fromMaster) return fromMaster;
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (typeof parsed?.adminLetterheadBgUrl === 'string' && parsed.adminLetterheadBgUrl.trim()) {
+          return parsed.adminLetterheadBgUrl.trim();
+        }
+      }
+    } catch {}
+    return '';
+  });
+  const [customLetterheadBgUrl, setCustomLetterheadBgUrl] = useState<string>(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (typeof parsed?.customLetterheadBgUrl === 'string') {
+          return parsed.customLetterheadBgUrl.trim();
+        }
+        const legacyLh = String(parsed?.letterheadBgUrl || '').trim();
+        const cachedAdminLh = extractAdminLetterheadBgUrl(loadCachedMasterEngineConfig());
+        if (
+          legacyLh &&
+          !isBundledFallbackLetterhead(legacyLh, bossLetterheadCleanImg) &&
+          legacyLh !== cachedAdminLh
+        ) {
+          return legacyLh;
+        }
+      }
+    } catch {}
+    return '';
+  });
+  const letterheadBgUrl = customLetterheadBgUrl || adminLetterheadBgUrl || bossLetterheadCleanImg;
+  const isCustomLetterhead = Boolean(customLetterheadBgUrl);
   const lastAppliedAdminThemeHashRef = useRef<string>('');
   const hasMigratedDbInSessionRef = useRef<boolean>(false);
   const [rateListSavedAt, setRateListSavedAt] = useState<number | null>(() => {
@@ -850,12 +897,24 @@ export default function App() {
         globalCfg.mainLogoUrl ||
           globalCfg.appLogoUrl ||
           globalCfg.branding?.mainLogoUrl ||
+          globalCfg.companyBranding?.mainLogoUrl ||
+          globalCfg.companyBranding?.logoUrl ||
           globalCfg.layoutConfig?.mainLogoUrl ||
           brandingCfg.mainLogoUrl ||
           ''
       ).trim();
       if (incomingLogo) {
         setMainLogoUrl(incomingLogo);
+      }
+
+      const incomingAdminLetterhead = extractAdminLetterheadBgUrl(
+        globalCfg,
+        cfgMap.company_branding_v1 || cfgMap.company_branding,
+        cfgMap.layout_config_v1,
+        cfgMap.letterhead_bg_url
+      );
+      if (incomingAdminLetterhead) {
+        setAdminLetterheadBgUrl(incomingAdminLetterhead);
       }
 
       const rawMob =
@@ -1825,6 +1884,16 @@ export default function App() {
       localStorage.removeItem(DEVICE_RATES_KEY);
     } catch {}
     setUserLockedTabs({});
+    setCustomLetterheadBgUrl('');
+    setWindows([]);
+    setDgWindows([]);
+    setDoors([]);
+    setFixFrames([]);
+    setOpenableWindows([]);
+    setSlidingDoors([]);
+    setProjectExtras([]);
+    setCustomerName('');
+    setCustomerPhone('');
     supabase.auth.signOut().catch(() => {});
     setAuthSession(null);
     setIsSubscriptionExpired(false);
@@ -2025,7 +2094,22 @@ export default function App() {
             },
           }));
         }
-        if (parsed.letterheadBgUrl) setLetterheadBgUrl(parsed.letterheadBgUrl);
+        if (typeof parsed.adminLetterheadBgUrl === 'string' && parsed.adminLetterheadBgUrl.trim()) {
+          setAdminLetterheadBgUrl((prev) => prev || parsed.adminLetterheadBgUrl.trim());
+        }
+        if (typeof parsed.customLetterheadBgUrl === 'string') {
+          setCustomLetterheadBgUrl(parsed.customLetterheadBgUrl.trim());
+        } else if (typeof parsed.letterheadBgUrl === 'string') {
+          const legacyLh = parsed.letterheadBgUrl.trim();
+          const cachedAdminLh = extractAdminLetterheadBgUrl(cachedM);
+          if (
+            legacyLh &&
+            !isBundledFallbackLetterhead(legacyLh, bossLetterheadCleanImg) &&
+            legacyLh !== cachedAdminLh
+          ) {
+            setCustomLetterheadBgUrl(legacyLh);
+          }
+        }
         if (parsed.currentTheme) setCurrentTheme(enforceReadableContrast(parsed.currentTheme));
         if (parsed.downloadedThemes) setDownloadedThemes(parsed.downloadedThemes);
         setDeletedBackupVault([]);
@@ -2200,6 +2284,52 @@ export default function App() {
         existingSession?.deviceId,
         existingSession ? { email: existingSession.email, phone: existingSession.phone } : undefined
       );
+      // Lightweight branding/letterhead check when online so Admin Panel's synced letterhead_bg_url always shows
+      if (typeof navigator === 'undefined' || navigator.onLine !== false) {
+        callSupabaseProxy({
+          table: 'app_configs',
+          method: 'GET',
+          query:
+            'id=in.(master_engine_config,global_config,company_branding_v1,company_branding,layout_config_v1,letterhead_bg_url)&select=id,value',
+          timeoutMs: 6000,
+        })
+          .then((cfgOnlyRes) => {
+            if (!cfgOnlyRes.ok || !Array.isArray(cfgOnlyRes.data)) return;
+            const mapOnly: Record<string, any> = {};
+            cfgOnlyRes.data.forEach((row: any) => {
+              if (row?.id && row?.value !== undefined) mapOnly[row.id] = row.value;
+            });
+            const mergedCfg = {
+              ...(mapOnly.global_config || {}),
+              ...(mapOnly.master_engine_config || {}),
+            };
+            if (Object.keys(mergedCfg).length > 0) {
+              saveCachedMasterEngineConfig(mergedCfg);
+            }
+            const foundLh = extractAdminLetterheadBgUrl(
+              mergedCfg,
+              mapOnly.company_branding_v1 || mapOnly.company_branding,
+              mapOnly.layout_config_v1,
+              mapOnly.letterhead_bg_url
+            );
+            if (foundLh) {
+              setAdminLetterheadBgUrl(foundLh);
+            }
+            const foundLogo = String(
+              mergedCfg.mainLogoUrl ||
+                mergedCfg.appLogoUrl ||
+                mergedCfg.branding?.mainLogoUrl ||
+                mergedCfg.companyBranding?.mainLogoUrl ||
+                mergedCfg.companyBranding?.logoUrl ||
+                mapOnly.company_branding_v1?.mainLogoUrl ||
+                ''
+            ).trim();
+            if (foundLogo) {
+              setMainLogoUrl(foundLogo);
+            }
+          })
+          .catch(() => {});
+      }
     }
 
     const handleGoOnline = () => {
@@ -2512,6 +2642,8 @@ export default function App() {
           supportRequests,
           layoutConfig,
           letterheadBgUrl,
+          adminLetterheadBgUrl,
+          customLetterheadBgUrl,
           currentTheme,
           downloadedThemes,
           deletedBackupVault,
@@ -2553,7 +2685,8 @@ export default function App() {
     cloudAccessInfo,
     supportRequests,
     layoutConfig,
-    letterheadBgUrl,
+    adminLetterheadBgUrl,
+    customLetterheadBgUrl,
     currentTheme,
     downloadedThemes,
     deletedBackupVault,
@@ -3265,9 +3398,18 @@ export default function App() {
           onOpenThemeStudio={() => setShowThemeStudio(true)}
           mainLogoUrl={mainLogoUrl}
           letterheadBgUrl={letterheadBgUrl}
-          onUpdateLetterheadBgUrl={setLetterheadBgUrl}
+          isCustomLetterhead={isCustomLetterhead}
+          onUpdateLetterheadBgUrl={(url) => {
+            setCustomLetterheadBgUrl(String(url || '').trim());
+          }}
           onRestoreDefaultBrandingAssets={() => {
-            setLetterheadBgUrl(bossLetterheadCleanImg);
+            setCustomLetterheadBgUrl('');
+            setLayoutConfig((prev) => ({
+              ...prev,
+              showLetterheadBackground: true,
+              backgroundFitStyle: 'FILL',
+              letterheadFitMode: 'STRETCH',
+            }));
           }}
           rateListSavedAt={rateListSavedAt}
           onSaveRatesToDevice={handleSaveRatesToDevice}
@@ -3294,6 +3436,12 @@ export default function App() {
               if (parsed.rates) setRates(parsed.rates);
               if (parsed.packages) setPackages(parsed.packages);
               if (parsed.layoutConfig) setLayoutConfig(parsed.layoutConfig);
+              if (typeof parsed.customLetterheadBgUrl === 'string') {
+                setCustomLetterheadBgUrl(parsed.customLetterheadBgUrl.trim());
+              }
+              if (typeof parsed.adminLetterheadBgUrl === 'string' && parsed.adminLetterheadBgUrl.trim()) {
+                setAdminLetterheadBgUrl(parsed.adminLetterheadBgUrl.trim());
+              }
               return true;
             } catch {
               return false;
