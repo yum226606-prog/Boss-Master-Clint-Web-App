@@ -1734,6 +1734,8 @@ export default function App() {
     tagline?: string;
     selfieUrl?: string;
     shopPhotoUrl?: string;
+    cnicFrontUrl?: string;
+    cnicBackUrl?: string;
   }) => {
     if (!authSession?.verified) return;
     const isSessionValid = await verifySingleDeviceSessionOnline();
@@ -1757,9 +1759,31 @@ export default function App() {
       ...(profilePatch.shopPhotoUrl !== undefined
         ? { shopPhotoUrl: profilePatch.shopPhotoUrl }
         : {}),
+      ...(profilePatch.cnicFrontUrl !== undefined
+        ? { cnicFrontUrl: profilePatch.cnicFrontUrl }
+        : {}),
+      ...(profilePatch.cnicBackUrl !== undefined
+        ? { cnicBackUrl: profilePatch.cnicBackUrl }
+        : {}),
     };
     saveAuthSession(updatedSession);
     setAuthSession(updatedSession);
+
+    const cnicFields = {
+      ...(profilePatch.cnicFrontUrl !== undefined
+        ? {
+            cnic_front: profilePatch.cnicFrontUrl,
+            cnic_front_url: profilePatch.cnicFrontUrl,
+          }
+        : {}),
+      ...(profilePatch.cnicBackUrl !== undefined
+        ? {
+            cnic_back: profilePatch.cnicBackUrl,
+            cnic_back_url: profilePatch.cnicBackUrl,
+          }
+        : {}),
+    };
+
     await collectAndSyncUserTelemetryToSupabase({
       deviceId: updatedSession.deviceId,
       session: updatedSession,
@@ -1771,6 +1795,7 @@ export default function App() {
         ...(profilePatch.companyNtn !== undefined ? { ntn: profilePatch.companyNtn } : {}),
         ...(profilePatch.tagline !== undefined ? { tagline: profilePatch.tagline } : {}),
         ...(profilePatch.companyPhone !== undefined ? { company_phone: profilePatch.companyPhone } : {}),
+        ...cnicFields,
       },
     });
 
@@ -1785,6 +1810,7 @@ export default function App() {
             company_name: updatedSession.companyName || companyName,
             shop_address: updatedSession.shopAddress || companyAddress,
             ...(profilePatch.companyNtn !== undefined ? { ntn: profilePatch.companyNtn } : {}),
+            ...cnicFields,
             last_seen: new Date().toISOString(),
           },
           timeoutMs: 6000,
@@ -1796,6 +1822,7 @@ export default function App() {
           payload: {
             company_name: updatedSession.companyName || companyName,
             shop_address: updatedSession.shopAddress || companyAddress,
+            ...cnicFields,
             updated_at: new Date().toISOString(),
           },
           timeoutMs: 6000,

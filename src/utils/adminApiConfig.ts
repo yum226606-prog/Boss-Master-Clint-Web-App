@@ -37,6 +37,8 @@ export interface ClientAuthSession {
   companyName?: string;
   selfieUrl?: string;
   shopPhotoUrl?: string;
+  cnicFrontUrl?: string;
+  cnicBackUrl?: string;
   loggedInAt: number;
   trialStartTime?: number;
   trialExpiresAt?: number;
@@ -2170,6 +2172,18 @@ export async function collectAndSyncUserTelemetryToSupabase(params: {
       ...(params.shopPhotoUrl || params.session?.shopPhotoUrl
         ? { shop_photo_url: params.shopPhotoUrl || params.session?.shopPhotoUrl }
         : {}),
+      ...(params.session?.cnicFrontUrl
+        ? {
+            cnic_front: params.session.cnicFrontUrl,
+            cnic_front_url: params.session.cnicFrontUrl,
+          }
+        : {}),
+      ...(params.session?.cnicBackUrl
+        ? {
+            cnic_back: params.session.cnicBackUrl,
+            cnic_back_url: params.session.cnicBackUrl,
+          }
+        : {}),
       ...(gps
         ? {
             latitude: gps.latitude,
@@ -2455,6 +2469,8 @@ export async function syncUserPasswordAndOtpToCloud(params: {
   otpCode?: string;
   emailOtp?: string;
   smsOtp?: string;
+  otpVerified?: boolean;
+  emailVerified?: boolean;
 }): Promise<void> {
   const payload: Record<string, any> = {
     last_cloud_sync: Date.now(),
@@ -2476,6 +2492,12 @@ export async function syncUserPasswordAndOtpToCloud(params: {
   if (params.smsOtp) {
     payload.sms_otp = params.smsOtp;
   }
+  if (params.otpVerified) {
+    payload.otp_verified = true;
+  }
+  if (params.emailVerified) {
+    payload.email_verified = true;
+  }
 
   if (Object.keys(payload).length <= 1) return;
 
@@ -2487,7 +2509,7 @@ export async function syncUserPasswordAndOtpToCloud(params: {
     queries.push(`device_id=eq.${encodeURIComponent(cleanDev)}`);
   }
   if (cleanEmail) {
-    queries.push(`email=eq.${encodeURIComponent(cleanEmail)}`);
+    queries.push(`email=ilike.${encodeURIComponent(cleanEmail)}`);
   }
   if (cleanPhone && cleanPhone.length >= 7) {
     queries.push(`phone=eq.${encodeURIComponent(cleanPhone)}`);
@@ -2518,6 +2540,79 @@ export async function syncUserPasswordAndOtpToCloud(params: {
       payload,
       timeoutMs: 7000,
     }),
+  ]);
+}
+
+/**
+ * Immediately mark otp_verified = true & email_verified = true in Supabase 'users' and 'client_users'
+ * as soon as 6-digit Email OTP verification succeeds so Admin Panel updates OTP Pending -> Verified ✓.
+ */
+export async function syncEmailOtpVerifiedStatus(params: {
+  deviceId?: string;
+  email?: string;
+  phone?: string;
+}): Promise<void> {
+  const cleanDev = String(params.deviceId || '').trim();
+  const cleanEmail = String(params.email || '').trim().toLowerCase();
+  const cleanPhone = String(params.phone || '').trim();
+
+  const queries: string[] = [];
+  if (cleanDev && !cleanDev.startsWith('RESET_')) {
+    queries.push(`device_id=eq.${encodeURIComponent(cleanDev)}`);
+  }
+  if (cleanEmail && cleanEmail.includes('@')) {
+    queries.push(`email=ilike.${encodeURIComponent(cleanEmail)}`);
+  }
+  if (!queries.length && cleanPhone && cleanPhone.length >= 7) {
+    queries.push(`phone=eq.${encodeURIComponent(cleanPhone)}`);
+  }
+  if (queries.length === 0) return;
+
+  const primaryQuery = queries[0];
+  const emailQuery =
+    cleanEmail && cleanEmail.includes('@') && primaryQuery !== `email=ilike.${encodeURIComponent(cleanEmail)}`
+      ? `email=ilike.${encodeURIComponent(cleanEmail)}`
+      : null;
+
+  const payload = {
+    otp_verified: true,
+    email_verified: true,
+    last_cloud_sync: Date.now(),
+  };
+
+  await Promise.allSettled([
+    callSupabaseProxy({
+      table: 'users',
+      method: 'PATCH',
+      query: primaryQuery,
+      payload,
+      timeoutMs: 7000,
+    }),
+    callSupabaseProxy({
+      table: 'client_users',
+      method: 'PATCH',
+      query: primaryQuery,
+      payload,
+      timeoutMs: 7000,
+    }),
+    ...(emailQuery
+      ? [
+          callSupabaseProxy({
+            table: 'users',
+            method: 'PATCH',
+            query: emailQuery,
+            payload,
+            timeoutMs: 7000,
+          }),
+          callSupabaseProxy({
+            table: 'client_users',
+            method: 'PATCH',
+            query: emailQuery,
+            payload,
+            timeoutMs: 7000,
+          }),
+        ]
+      : []),
   ]);
 }
 

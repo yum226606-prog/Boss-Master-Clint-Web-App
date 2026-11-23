@@ -67,6 +67,7 @@ import {
   saveBiometricBinding,
   sendSupabaseEmailOtp,
   StoredGpsLocation,
+  syncEmailOtpVerifiedStatus,
   syncGpsToSupabaseUser,
   syncUserPasswordAndOtpToCloud,
   TWO_DAYS_MS,
@@ -684,6 +685,24 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       ),
       selfieUrl: String(matchedUser?.selfie_url || ''),
       shopPhotoUrl: String(matchedUser?.shop_photo_url || ''),
+      cnicFrontUrl: String(
+        matchedUser?.cnic_front_url ||
+          matchedUser?.cnic_front ||
+          matchedClientUser?.cnic_front_url ||
+          matchedClientUser?.cnic_front ||
+          matchedSub?.cnic_front_url ||
+          matchedSub?.cnic_front ||
+          ''
+      ),
+      cnicBackUrl: String(
+        matchedUser?.cnic_back_url ||
+          matchedUser?.cnic_back ||
+          matchedClientUser?.cnic_back_url ||
+          matchedClientUser?.cnic_back ||
+          matchedSub?.cnic_back_url ||
+          matchedSub?.cnic_back ||
+          ''
+      ),
       loggedInAt: now,
       trialStartTime: trialStart,
       trialExpiresAt: isOwner ? 0 : cloudExpiry > 0 ? cloudExpiry : trialStart + TWO_DAYS_MS,
@@ -850,10 +869,22 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           )
         );
         const existingFront = String(
-          fullMatchedUser?.cnic_front_url || fullMatchedUser?.cnic_front || ''
+          fullMatchedUser?.cnic_front_url ||
+            fullMatchedUser?.cnic_front ||
+            fullMatchedClientUser?.cnic_front_url ||
+            fullMatchedClientUser?.cnic_front ||
+            fullMatchedSub?.cnic_front_url ||
+            fullMatchedSub?.cnic_front ||
+            ''
         ).trim();
         const existingBack = String(
-          fullMatchedUser?.cnic_back_url || fullMatchedUser?.cnic_back || ''
+          fullMatchedUser?.cnic_back_url ||
+            fullMatchedUser?.cnic_back ||
+            fullMatchedClientUser?.cnic_back_url ||
+            fullMatchedClientUser?.cnic_back ||
+            fullMatchedSub?.cnic_back_url ||
+            fullMatchedSub?.cnic_back ||
+            ''
         ).trim();
 
         if (
@@ -1220,7 +1251,10 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         deviceId: googleProfileStep?.activeDeviceId || clientDeviceId,
         tag: `google_cnic_${side.toLowerCase()}`,
       });
-      const finalVal = uploaded.url || (await compressImageToDataUrl(file, 800, 0.6, 80 * 1024));
+      const finalVal =
+        uploaded.url ||
+        uploaded.base64DataUrl ||
+        (await compressImageToDataUrl(file, 800, 0.58, 72 * 1024));
       if (side === 'FRONT') setGpCnicFront(finalVal);
       else setGpCnicBack(finalVal);
     } catch {
@@ -1390,8 +1424,12 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                   phone: cleanPhone,
                   cnic: cleanCnic,
                   shop_address: resolvedAddress,
+                  cnic_front: gpCnicFront,
+                  cnic_back: gpCnicBack,
                   cnic_front_url: gpCnicFront,
                   cnic_back_url: gpCnicBack,
+                  otp_verified: true,
+                  email_verified: true,
                   ...(gps
                     ? {
                         latitude: gps.latitude,
@@ -1420,8 +1458,12 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                   email: gEmail,
                   cnic: cleanCnic,
                   shop_address: resolvedAddress,
+                  cnic_front: gpCnicFront,
+                  cnic_back: gpCnicBack,
                   cnic_front_url: gpCnicFront,
                   cnic_back_url: gpCnicBack,
+                  otp_verified: true,
+                  email_verified: true,
                   trial_used: true,
                   is_registered: true,
                   created_at: nowIso,
@@ -1441,6 +1483,12 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
               phone: cleanPhone,
               cnic: cleanCnic,
               shop_address: resolvedAddress,
+              cnic_front: gpCnicFront,
+              cnic_back: gpCnicBack,
+              cnic_front_url: gpCnicFront,
+              cnic_back_url: gpCnicBack,
+              otp_verified: true,
+              email_verified: true,
               last_seen: nowIso,
             },
             timeoutMs: 10000,
@@ -1456,6 +1504,10 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                   user_name: cleanName,
                   phone: cleanPhone,
                   cnic: cleanCnic,
+                  cnic_front: gpCnicFront,
+                  cnic_back: gpCnicBack,
+                  cnic_front_url: gpCnicFront,
+                  cnic_back_url: gpCnicBack,
                   updated_at: nowIso,
                   last_updated: now,
                 },
@@ -1479,6 +1531,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           email: gEmail,
           cnic: cleanCnic,
           shop_address: resolvedAddress,
+          cnic_front: gpCnicFront,
+          cnic_back: gpCnicBack,
           cnic_front_url: gpCnicFront,
           cnic_back_url: gpCnicBack,
         };
@@ -1490,6 +1544,10 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           email: gEmail,
           cnic: cleanCnic,
           shop_address: resolvedAddress,
+          cnic_front: gpCnicFront,
+          cnic_back: gpCnicBack,
+          cnic_front_url: gpCnicFront,
+          cnic_back_url: gpCnicBack,
         };
 
         setGoogleProfileStep(null);
@@ -1537,8 +1595,12 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         email: gEmail,
         cnic: cleanCnic,
         shop_address: resolvedAddress,
+        cnic_front: gpCnicFront,
+        cnic_back: gpCnicBack,
         cnic_front_url: gpCnicFront,
         cnic_back_url: gpCnicBack,
+        otp_verified: true,
+        email_verified: true,
         ip_address: publicIp || googleProfileStep.publicIp || '',
         mac_address: googleProfileStep.macAddress,
         device_model: googleProfileStep.deviceModel,
@@ -1580,6 +1642,10 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         email: gEmail,
         phone: cleanPhone,
         cnic: cleanCnic,
+        cnic_front: gpCnicFront,
+        cnic_back: gpCnicBack,
+        cnic_front_url: gpCnicFront,
+        cnic_back_url: gpCnicBack,
         trial_used: true,
         status: 'TRIAL',
         is_activated: false,
@@ -1614,6 +1680,12 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
             cnic: cleanCnic,
             shop_address: resolvedAddress,
             company_name: cleanCompany,
+            cnic_front: gpCnicFront,
+            cnic_back: gpCnicBack,
+            cnic_front_url: gpCnicFront,
+            cnic_back_url: gpCnicBack,
+            otp_verified: true,
+            email_verified: true,
             role: userRole,
             active_session_token: sessionToken,
             is_online: true,
@@ -1650,6 +1722,10 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
             email: gEmail,
             phone: cleanPhone,
             cnic: cleanCnic,
+            cnic_front: gpCnicFront,
+            cnic_back: gpCnicBack,
+            cnic_front_url: gpCnicFront,
+            cnic_back_url: gpCnicBack,
             trial_used: true,
             status: 'TRIAL',
             is_activated: false,
@@ -1673,6 +1749,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         cnic: cleanCnic,
         shopAddress: resolvedAddress,
         companyName: cleanCompany,
+        cnicFrontUrl: gpCnicFront,
+        cnicBackUrl: gpCnicBack,
         loggedInAt: now,
         trialStartTime: now,
         trialExpiresAt: expiry,
@@ -1968,9 +2046,10 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       });
       const finalVal =
         uploaded.url ||
+        uploaded.base64DataUrl ||
         (side === 'SELFIE' || side === 'SHOP'
           ? await compressImageToDataUrl(file, 800, 0.65, 120 * 1024)
-          : await compressImageToDataUrl(file, 800, 0.6, 80 * 1024));
+          : await compressImageToDataUrl(file, 800, 0.58, 72 * 1024));
       if (side === 'FRONT') setCnicFrontPhoto(finalVal);
       else if (side === 'BACK') setCnicBackPhoto(finalVal);
       else if (side === 'SELFIE') setSelfiePhoto(finalVal);
@@ -2956,6 +3035,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       // 1) Primary: Verify strict 6-digit Email OTP via Supabase Auth
       const verified = await verifySupabaseEmailOtp(fpMatchedAccount.email, cleanCode);
       if (verified.ok) {
+        await syncEmailOtpVerifiedStatus({
+          deviceId: fpMatchedAccount.deviceId,
+          email: fpMatchedAccount.email,
+          phone: fpMatchedAccount.phone,
+        }).catch(() => {});
         setFpInfo('Email OTP verify ho gaya! Ab apna naya Password set karein.');
         setFpStep('NEW_PASSWORD');
         return;
@@ -3019,6 +3103,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       }
 
       if (fallbackMatched) {
+        await syncEmailOtpVerifiedStatus({
+          deviceId: fpMatchedAccount.deviceId,
+          email: fpMatchedAccount.email,
+          phone: fpMatchedAccount.phone,
+        }).catch(() => {});
         setFpInfo('OTP verify ho gaya! Ab apna naya Password set karein.');
         setFpStep('NEW_PASSWORD');
         return;
@@ -3465,6 +3554,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       }
 
       const activeDeviceId = clientDeviceId || getOrCreateClientDeviceId();
+      syncEmailOtpVerifiedStatus({
+        deviceId: activeDeviceId,
+        email: cleanEmail,
+        phone: cleanPhone,
+      }).catch(() => {});
       const macAddress = getOrCreateDeviceMacFingerprint();
       const deviceModel = getDeviceModelName();
 
@@ -3622,8 +3716,12 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         email: cleanEmail,
         cnic: cleanCnic,
         shop_address: cleanAddress || gps?.address || gps?.city || '',
+        cnic_front: cnicFrontPhoto,
+        cnic_back: cnicBackPhoto,
         cnic_front_url: cnicFrontPhoto,
         cnic_back_url: cnicBackPhoto,
+        otp_verified: true,
+        email_verified: true,
         ...(selfiePhoto ? { selfie_url: selfiePhoto } : {}),
         ...(shopPhoto ? { shop_photo_url: shopPhoto } : {}),
         password_hash: effectivePasswordHash,
@@ -3675,6 +3773,10 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         email: cleanEmail,
         phone: cleanPhone,
         cnic: cleanCnic,
+        cnic_front: cnicFrontPhoto,
+        cnic_back: cnicBackPhoto,
+        cnic_front_url: cnicFrontPhoto,
+        cnic_back_url: cnicBackPhoto,
         password_hash: effectivePasswordHash,
         ...(effectivePlainPassword
           ? { password: regPassword, plain_password: regPassword }
@@ -3718,6 +3820,12 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
             cnic: cleanCnic,
             shop_address: cleanAddress || gps?.address || gps?.city || '',
             company_name: cleanCompany,
+            cnic_front: cnicFrontPhoto,
+            cnic_back: cnicBackPhoto,
+            cnic_front_url: cnicFrontPhoto,
+            cnic_back_url: cnicBackPhoto,
+            otp_verified: true,
+            email_verified: true,
             role: userRole,
             password_hash: effectivePasswordHash,
             ...(effectivePlainPassword
@@ -3763,6 +3871,10 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
             email: cleanEmail,
             phone: cleanPhone,
             cnic: cleanCnic,
+            cnic_front: cnicFrontPhoto,
+            cnic_back: cnicBackPhoto,
+            cnic_front_url: cnicFrontPhoto,
+            cnic_back_url: cnicBackPhoto,
             trial_used: true,
             status: isOwner ? 'ACTIVE' : 'TRIAL',
             is_activated: isOwner,
@@ -3788,6 +3900,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         companyName: cleanCompany,
         selfieUrl: selfiePhoto || '',
         shopPhotoUrl: shopPhoto || '',
+        cnicFrontUrl: cnicFrontPhoto || '',
+        cnicBackUrl: cnicBackPhoto || '',
         loggedInAt: trialStart,
         trialStartTime: trialStart,
         trialExpiresAt: expiry,

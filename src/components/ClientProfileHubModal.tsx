@@ -51,6 +51,7 @@ import {
   loadCachedMasterEngineConfig,
   saveBiometricBinding,
   sendSupabaseEmailOtp,
+  syncEmailOtpVerifiedStatus,
   syncUserPasswordAndOtpToCloud,
   upsertClientSubscriptionOrder,
   verifySupabaseEmailOtp,
@@ -113,6 +114,8 @@ interface ClientProfileHubModalProps {
     tagline?: string;
     selfieUrl?: string;
     shopPhotoUrl?: string;
+    cnicFrontUrl?: string;
+    cnicBackUrl?: string;
   }) => Promise<void> | void;
   // Support & Messages
   supportRequests: ClientSupportRequest[];
@@ -362,12 +365,16 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
     selfieUrl?: string;
     shopPhotoUrl?: string;
   }>({
+    cnicFrontUrl: authSession?.cnicFrontUrl || '',
+    cnicBackUrl: authSession?.cnicBackUrl || '',
     selfieUrl: authSession?.selfieUrl || '',
     shopPhotoUrl: authSession?.shopPhotoUrl || '',
   });
   const [isLoadingIdentity, setIsLoadingIdentity] = useState(false);
   const [isSavingShop, setIsSavingShop] = useState(false);
-  const [isUploadingShopImg, setIsUploadingShopImg] = useState<'LOGO' | 'LETTERHEAD' | 'SHOP_PHOTO' | 'SELFIE' | null>(null);
+  const [isUploadingShopImg, setIsUploadingShopImg] = useState<
+    'LOGO' | 'LETTERHEAD' | 'SHOP_PHOTO' | 'SELFIE' | 'CNIC_FRONT' | 'CNIC_BACK' | null
+  >(null);
 
   useEffect(() => {
     if (activeTab !== 'IDENTITY' && activeTab !== 'SHOP') return;
@@ -376,8 +383,8 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
     setIsLoadingIdentity(true);
     const q =
       clientDeviceId && !clientDeviceId.startsWith('RESET_')
-        ? `device_id=eq.${encodeURIComponent(clientDeviceId)}&select=cnic_front_url,cnic_back_url,selfie_url,shop_photo_url&limit=1`
-        : `email=ilike.${encodeURIComponent(authSession?.email || '')}&select=cnic_front_url,cnic_back_url,selfie_url,shop_photo_url&limit=1`;
+        ? `device_id=eq.${encodeURIComponent(clientDeviceId)}&select=*&limit=1`
+        : `email=ilike.${encodeURIComponent(authSession?.email || '')}&select=*&limit=1`;
     callSupabaseProxy({
       table: 'users',
       method: 'GET',
@@ -389,8 +396,12 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
         const row = Array.isArray(res.data) ? res.data[0] : null;
         if (row) {
           setCloudUserRecord({
-            cnicFrontUrl: String(row.cnic_front_url || '').trim(),
-            cnicBackUrl: String(row.cnic_back_url || '').trim(),
+            cnicFrontUrl: String(
+              row.cnic_front_url || row.cnic_front || authSession?.cnicFrontUrl || ''
+            ).trim(),
+            cnicBackUrl: String(
+              row.cnic_back_url || row.cnic_back || authSession?.cnicBackUrl || ''
+            ).trim(),
             selfieUrl: String(row.selfie_url || authSession?.selfieUrl || '').trim(),
             shopPhotoUrl: String(row.shop_photo_url || authSession?.shopPhotoUrl || '').trim(),
           });
@@ -672,6 +683,11 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
           setPwNotice({ type: 'err', text: 'Email OTP code ghalat ya expire ho chuka hai.' });
           return;
         }
+        await syncEmailOtpVerifiedStatus({
+          deviceId: clientDeviceId,
+          email,
+          phone: authSession?.phone,
+        }).catch(() => {});
       }
 
       const newHash = await hashPasswordSha256(newPasswordInput);
@@ -681,6 +697,7 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
         phone: authSession?.phone,
         passwordHash: newHash,
         plainPassword: newPasswordInput,
+        ...(pwMode === 'EMAIL_OTP' ? { otpVerified: true, emailVerified: true } : {}),
       });
 
       setCurrentPasswordInput('');
@@ -1685,6 +1702,44 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
                         No Preview
                       </div>
                     )}
+                    <label className="boss-flat-btn block w-full py-1.5 rounded-lg bg-[#14181F] border border-slate-700 hover:border-[#F5B738] text-center text-[10.5px] font-bold cursor-pointer">
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={async (e) => {
+                          const f = e.target.files?.[0];
+                          e.target.value = '';
+                          if (!f) return;
+                          setIsUploadingShopImg('CNIC_FRONT');
+                          try {
+                            const up = await uploadImageToUserUploadsBucket({
+                              fileOrDataUrl: f,
+                              folder: 'cnic',
+                              deviceId: clientDeviceId,
+                              tag: 'cnic_front',
+                            });
+                            const finalUrl = up.url || up.base64DataUrl;
+                            if (finalUrl) {
+                              setCloudUserRecord((prev) => ({ ...prev, cnicFrontUrl: finalUrl }));
+                              await Promise.resolve(
+                                onSyncUserProfileToCloud?.({ cnicFrontUrl: finalUrl, companyName })
+                              );
+                              showToast('✅ CNIC Front compressed (<75KB) & Cloud par save ho gaya!');
+                            }
+                          } catch {
+                            showToast('CNIC Front upload nahi ho saka. Dobara try karein.');
+                          } finally {
+                            setIsUploadingShopImg(null);
+                          }
+                        }}
+                      />
+                      {isUploadingShopImg === 'CNIC_FRONT'
+                        ? 'Uploading Front...'
+                        : cloudUserRecord.cnicFrontUrl
+                        ? 'Update CNIC Front'
+                        : 'Upload CNIC Front'}
+                    </label>
                   </div>
 
                   {/* CNIC Back */}
@@ -1710,6 +1765,44 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
                         No Preview
                       </div>
                     )}
+                    <label className="boss-flat-btn block w-full py-1.5 rounded-lg bg-[#14181F] border border-slate-700 hover:border-[#F5B738] text-center text-[10.5px] font-bold cursor-pointer">
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={async (e) => {
+                          const f = e.target.files?.[0];
+                          e.target.value = '';
+                          if (!f) return;
+                          setIsUploadingShopImg('CNIC_BACK');
+                          try {
+                            const up = await uploadImageToUserUploadsBucket({
+                              fileOrDataUrl: f,
+                              folder: 'cnic',
+                              deviceId: clientDeviceId,
+                              tag: 'cnic_back',
+                            });
+                            const finalUrl = up.url || up.base64DataUrl;
+                            if (finalUrl) {
+                              setCloudUserRecord((prev) => ({ ...prev, cnicBackUrl: finalUrl }));
+                              await Promise.resolve(
+                                onSyncUserProfileToCloud?.({ cnicBackUrl: finalUrl, companyName })
+                              );
+                              showToast('✅ CNIC Back compressed (<75KB) & Cloud par save ho gaya!');
+                            }
+                          } catch {
+                            showToast('CNIC Back upload nahi ho saka. Dobara try karein.');
+                          } finally {
+                            setIsUploadingShopImg(null);
+                          }
+                        }}
+                      />
+                      {isUploadingShopImg === 'CNIC_BACK'
+                        ? 'Uploading Back...'
+                        : cloudUserRecord.cnicBackUrl
+                        ? 'Update CNIC Back'
+                        : 'Upload CNIC Back'}
+                    </label>
                   </div>
 
                   {/* Owner Selfie */}

@@ -484,7 +484,7 @@ export function compressFileToJpegDataUrl(
           let currentQuality = quality;
           let bestJpeg = '';
 
-          for (let attempt = 0; attempt < 5; attempt++) {
+          for (let attempt = 0; attempt < 6; attempt++) {
             const scale = img.width > currentMaxW ? currentMaxW / img.width : 1;
             const targetW = Math.max(1, Math.round(img.width * scale));
             const targetH = Math.max(1, Math.round(img.height * scale));
@@ -505,12 +505,13 @@ export function compressFileToJpegDataUrl(
               resolve(jpeg);
               return;
             }
-            const minQ = maxWidth >= 900 ? 0.45 : 0.28;
-            const minW = maxWidth >= 900 ? 720 : 420;
-            if (currentQuality > minQ + 0.06) {
+            const isStrictCnic = maxBytes <= 75 * 1024;
+            const minQ = maxWidth >= 900 ? 0.45 : isStrictCnic ? 0.24 : 0.28;
+            const minW = maxWidth >= 900 ? 720 : isStrictCnic ? 360 : 420;
+            if (currentQuality > minQ + 0.05) {
               currentQuality = Math.max(minQ, Number((currentQuality - 0.08).toFixed(2)));
             } else {
-              currentMaxW = Math.max(minW, Math.round(currentMaxW * 0.85));
+              currentMaxW = Math.max(minW, Math.round(currentMaxW * 0.82));
             }
           }
 
@@ -528,7 +529,7 @@ export function compressFileToJpegDataUrl(
 /**
  * Upload an image (File or compressed Data URL) to Supabase Storage.
  * - Payment receipts ('receipts') upload strictly to the existing 'receipts' bucket after 800px / 0.65 JPEG compression.
- * - Falls back cleanly to compact compressed JPEG Data URL if storage upload is unavailable.
+ * - CNIC uploads compress strictly < 75KB JPEG DataURL and fall back immediately if Storage fails or times out.
  */
 export async function uploadImageToUserUploadsBucket(params: {
   fileOrDataUrl: File | string;
@@ -543,8 +544,9 @@ export async function uploadImageToUserUploadsBucket(params: {
       ? params.fileOrDataUrl
       : isReceipt || isSelfieOrShop
       ? await compressFileToJpegDataUrl(params.fileOrDataUrl, 800, 0.65, 120 * 1024)
-      : await compressFileToJpegDataUrl(params.fileOrDataUrl, 800, 0.6, 80 * 1024);
+      : await compressFileToJpegDataUrl(params.fileOrDataUrl, 800, 0.58, 72 * 1024);
 
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
   try {
     const { url: urlBase, key: apiKey } = getActiveSupabaseCredentials();
     const safeDev = (params.deviceId || 'DEV-UNKNOWN').replace(/[^A-Za-z0-9_-]/g, '_');
@@ -555,6 +557,11 @@ export async function uploadImageToUserUploadsBucket(params: {
       : `${params.folder}/${safeDev}/${safeTag}_${Date.now()}.jpg`;
     const blob = await dataUrlToBlob(dataUrl);
 
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    if (controller) {
+      timeoutId = setTimeout(() => controller.abort(), 6000);
+    }
+
     const uploadResp = await fetch(`${urlBase}/storage/v1/object/${targetBucket}/${filePath}`, {
       method: 'POST',
       headers: {
@@ -564,6 +571,7 @@ export async function uploadImageToUserUploadsBucket(params: {
         'x-upsert': 'true',
       },
       body: blob,
+      ...(controller ? { signal: controller.signal } : {}),
     });
 
     if (uploadResp.ok) {
@@ -572,6 +580,8 @@ export async function uploadImageToUserUploadsBucket(params: {
     }
   } catch {
     // Non-fatal fallback to compact JPEG Data URL
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
   }
 
   return { url: dataUrl, base64DataUrl: dataUrl, storedInBucket: false };

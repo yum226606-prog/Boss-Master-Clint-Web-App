@@ -274,6 +274,8 @@ interface AppLayoutCalculatorScreenProps {
     tagline?: string;
     selfieUrl?: string;
     shopPhotoUrl?: string;
+    cnicFrontUrl?: string;
+    cnicBackUrl?: string;
   }) => Promise<void> | void;
   supportRequests?: ClientSupportRequest[];
   isSubmittingSupportRequest?: boolean;
