@@ -79,9 +79,6 @@ export const AccountBlockedLockModal: React.FC<AccountBlockedLockModalProps> = (
           <div className="text-sm font-bold text-white">
             {blockReason || 'Suspended by Master Admin'}
           </div>
-          <div className="text-[10.5px] text-rose-200/75 pt-1 font-mono">
-            Device ID: {clientDeviceId}
-          </div>
         </div>
 
         <p className="text-[11.5px] text-slate-300 leading-relaxed">
@@ -102,7 +99,7 @@ export const AccountBlockedLockModal: React.FC<AccountBlockedLockModalProps> = (
           <div className="grid grid-cols-2 gap-2">
             <a
               href={`https://wa.me/923105524225?text=${encodeURIComponent(
-                `Assalam-o-Alaikum Admin, mera account blocked show ho raha hai.\nName: ${authSession.name}\nPhone: ${authSession.phone}\nDevice: ${clientDeviceId}\nReason: ${blockReason}`
+                `Assalam-o-Alaikum Admin, mera account blocked show ho raha hai.\nName: ${authSession.name}\nPhone: ${authSession.phone}\nEmail: ${authSession.email || ''}\nReason: ${blockReason}`
               )}`}
               target="_blank"
               rel="noreferrer"
@@ -338,7 +335,7 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
                 </h2>
               </div>
               <p className="text-[11px] text-slate-300 truncate">
-                {authSession.name} ({authSession.phone || authSession.email}) · ID: {clientDeviceId}
+                {authSession.name} ({authSession.phone || authSession.email})
                 {expiresAt ? ` · Expired: ${new Date(expiresAt).toLocaleDateString('en-GB')}` : ''}
               </p>
             </div>
@@ -586,7 +583,7 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <a
                 href={`https://wa.me/923105524225?text=${encodeURIComponent(
-                  `Assalam-o-Alaikum Admin, I sent Rs. ${amountInput} payment for ${selectedPkg?.name || 'Plan'}. Name: ${authSession.name}, Phone: ${authSession.phone}, Device: ${clientDeviceId}, TID: ${tidInput}`
+                  `Assalam-o-Alaikum Admin, I sent Rs. ${amountInput} payment for ${selectedPkg?.name || 'Plan'}. Name: ${authSession.name}, Phone: ${authSession.phone}, TID: ${tidInput}`
                 )}`}
                 target="_blank"
                 rel="noreferrer"

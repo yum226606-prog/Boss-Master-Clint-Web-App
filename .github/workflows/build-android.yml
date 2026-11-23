@@ -30,12 +30,13 @@ jobs:
 
       - name: Initialize Capacitor Android, Apply Logo & build APK
         run: |
-          npm install @capacitor/core @capacitor/cli @capacitor/android @capacitor/assets --legacy-peer-deps
+          npm install @capacitor/core @capacitor/cli @capacitor/android @capacitor/assets @capacitor/app @capacitor/browser --legacy-peer-deps
           mkdir -p assets
           cp public/pwa-512x512.png assets/icon.png
           cp public/pwa-512x512.png assets/splash.png
           rm -rf android
           npx cap add android
+          node scripts/configure-android-native.mjs
           npx @capacitor/assets generate --android
           npx cap sync android
           cd android

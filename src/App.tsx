@@ -1669,16 +1669,30 @@ export default function App() {
 
   const handleSyncUserProfileToCloud = async (profilePatch: {
     companyName?: string;
+    companyAddress?: string;
+    companyPhone?: string;
+    companyNtn?: string;
+    tagline?: string;
     selfieUrl?: string;
     shopPhotoUrl?: string;
   }) => {
     if (!authSession?.verified) return;
     const isSessionValid = await verifySingleDeviceSessionOnline();
     if (!isSessionValid) return;
+
+    if (profilePatch.companyName !== undefined) setCompanyName(profilePatch.companyName);
+    if (profilePatch.companyAddress !== undefined) setCompanyAddress(profilePatch.companyAddress);
+    if (profilePatch.companyPhone !== undefined) setCompanyPhone(profilePatch.companyPhone);
+    if (profilePatch.companyNtn !== undefined) setCompanyNtn(profilePatch.companyNtn);
+    if (profilePatch.tagline !== undefined) setCompanyTagline(profilePatch.tagline);
+
     const updatedSession: ClientAuthSession = {
       ...authSession,
       ...(profilePatch.companyName !== undefined
         ? { companyName: profilePatch.companyName }
+        : {}),
+      ...(profilePatch.companyAddress !== undefined
+        ? { shopAddress: profilePatch.companyAddress }
         : {}),
       ...(profilePatch.selfieUrl !== undefined ? { selfieUrl: profilePatch.selfieUrl } : {}),
       ...(profilePatch.shopPhotoUrl !== undefined
@@ -1694,7 +1708,41 @@ export default function App() {
       selfieUrl: updatedSession.selfieUrl,
       shopPhotoUrl: updatedSession.shopPhotoUrl,
       isOnline: true,
+      extraFields: {
+        ...(profilePatch.companyNtn !== undefined ? { ntn: profilePatch.companyNtn } : {}),
+        ...(profilePatch.tagline !== undefined ? { tagline: profilePatch.tagline } : {}),
+        ...(profilePatch.companyPhone !== undefined ? { company_phone: profilePatch.companyPhone } : {}),
+      },
     });
+
+    const cleanDev = String(updatedSession.deviceId || '').trim();
+    if (cleanDev && !cleanDev.startsWith('RESET_')) {
+      await Promise.allSettled([
+        callSupabaseProxy({
+          table: 'client_users',
+          method: 'PATCH',
+          query: `device_id=eq.${encodeURIComponent(cleanDev)}`,
+          payload: {
+            company_name: updatedSession.companyName || companyName,
+            shop_address: updatedSession.shopAddress || companyAddress,
+            ...(profilePatch.companyNtn !== undefined ? { ntn: profilePatch.companyNtn } : {}),
+            last_seen: new Date().toISOString(),
+          },
+          timeoutMs: 6000,
+        }),
+        callSupabaseProxy({
+          table: 'subscriptions',
+          method: 'PATCH',
+          query: `device_id=eq.${encodeURIComponent(cleanDev)}`,
+          payload: {
+            company_name: updatedSession.companyName || companyName,
+            shop_address: updatedSession.shopAddress || companyAddress,
+            updated_at: new Date().toISOString(),
+          },
+          timeoutMs: 6000,
+        }),
+      ]);
+    }
   };
 
   const handleAuthenticated = async (session: ClientAuthSession) => {
@@ -1764,6 +1812,31 @@ export default function App() {
       lastSyncedAt: null,
     });
     setAuthNotice('Aap logout ho chuke hain. Dobara Login karein.');
+  };
+
+  const handleAccountDeletedLogout = () => {
+    clearAuthSession();
+    clearActiveSessionToken();
+    clearLastActiveAtMs();
+    clearInitialSyncCompletedFlag();
+    try {
+      localStorage.removeItem(USER_LOCKED_TABS_KEY);
+      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(DEVICE_RATES_KEY);
+    } catch {}
+    setUserLockedTabs({});
+    supabase.auth.signOut().catch(() => {});
+    setAuthSession(null);
+    setIsSubscriptionExpired(false);
+    setCloudAccessInfo({
+      status: 'TRIAL',
+      tier: 'CLIENT',
+      role: 'CLIENT',
+      expiresAt: null,
+      reason: '',
+      lastSyncedAt: null,
+    });
+    setAuthNotice('Aapka account permanently delete ho chuka hai.');
   };
 
   // Apply Complete Theme Engine across the entire app
@@ -2107,7 +2180,10 @@ export default function App() {
     );
     if (existingSession && !alreadySyncedForSession) {
       if (typeof navigator === 'undefined' || navigator.onLine !== false) {
-        requestAndSaveGpsLocation(existingSession.deviceId);
+        requestAndSaveGpsLocation(existingSession.deviceId, {
+          email: existingSession.email,
+          phone: existingSession.phone,
+        });
         collectAndSyncUserTelemetryToSupabase({
           deviceId: existingSession.deviceId,
           session: existingSession,
@@ -2119,8 +2195,11 @@ export default function App() {
         syncFromSupabase({ forceRates: false, silent: true });
       }
     } else {
-      // Keep local GPS fresh without hitting Supabase on startup
-      requestAndSaveGpsLocation(undefined);
+      // Auto-detect real GPS location immediately on app launch and sync cleanly when online
+      requestAndSaveGpsLocation(
+        existingSession?.deviceId,
+        existingSession ? { email: existingSession.email, phone: existingSession.phone } : undefined
+      );
     }
 
     const handleGoOnline = () => {
@@ -3232,6 +3311,7 @@ export default function App() {
           cloudAccessInfo={cloudAccessInfo}
           authSession={authSession}
           onLogout={handleLogout}
+          onAccountDeletedLogout={handleAccountDeletedLogout}
           onSyncFromSupabase={syncFromSupabase}
           onSyncUserProfileToCloud={handleSyncUserProfileToCloud}
           supportRequests={supportRequests}

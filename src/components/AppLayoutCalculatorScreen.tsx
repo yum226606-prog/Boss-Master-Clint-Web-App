@@ -30,6 +30,7 @@ import {
   Save,
   Sparkles,
   Edit2,
+  User,
   X,
   Check,
   Zap,
@@ -65,7 +66,6 @@ import {
   ClientAuthSession,
   isOwnerIdentity,
   loadCachedMasterEngineConfig,
-  upsertClientSubscriptionOrder,
 } from '../utils/adminApiConfig';
 import {
   callSupabaseProxy,
@@ -73,6 +73,7 @@ import {
   getEffectiveServerNowMs,
   uploadImageToUserUploadsBucket,
 } from '../utils/supabaseClientConfig';
+import { ClientProfileHubModal, ProfileHubTab } from './ClientProfileHubModal';
 
 import {
   AluminiumCostRow,
@@ -262,9 +263,14 @@ interface AppLayoutCalculatorScreenProps {
   };
   authSession?: ClientAuthSession | null;
   onLogout?: () => void;
+  onAccountDeletedLogout?: () => void;
   onSyncFromSupabase?: (options?: { forceRates?: boolean; silent?: boolean }) => Promise<boolean>;
   onSyncUserProfileToCloud?: (profilePatch: {
     companyName?: string;
+    companyAddress?: string;
+    companyPhone?: string;
+    companyNtn?: string;
+    tagline?: string;
     selfieUrl?: string;
     shopPhotoUrl?: string;
   }) => Promise<void> | void;
@@ -397,6 +403,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     cloudAccessInfo,
     authSession = null,
     onLogout,
+    onAccountDeletedLogout = onLogout || (() => {}),
     onSyncFromSupabase,
     onSyncUserProfileToCloud,
     supportRequests = [],
@@ -411,7 +418,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   } = props;
 
   const [doorSubTab, setDoorSubTab] = useState<'DOORS' | 'FIX' | 'OP_WIN' | 'SLIDING'>('DOORS');
-  const [ratesSubTab, setRatesSubTab] = useState<'RATES' | 'LOGO_BG' | 'HARDWARE' | 'PACKAGES'>('RATES');
+  const [ratesSubTab, setRatesSubTab] = useState<'RATES' | 'HARDWARE'>('RATES');
   const [rateCategoryTab, setRateCategoryTab] = useState<'ALUMINIUM' | 'GLASS'>('ALUMINIUM');
   const [rateViewMode, setRateViewMode] = useState<'GRID' | 'TABLE'>('GRID');
   const [rateMultiDeleteMode, setRateMultiDeleteMode] = useState(false);
@@ -422,17 +429,8 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   const [showAddGlassColorForm, setShowAddGlassColorForm] = useState(false);
   const [addGlassTargetGauge, setAddGlassTargetGauge] = useState('5');
   const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
-  const [showPackagesModal, setShowPackagesModal] = useState(false);
-  const [showSupportModal, setShowSupportModal] = useState(false);
-  const [isRefreshingSupport, setIsRefreshingSupport] = useState(false);
-  const [reqUserName, setReqUserName] = useState(authSession?.name || customerName || '');
-  const [reqUserPhone, setReqUserPhone] = useState(authSession?.phone || customerPhone || '');
-  const [reqUserEmail, setReqUserEmail] = useState(authSession?.email || '');
-  const [reqType, setReqType] = useState('Rate List / Section Request');
-  const [reqMessage, setReqMessage] = useState('');
-  const [supportSubmitError, setSupportSubmitError] = useState<string | null>(null);
-  const [supportSubmitSuccess, setSupportSubmitSuccess] = useState<string | null>(null);
-  const [copiedBankId, setCopiedBankId] = useState<string | null>(null);
+  const [profileHubTab, setProfileHubTab] = useState<ProfileHubTab | null>(null);
+  const [profilePreselectedPkg, setProfilePreselectedPkg] = useState<SubscriptionPackageConfig | null>(null);
   const [dismissedBannerSignatures, setDismissedBannerSignatures] = useState<string[]>([]);
 
   const getBannerDismissKey = (b: AppOfferBanner) =>
@@ -445,12 +443,14 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     return msgTs > lastSeenSupportMs;
   }).length;
 
-  const openSupportModal = () => {
-    setShowSupportModal(true);
-    onMarkSupportMessagesRead?.();
-    if (onRefreshSupportRequests) {
-      setIsRefreshingSupport(true);
-      Promise.resolve(onRefreshSupportRequests()).finally(() => setIsRefreshingSupport(false));
+  const openProfileHub = (tab: ProfileHubTab, pkg?: SubscriptionPackageConfig | null) => {
+    if (pkg !== undefined) setProfilePreselectedPkg(pkg);
+    setProfileHubTab(tab);
+    if (tab === 'SUPPORT') {
+      onMarkSupportMessagesRead?.();
+      if (onRefreshSupportRequests) {
+        Promise.resolve(onRefreshSupportRequests()).catch(() => {});
+      }
     }
   };
   const [showBackgroundAdjustments, setShowBackgroundAdjustments] = useState(false);
@@ -589,7 +589,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     };
   }, [currentTab]);
 
-  // Step 1: Client Order & Auto-Approval State
+  // Active Device ID kept internally for Supabase sync only (never displayed in UI)
   const [clientDeviceId] = useState<string>(() => {
     if (propDeviceId) return propDeviceId;
     if (typeof window !== 'undefined') {
@@ -601,164 +601,6 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     }
     return 'DEV-CLIENT-DEFAULT';
   });
-
-  const [orderSelectedPackage, setOrderSelectedPackage] = useState<SubscriptionPackageConfig | null>(null);
-  const [orderBankName, setOrderBankName] = useState<string>(
-    bankAccounts.find((b) => b.isActive !== false)?.bankName || 'Easypaisa Wallet'
-  );
-  const [orderAmountInput, setOrderAmountInput] = useState<string>(() =>
-    String(packages[0]?.priceRs ?? packages[0]?.price ?? 3000)
-  );
-  const [orderTidInput, setOrderTidInput] = useState<string>('');
-  const [orderReceiptUrl, setOrderReceiptUrl] = useState<string>('');
-  const [orderReceiptBase64, setOrderReceiptBase64] = useState<string>('');
-  const [isUploadingOrderReceipt, setIsUploadingOrderReceipt] = useState<boolean>(false);
-  const [orderClientName, setOrderClientName] = useState<string>(authSession?.name || customerName || 'Client');
-  const [orderClientPhone, setOrderClientPhone] = useState<string>(authSession?.phone || customerPhone || '');
-  const [isSubmittingOrder, setIsSubmittingOrder] = useState<boolean>(false);
-  const [activeClientOrder, setActiveClientOrder] = useState<any>(null);
-  const [isOrderAutoApproved, setIsOrderAutoApproved] = useState<boolean>(false);
-  const [isCheckingOrderStatus, setIsCheckingOrderStatus] = useState<boolean>(false);
-
-  useEffect(() => {
-    const pkg = orderSelectedPackage || packages[0];
-    if (pkg) {
-      setOrderAmountInput(String(pkg.priceRs ?? pkg.price ?? 3000));
-    }
-  }, [orderSelectedPackage, packages]);
-
-  useEffect(() => {
-    const activeBanks = bankAccounts.filter((b) => b.isActive !== false);
-    if (activeBanks.length > 0 && !activeBanks.some((b) => b.bankName === orderBankName)) {
-      setOrderBankName(activeBanks[0].bankName);
-    }
-  }, [bankAccounts, orderBankName]);
-
-  // Check Supabase subscriptions table directly for order status (no broken /api/ calls)
-  const checkClientOrderStatus = async () => {
-    if (!clientDeviceId) return;
-    try {
-      setIsCheckingOrderStatus(true);
-      const sbRes = await callSupabaseProxy({
-        table: 'subscriptions',
-        method: 'GET',
-        query: `device_id=eq.${encodeURIComponent(clientDeviceId)}&select=*&limit=1`,
-        timeoutMs: 7000,
-      });
-      const subRow = Array.isArray(sbRes.data) ? sbRes.data[0] : null;
-      if (subRow && (subRow.last_payment_tid || subRow.status)) {
-        const st = String(subRow.status || 'PENDING').toUpperCase();
-        const isApproved =
-          Boolean(subRow.is_activated) ||
-          st === 'ACTIVE' ||
-          st === 'APPROVED' ||
-          st === 'APPROVED_AUTO' ||
-          st === 'APPROVED_MANUAL';
-        if (subRow.last_payment_tid || isApproved) {
-          setActiveClientOrder({
-            tid: subRow.last_payment_tid || 'CLOUD-SUB',
-            status: isApproved ? 'APPROVED_MANUAL' : st,
-            packageName: subRow.package_name || 'Subscription Plan',
-            amount: subRow.amount,
-            bankName: subRow.payment_method,
-            receiptUrl: subRow.receipt_url,
-          });
-        }
-        if (isApproved) {
-          setIsOrderAutoApproved(true);
-          onSyncFromSupabase?.({ forceRates: false, silent: true });
-        }
-      }
-    } catch {
-      // ignore offline error
-    } finally {
-      setIsCheckingOrderStatus(false);
-    }
-  };
-
-  useEffect(() => {
-    if (showPackagesModal) {
-      checkClientOrderStatus();
-    }
-  }, [showPackagesModal]);
-
-  const handleOrderReceiptUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = '';
-    if (!file) return;
-    setIsUploadingOrderReceipt(true);
-    try {
-      const uploaded = await uploadImageToUserUploadsBucket({
-        fileOrDataUrl: file,
-        folder: 'receipts',
-        deviceId: clientDeviceId,
-        tag: 'payment_receipt',
-      });
-      setOrderReceiptUrl(uploaded.url);
-      setOrderReceiptBase64(uploaded.base64DataUrl);
-      showSettingsToast('✅ Payment screenshot uploaded!');
-    } catch {
-      showSettingsToast('Could not read receipt screenshot. Try again.');
-    } finally {
-      setIsUploadingOrderReceipt(false);
-    }
-  };
-
-  const handleSubmitClientOrder = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    const cleanTid = orderTidInput.trim().toUpperCase();
-    if (!cleanTid) {
-      showSettingsToast('Please enter the Transaction ID (TID) from your bank receipt!');
-      return;
-    }
-    const pkgToOrder = orderSelectedPackage || packages[0];
-    if (!pkgToOrder) {
-      showSettingsToast('Please select a subscription package!');
-      return;
-    }
-
-    const amountVal = Number(orderAmountInput) || pkgToOrder.priceRs || pkgToOrder.price || 500;
-    const cleanClientName = orderClientName.trim() || authSession?.name || customerName || 'Client User';
-    const cleanClientPhone = orderClientPhone.trim() || authSession?.phone || customerPhone || '';
-
-    try {
-      setIsSubmittingOrder(true);
-
-      const sbSubRes = await upsertClientSubscriptionOrder({
-        deviceId: clientDeviceId,
-        userName: cleanClientName,
-        phone: cleanClientPhone,
-        email: authSession?.email || '',
-        cnic: authSession?.cnic || '',
-        packageName: pkgToOrder.name,
-        subscriptionTier: pkgToOrder.planCode || 'MONTHLY',
-        amount: amountVal,
-        paymentMethod: orderBankName,
-        lastPaymentTid: cleanTid,
-        receiptUrl: orderReceiptUrl,
-        receiptBase64: orderReceiptBase64,
-      });
-
-      if (!sbSubRes.ok) {
-        showSettingsToast(sbSubRes.error || 'Could not save payment to Supabase. Try again.');
-        return;
-      }
-
-      setActiveClientOrder({
-        tid: cleanTid,
-        status: 'PENDING',
-        packageName: pkgToOrder.name,
-        amount: amountVal,
-        bankName: orderBankName,
-        receiptUrl: orderReceiptUrl,
-      });
-      showSettingsToast('✅ Payment TID & Receipt sent directly to Admin Panel (Supabase)!');
-    } catch (err: any) {
-      showSettingsToast('Error submitting order: ' + err?.message);
-    } finally {
-      setIsSubmittingOrder(false);
-    }
-  };
 
   const showSettingsToast = (msg: string) => {
     setSettingsNotice(msg);
@@ -2386,7 +2228,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
           <div className="flex items-center gap-1.5">
             <button
               type="button"
-              onClick={() => setShowPackagesModal(true)}
+              onClick={() => openProfileHub('PACKAGE')}
               className="px-2.5 py-1 rounded-lg bg-[#F5B738] text-black text-[11px] font-black cursor-pointer"
             >
               👑 View Subscription Packages
@@ -2668,19 +2510,17 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                 : `TRIAL${daysLeft ? ` ${daysLeft}d` : ''}`;
               return (
                 <>
-                  <span
-                    className={`h-6 px-1.5 sm:px-2 rounded-full border text-[9px] font-black flex items-center gap-1 shrink-0 ${
+                  <button
+                    type="button"
+                    onClick={() => openProfileHub('IDENTITY')}
+                    className={`boss-flat-btn h-6 px-1.5 sm:px-2 rounded-full border text-[9px] font-black flex items-center gap-1 cursor-pointer shrink-0 ${
                       detectedRole === 'OWNER'
                         ? 'bg-emerald-500/20 border-emerald-400/70 text-emerald-300'
                         : detectedRole === 'ADMIN'
                         ? 'bg-purple-500/20 border-purple-400/70 text-purple-300'
-                        : 'bg-slate-700/50 border-slate-500/70 text-slate-200'
+                        : 'bg-slate-700/50 border-slate-500/70 text-slate-200 hover:border-[#F5B738]'
                     }`}
-                    title={
-                      authSession
-                        ? `${authSession.name} (${authSession.phone || authSession.email}) · Role: ${roleLabel}`
-                        : `Role: ${roleLabel}`
-                    }
+                    title="Open Client Profile & Account Settings"
                   >
                     {detectedRole === 'OWNER' ? (
                       <Crown className="w-2.5 h-2.5 shrink-0" />
@@ -2688,11 +2528,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                       <ShieldCheck className="w-2.5 h-2.5 shrink-0" />
                     )}
                     <span>{roleLabel}</span>
-                  </span>
+                  </button>
                   {detectedRole !== 'OWNER' && (
                     <button
                       type="button"
-                      onClick={() => setShowPackagesModal(true)}
+                      onClick={() => openProfileHub('PACKAGE')}
                       className={`boss-flat-btn h-6 px-1.5 sm:px-2 rounded-full border text-[9px] font-black flex items-center gap-1 cursor-pointer shrink-0 ${
                         isVip
                           ? 'bg-emerald-500/15 border-emerald-500/60 text-emerald-300'
@@ -2700,11 +2540,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                           ? 'bg-amber-500/15 border-[#F5B738]/70 text-[#F5B738]'
                           : 'bg-sky-500/15 border-sky-500/60 text-sky-300'
                       }`}
-                      title={
-                        authSession
-                          ? `${authSession.name} (${authSession.phone}) — Click to view Plans`
-                          : 'Subscription Plans'
-                      }
+                      title="Subscription Packages & Activation"
                     >
                       <Crown className="w-2.5 h-2.5 shrink-0" />
                       <span>{planBadgeText}</span>
@@ -2739,7 +2575,16 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
             </button>
             <button
               type="button"
-              onClick={openSupportModal}
+              onClick={() => openProfileHub('IDENTITY')}
+              className="boss-flat-btn w-6 h-6 rounded-full bg-amber-500/15 border border-[#F5B738]/60 text-[#F5B738] hover:bg-[#F5B738] hover:text-black flex items-center justify-center cursor-pointer"
+              title="Client Profile & Account Settings"
+              aria-label="Client Profile & Account Settings"
+            >
+              <User className="w-3 h-3" />
+            </button>
+            <button
+              type="button"
+              onClick={() => openProfileHub('SUPPORT')}
               className="boss-flat-btn relative w-6 h-6 rounded-full bg-sky-500/15 border border-sky-500/50 text-sky-300 hover:bg-sky-500 hover:text-black flex items-center justify-center cursor-pointer"
               title="Support Team Request & Messages Box"
               aria-label="Support Team Request Box"
@@ -6387,19 +6232,6 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
 
             <button
               type="button"
-              onClick={() => setRatesSubTab('LOGO_BG')}
-              className={`boss-flat-btn shrink-0 px-2.5 py-1.5 rounded-lg border text-[11px] font-extrabold flex items-center gap-1 cursor-pointer ${
-                ratesSubTab === 'LOGO_BG'
-                  ? 'bg-[#F5B738] border-[#F5B738] text-black'
-                  : 'bg-[#14181F] border-[#2B3441] text-slate-200 hover:border-[#F5B738]'
-              }`}
-            >
-              <ImageIcon className="w-3 h-3 shrink-0" />
-              <span>Logo &amp; BG</span>
-            </button>
-
-            <button
-              type="button"
               onClick={() => setRatesSubTab('HARDWARE')}
               className={`boss-flat-btn shrink-0 px-2.5 py-1.5 rounded-lg border text-[11px] font-extrabold flex items-center gap-1 cursor-pointer ${
                 ratesSubTab === 'HARDWARE'
@@ -6413,24 +6245,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
 
             <button
               type="button"
-              onClick={() => setRatesSubTab('PACKAGES')}
-              className={`boss-flat-btn shrink-0 px-2.5 py-1.5 rounded-lg border text-[11px] font-extrabold flex items-center gap-1 cursor-pointer ${
-                ratesSubTab === 'PACKAGES'
-                  ? 'bg-[#F5B738] border-[#F5B738] text-black'
-                  : 'bg-[#14181F] border-[#2B3441] text-slate-200 hover:border-[#F5B738]'
-              }`}
+              onClick={() => openProfileHub('PACKAGE')}
+              className="boss-flat-btn relative shrink-0 px-2.5 py-1.5 rounded-lg border border-[#F5B738]/60 bg-amber-500/15 text-[#F5B738] hover:bg-[#F5B738] hover:text-black text-[11px] font-extrabold flex items-center gap-1 cursor-pointer"
             >
               <Award className="w-3 h-3 shrink-0" />
-              <span>Plans</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={openSupportModal}
-              className="boss-flat-btn relative shrink-0 px-2.5 py-1.5 rounded-lg border border-sky-500/60 bg-sky-950/30 text-sky-300 hover:bg-sky-500 hover:text-black text-[11px] font-extrabold flex items-center gap-1 cursor-pointer"
-            >
-              <MessageSquarePlus className="w-3 h-3 shrink-0" />
-              <span>Support Request</span>
+              <span>Profile &amp; Plans</span>
               {unreadAdminSupportCount > 0 && (
                 <span className="ml-0.5 px-1.5 py-0.2 rounded-full bg-rose-600 text-white text-[9px] font-black">
                   {unreadAdminSupportCount}
@@ -7669,460 +7488,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
           )}
 
           {/* =============================================================== */}
-          {/* SUB-TAB 2: LOGO, BACKGROUND & CUSTOM LETTERHEAD                 */}
-          {/* =============================================================== */}
-          {ratesSubTab === 'LOGO_BG' && (
-            <div className="p-3 sm:p-4 rounded-xl bg-[#14181F] border border-[#2B3441] space-y-3.5 text-xs">
-              <div>
-                <h3 className="text-sm font-extrabold text-[#F5B738] flex items-center gap-1.5">
-                  <ImageIcon className="w-4 h-4 shrink-0" />
-                  <span>Logo, Background &amp; Custom Letterhead</span>
-                </h3>
-                <p className="text-[11px] text-slate-400 mt-0.5">
-                  Customize your shop logo, quotation background, and letterhead details for PDF bills &amp; charts.
-                </p>
-              </div>
-
-              {/* Locked Official App Main Logo Notice (User Requirement #3) */}
-              <div className="p-2.5 rounded-xl bg-[#0C0F14] border border-[#F5B738]/40 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <img
-                    src={mainLogoUrl}
-                    alt="Official App Logo"
-                    className="w-10 h-10 rounded-full object-cover border border-[#F5B738] shrink-0"
-                  />
-                  <div className="min-w-0">
-                    <div className="font-bold text-[#F5B738] text-[11px] truncate">
-                      Official App Icon (Locked)
-                    </div>
-                    <div className="text-[10px] text-slate-400 truncate">
-                      App header logo locked hai aur change nahi ho sakta.
-                    </div>
-                  </div>
-                </div>
-                <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-[#14181F] border border-slate-700 text-slate-300 font-bold text-[10px] shrink-0">
-                  <Lock className="w-3 h-3 text-[#F5B738]" />
-                  <span>Locked</span>
-                </span>
-              </div>
-
-              {/* Shop Logo & Background Compact Icon Action Row */}
-              <div className="flex items-center justify-between gap-3 p-2.5 rounded-xl bg-[#0C0F14] border border-slate-800">
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <img
-                    src={activeShopLogoUrl}
-                    alt="Shop Logo"
-                    className="w-12 h-12 rounded-full object-cover border-2 border-[#F5B738] shrink-0"
-                  />
-                  <div className="min-w-0">
-                    <div className="font-bold text-white text-xs truncate">Shop Logo &amp; Sheet BG</div>
-                    <div className="text-[10px] text-slate-400 truncate">
-                      Upload, Save or Share logo &amp; sheet background
-                    </div>
-                  </div>
-                </div>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  <label
-                    className="boss-flat-btn w-8 h-8 rounded-lg bg-[#F5B738] hover:bg-amber-400 text-black flex items-center justify-center cursor-pointer"
-                    title="Upload Custom Logo from Gallery"
-                    aria-label="Upload Custom Logo from Gallery"
-                  >
-                    <Upload className="w-4 h-4" />
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={(e) =>
-                        handleImageFileUpload(
-                          e,
-                          (dataUrl) =>
-                            onUpdateLayoutConfig({
-                              ...layoutConfig,
-                              shopLogoUrl: dataUrl,
-                            }),
-                          'Shop Logo for Quotation & Charts'
-                        )
-                      }
-                      className="hidden"
-                    />
-                  </label>
-
-                  <label
-                    className="boss-flat-btn w-8 h-8 rounded-lg bg-[#14181F] border border-[#F5B738]/60 text-[#F5B738] hover:bg-[#F5B738] hover:text-black flex items-center justify-center cursor-pointer"
-                    title="Upload Custom Sheet Background"
-                    aria-label="Upload Custom Sheet Background"
-                  >
-                    <ImageIcon className="w-4 h-4" />
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={(e) =>
-                        handleImageFileUpload(
-                          e,
-                          onUpdateLetterheadBgUrl,
-                          'Quotation Letterhead Background'
-                        )
-                      }
-                      className="hidden"
-                    />
-                  </label>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const a = document.createElement('a');
-                      a.href = activeShopLogoUrl;
-                      a.download = `boss_shop_logo_${Date.now()}.png`;
-                      a.click();
-                      showSettingsToast('Saved Shop Logo!');
-                    }}
-                    className="boss-flat-btn w-8 h-8 rounded-lg bg-[#14181F] border border-amber-500/60 text-amber-300 hover:bg-amber-500 hover:text-black flex items-center justify-center cursor-pointer"
-                    title="Save Shop Logo"
-                    aria-label="Save Shop Logo"
-                  >
-                    <Download className="w-4 h-4" />
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      try {
-                        if (navigator.share) {
-                          const resp = await fetch(activeShopLogoUrl);
-                          const blob = await resp.blob();
-                          const file = new File([blob], 'boss_shop_logo.png', { type: blob.type || 'image/png' });
-                          if (navigator.canShare && navigator.canShare({ files: [file] })) {
-                            await navigator.share({ title: companyName || 'Boss Aluminium & Glass', files: [file] });
-                            return;
-                          }
-                        }
-                      } catch {
-                        // fallback to download
-                      }
-                      const a = document.createElement('a');
-                      a.href = activeShopLogoUrl;
-                      a.download = `boss_shop_logo_${Date.now()}.png`;
-                      a.click();
-                      showSettingsToast('Logo downloaded for sharing!');
-                    }}
-                    className="boss-flat-btn w-8 h-8 rounded-lg bg-[#14181F] border border-sky-500/60 text-sky-300 hover:bg-sky-500 hover:text-black flex items-center justify-center cursor-pointer"
-                    title="Share Shop Logo"
-                    aria-label="Share Shop Logo"
-                  >
-                    <Share2 className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
-
-              {/* Letterhead Background Quick Controls */}
-              <div className="p-2.5 rounded-xl bg-[#0C0F14] border border-slate-800 flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <span className="text-[11px] font-bold text-slate-300">Picture Background:</span>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      onUpdateLayoutConfig({
-                        ...layoutConfig,
-                        showLetterheadBackground: !layoutConfig.showLetterheadBackground,
-                      })
-                    }
-                    className={`boss-flat-btn px-2 py-0.5 rounded text-[10px] font-black cursor-pointer ${
-                      layoutConfig.showLetterheadBackground
-                        ? 'bg-emerald-500 text-black'
-                        : 'bg-slate-800 text-slate-300'
-                    }`}
-                  >
-                    {layoutConfig.showLetterheadBackground ? 'ON' : 'OFF'}
-                  </button>
-                </div>
-                <div className="flex items-center gap-2 flex-1 min-w-[140px]">
-                  <span className="text-[10px] text-slate-400">Opacity:</span>
-                  <input
-                    type="range"
-                    min={0.12}
-                    max={0.75}
-                    step={0.03}
-                    value={layoutConfig.letterheadOpacity || 0.28}
-                    onChange={(e) =>
-                      onUpdateLayoutConfig({
-                        ...layoutConfig,
-                        letterheadOpacity: parseFloat(e.target.value) || 0.28,
-                      })
-                    }
-                    className="accent-[#F5B738] flex-1"
-                  />
-                </div>
-                {layoutConfig.shopLogoUrl && (
-                  <button
-                    type="button"
-                    onClick={() => onUpdateLayoutConfig({ ...layoutConfig, shopLogoUrl: '' })}
-                    className="boss-flat-btn px-2 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px] font-bold"
-                  >
-                    Reset Shop Logo
-                  </button>
-                )}
-              </div>
-
-              {/* Company Info Inputs */}
-              <div className="space-y-2.5">
-                <div>
-                  <label className="block text-[10px] text-slate-400 mb-1">Company / Shop Name</label>
-                  <input
-                    type="text"
-                    value={companyName}
-                    onChange={(e) =>
-                      onUpdateCompanyInfo({
-                        name: e.target.value,
-                        tagline: companyTagline,
-                        address: companyAddress,
-                        phone: companyPhone,
-                        ntn: companyNtn,
-                      })
-                    }
-                    className="w-full px-3 py-2 rounded-lg bg-[#0C0F14] border border-slate-700 text-xs font-bold text-white"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[10px] text-slate-400 mb-1">Tagline / Subtitle</label>
-                  <input
-                    type="text"
-                    value={companyTagline}
-                    onChange={(e) =>
-                      onUpdateCompanyInfo({
-                        name: companyName,
-                        tagline: e.target.value,
-                        address: companyAddress,
-                        phone: companyPhone,
-                        ntn: companyNtn,
-                      })
-                    }
-                    className="w-full px-3 py-2 rounded-lg bg-[#0C0F14] border border-slate-700 text-xs text-white"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[10px] text-slate-400 mb-1">
-                    Phone Numbers (Shown on PDF Bill)
-                  </label>
-                  <input
-                    type="text"
-                    value={companyPhone}
-                    onChange={(e) =>
-                      onUpdateCompanyInfo({
-                        name: companyName,
-                        tagline: companyTagline,
-                        address: companyAddress,
-                        phone: e.target.value,
-                        ntn: companyNtn,
-                      })
-                    }
-                    className="w-full px-3 py-2 rounded-lg bg-[#0C0F14] border border-slate-700 text-xs font-mono text-white"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[10px] text-slate-400 mb-1">
-                    Shop / Office Address (Shown on PDF Bill)
-                  </label>
-                  <input
-                    type="text"
-                    value={companyAddress}
-                    onChange={(e) =>
-                      onUpdateCompanyInfo({
-                        name: companyName,
-                        tagline: companyTagline,
-                        address: e.target.value,
-                        phone: companyPhone,
-                        ntn: companyNtn,
-                      })
-                    }
-                    className="w-full px-3 py-2 rounded-lg bg-[#0C0F14] border border-slate-700 text-xs text-white"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[10px] text-slate-400 mb-1">
-                    NTN Number (Optional — Shown on PDF Bill)
-                  </label>
-                  <input
-                    type="text"
-                    value={companyNtn}
-                    onChange={(e) =>
-                      onUpdateCompanyInfo({
-                        name: companyName,
-                        tagline: companyTagline,
-                        address: companyAddress,
-                        phone: companyPhone,
-                        ntn: e.target.value,
-                      })
-                    }
-                    placeholder="e.g. 1234567-8"
-                    className="w-full px-3 py-2 rounded-lg bg-[#0C0F14] border border-slate-700 text-xs font-mono text-white"
-                  />
-                </div>
-              </div>
-
-              {/* Client Cloud Profile Photos & Sync */}
-              {authSession && (
-                <div className="p-2.5 rounded-xl bg-[#0C0F14] border border-slate-800 space-y-2">
-                  <div className="flex items-center justify-between gap-2 flex-wrap">
-                    <span className="text-[11px] font-bold text-[#F5B738]">
-                      Client Cloud Profile &amp; Verification Photos
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        onSyncUserProfileToCloud?.({ companyName });
-                        showSettingsToast('✅ Company Name & Profile synced to Admin Cloud!');
-                      }}
-                      className="boss-flat-btn px-2.5 py-1 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black font-black text-[10.5px] flex items-center gap-1 cursor-pointer"
-                    >
-                      <Cloud className="w-3 h-3" />
-                      <span>Sync Profile to Cloud</span>
-                    </button>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <label className="cursor-pointer p-2 rounded-lg bg-[#14181F] border border-dashed border-slate-700 hover:border-[#F5B738] flex items-center gap-2 text-[10.5px]">
-                      <input
-                        type="file"
-                        accept="image/*"
-                        onChange={async (e) => {
-                          const f = e.target.files?.[0];
-                          e.target.value = '';
-                          if (!f) return;
-                          const up = await uploadImageToUserUploadsBucket({
-                            fileOrDataUrl: f,
-                            folder: 'selfies',
-                            deviceId: clientDeviceId,
-                            tag: 'selfie',
-                          });
-                          onSyncUserProfileToCloud?.({ selfieUrl: up.url, companyName });
-                          showSettingsToast('✅ Selfie photo synced to Admin Cloud!');
-                        }}
-                        className="hidden"
-                      />
-                      <Camera className="w-4 h-4 text-sky-400 shrink-0" />
-                      <span className="truncate font-semibold text-slate-200">
-                        {authSession.selfieUrl ? 'Update Selfie Photo' : 'Upload Selfie Photo'}
-                      </span>
-                    </label>
-
-                    <label className="cursor-pointer p-2 rounded-lg bg-[#14181F] border border-dashed border-slate-700 hover:border-[#F5B738] flex items-center gap-2 text-[10.5px]">
-                      <input
-                        type="file"
-                        accept="image/*"
-                        onChange={async (e) => {
-                          const f = e.target.files?.[0];
-                          e.target.value = '';
-                          if (!f) return;
-                          const up = await uploadImageToUserUploadsBucket({
-                            fileOrDataUrl: f,
-                            folder: 'shops',
-                            deviceId: clientDeviceId,
-                            tag: 'shop',
-                          });
-                          onSyncUserProfileToCloud?.({ shopPhotoUrl: up.url, companyName });
-                          showSettingsToast('✅ Shop photo synced to Admin Cloud!');
-                        }}
-                        className="hidden"
-                      />
-                      <Upload className="w-4 h-4 text-amber-400 shrink-0" />
-                      <span className="truncate font-semibold text-slate-200">
-                        {authSession.shopPhotoUrl ? 'Update Shop Photo' : 'Upload Shop Photo'}
-                      </span>
-                    </label>
-                  </div>
-                </div>
-              )}
-
-              {/* Live PDF Letterhead Preview */}
-              <div className="space-y-1.5">
-                <div className="text-[10px] font-extrabold text-[#F5B738] uppercase tracking-wider">
-                  LIVE PDF LETTERHEAD PREVIEW:
-                </div>
-                <div className="relative overflow-hidden rounded-xl border border-[#F5B738]/50 bg-[#0C0F14] p-3 flex items-center gap-3">
-                  {layoutConfig.showLetterheadBackground && (
-                    <img
-                      src={letterheadBgUrl}
-                      alt=""
-                      className="absolute inset-0 w-full h-full object-cover pointer-events-none"
-                      style={{ opacity: layoutConfig.letterheadOpacity || 0.25 }}
-                    />
-                  )}
-                  <img
-                    src={activeShopLogoUrl}
-                    alt="Letterhead Logo"
-                    className="relative w-11 h-11 rounded-full object-cover border border-[#F5B738] shrink-0"
-                  />
-                  <div className="relative min-w-0">
-                    <div className="font-extrabold text-[#F5B738] text-xs truncate">
-                      {companyName || 'BOSS ALUMINIUM & GLASS'}
-                    </div>
-                    <div className="text-[10px] text-slate-300 truncate">
-                      {companyTagline}
-                    </div>
-                    <div className="text-[10px] text-slate-400 truncate">
-                      {companyPhone} · {companyAddress}
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Compact Icon Backup / Restore JSON & Default Letterhead Bar */}
-              <div className="flex items-center justify-between gap-2 pt-1 border-t border-slate-800">
-                <span className="text-[11px] font-bold text-slate-400">Backup &amp; Restore:</span>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  <button
-                    type="button"
-                    onClick={onExportFullBackup}
-                    className="boss-flat-btn w-8 h-8 rounded-lg bg-[#F5B738] hover:bg-amber-400 text-black flex items-center justify-center cursor-pointer"
-                    title="Backup JSON"
-                    aria-label="Backup JSON"
-                  >
-                    <Download className="w-4 h-4" />
-                  </button>
-                  <label
-                    className="boss-flat-btn w-8 h-8 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black flex items-center justify-center cursor-pointer"
-                    title="Restore JSON"
-                    aria-label="Restore JSON"
-                  >
-                    <Upload className="w-4 h-4" />
-                    <input
-                      type="file"
-                      accept="application/json,.json"
-                      onChange={(e) => {
-                        const f = e.target.files?.[0];
-                        if (!f) return;
-                        const reader = new FileReader();
-                        reader.onload = () => {
-                          const ok = onImportFullBackup(String(reader.result || ''));
-                          showSettingsToast(ok ? 'Full backup restored!' : 'Invalid backup JSON.');
-                        };
-                        reader.readAsText(f);
-                        e.target.value = '';
-                      }}
-                      className="hidden"
-                    />
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onRestoreDefaultBrandingAssets();
-                      showSettingsToast('Restored default Letterhead Background!');
-                    }}
-                    className="boss-flat-btn w-8 h-8 rounded-lg bg-[#0C0F14] border border-slate-700 text-slate-300 hover:text-white hover:border-[#F5B738] flex items-center justify-center cursor-pointer"
-                    title="Restore Default BG"
-                    aria-label="Restore Default BG"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* =============================================================== */}
-          {/* SUB-TAB 3: HARDWARE, DISCOUNT (%) & QUOTATION DEFAULTS          */}
+          {/* SUB-TAB 2: HARDWARE, DISCOUNT (%) & QUOTATION DEFAULTS          */}
           {/* =============================================================== */}
           {ratesSubTab === 'HARDWARE' && (
             <div className="p-3 sm:p-4 rounded-xl bg-[#14181F] border border-[#2B3441] space-y-3.5 text-xs">
@@ -8322,7 +7688,42 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                 />
               </div>
 
-              <div className="flex items-center justify-end pt-1">
+              <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-800">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[11px] font-bold text-slate-400">Backup &amp; Restore:</span>
+                  <button
+                    type="button"
+                    onClick={onExportFullBackup}
+                    className="boss-flat-btn w-8 h-8 rounded-lg bg-[#0C0F14] border border-slate-700 text-[#F5B738] hover:border-[#F5B738] flex items-center justify-center cursor-pointer"
+                    title="Backup JSON"
+                    aria-label="Backup JSON"
+                  >
+                    <Download className="w-4 h-4" />
+                  </button>
+                  <label
+                    className="boss-flat-btn w-8 h-8 rounded-lg bg-[#0C0F14] border border-slate-700 text-emerald-400 hover:border-emerald-400 flex items-center justify-center cursor-pointer"
+                    title="Restore JSON"
+                    aria-label="Restore JSON"
+                  >
+                    <Upload className="w-4 h-4" />
+                    <input
+                      type="file"
+                      accept="application/json,.json"
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (!f) return;
+                        const reader = new FileReader();
+                        reader.onload = () => {
+                          const ok = onImportFullBackup(String(reader.result || ''));
+                          showSettingsToast(ok ? 'Full backup restored!' : 'Invalid backup JSON.');
+                        };
+                        reader.readAsText(f);
+                        e.target.value = '';
+                      }}
+                      className="hidden"
+                    />
+                  </label>
+                </div>
                 <button
                   type="button"
                   onClick={() => {
@@ -8340,180 +7741,6 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
             </div>
           )}
 
-          {/* =============================================================== */}
-          {/* SUB-TAB 4: CLIENT SUBSCRIPTION PLANS & BANK TRANSFER ACTIVATION */}
-          {/* =============================================================== */}
-          {ratesSubTab === 'PACKAGES' && (
-            <div className="p-3 sm:p-4 rounded-xl bg-[#14181F] border border-[#F5B738]/60 space-y-3.5 text-xs">
-              <div className="flex items-center justify-between gap-2 flex-wrap">
-                <div>
-                  <h3 className="text-sm font-extrabold text-[#F5B738] flex items-center gap-1.5">
-                    <Award className="w-4 h-4 shrink-0" />
-                    <span>Subscription Plans &amp; Activation</span>
-                  </h3>
-                  <p className="text-[11px] text-slate-400">
-                    Choose a plan and submit your payment TID for instant verification.
-                  </p>
-                </div>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <button
-                    type="button"
-                    disabled={isSyncingCloud}
-                    onClick={() => onSyncFromSupabase?.({ forceRates: true, silent: false })}
-                    className="boss-flat-btn px-2.5 py-1 rounded-lg bg-sky-500/20 border border-sky-500/60 text-sky-300 hover:bg-sky-500 hover:text-black font-bold text-[10px] flex items-center gap-1 cursor-pointer"
-                  >
-                    <RefreshCw className={`w-3 h-3 ${isSyncingCloud ? 'animate-spin' : ''}`} />
-                    <span>{isSyncingCloud ? 'Checking...' : 'Sync / Check Updates'}</span>
-                  </button>
-                  <span className="px-2 py-0.5 rounded bg-[#0C0F14] border border-slate-700 text-[10px] font-mono text-slate-300">
-                    ID: {clientDeviceId}
-                  </span>
-                </div>
-              </div>
-
-              {activeOffer &&
-                activeOffer.isActive !== false &&
-                activeOffer.isVisible !== false &&
-                activeOffer.showBanner !== false && (
-                  <div className="p-3 rounded-xl bg-amber-500/15 border border-amber-500/60 space-y-1">
-                    <div className="flex items-center gap-2">
-                      <span className="px-2 py-0.5 rounded bg-rose-600 text-white text-[10px] font-black uppercase">
-                        {activeOffer.badgeText || 'OFFER'}
-                      </span>
-                      <span className="font-extrabold text-white">{activeOffer.title}</span>
-                    </div>
-                    <p className="text-[11px] text-slate-300">{activeOffer.message}</p>
-                  </div>
-                )}
-
-              {/* Packages Grid */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                {packages.map((pkg, idx) => {
-                  const curPrice = pkg.priceRs ?? pkg.price ?? 0;
-                  const origPrice = pkg.originalPriceRs ?? curPrice;
-                  const discPct =
-                    pkg.discountPct && pkg.discountPct > 0
-                      ? pkg.discountPct
-                      : origPrice > curPrice
-                      ? Math.round(((origPrice - curPrice) / origPrice) * 100)
-                      : 0;
-                  const hasDiscount = discPct > 0 || origPrice > curPrice;
-                  return (
-                    <div
-                      key={pkg.id || idx}
-                      className={`p-3.5 rounded-xl bg-[#0C0F14] border ${
-                        hasDiscount ? 'border-amber-500/70' : 'border-slate-800'
-                      } flex flex-col justify-between space-y-2.5`}
-                    >
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between gap-1.5">
-                          <span className="font-black text-white text-sm">{pkg.name}</span>
-                          {(pkg.badge || pkg.badgeText) && (
-                            <span className="px-2 py-0.5 rounded bg-[#F5B738] text-black font-extrabold text-[10px]">
-                              {pkg.badge || pkg.badgeText}
-                            </span>
-                          )}
-                        </div>
-                        <div className="flex items-baseline gap-2 flex-wrap">
-                          <span className={`text-xl font-black ${hasDiscount ? 'text-emerald-400' : 'text-[#F5B738]'}`}>
-                            Rs. {curPrice.toLocaleString()}
-                          </span>
-                          {hasDiscount && (
-                            <>
-                              <span className="text-xs line-through text-slate-500">
-                                Rs. {origPrice.toLocaleString()}
-                              </span>
-                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-600 text-white font-black">
-                                {discPct}% OFF
-                              </span>
-                            </>
-                          )}
-                        </div>
-                        {pkg.discountOfferText && (
-                          <div className="text-[10.5px] text-amber-300 font-semibold italic">
-                            ⚡ {pkg.discountOfferText}
-                          </div>
-                        )}
-                        <div className="text-[10px] text-slate-400">
-                          Duration: {pkg.durationLabel || `${pkg.durationMonths} Month(s)`}
-                        </div>
-                        <ul className="space-y-1 pt-1 border-t border-slate-800/80 text-[11px] text-slate-300">
-                          {(pkg.features || []).map((f, fi) => (
-                            <li key={fi} className="flex items-start gap-1.5">
-                              <Check className="w-3 h-3 text-emerald-400 shrink-0 mt-0.5" />
-                              <span>{f}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setOrderSelectedPackage(pkg);
-                          setShowPackagesModal(true);
-                        }}
-                        className="boss-flat-btn w-full py-2 rounded-lg bg-[#F5B738] text-black font-extrabold text-[11px] cursor-pointer"
-                      >
-                        Select Plan (Rs. {curPrice.toLocaleString()})
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-
-              {/* Official Bank / Wallet Accounts */}
-              {bankAccounts.filter((a) => a.isActive !== false).length > 0 && (
-                <div className="space-y-2">
-                  <div className="text-[11px] font-bold text-[#F5B738] uppercase">
-                    Official Bank &amp; Wallet Accounts
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                    {bankAccounts
-                      .filter((a) => a.isActive !== false)
-                      .map((acc, aidx) => (
-                        <div
-                          key={acc.id || aidx}
-                          className="p-2.5 rounded-xl bg-[#0C0F14] border border-slate-800 space-y-1"
-                        >
-                          <div className="font-bold text-amber-400 text-xs truncate">
-                            {acc.bankName}
-                          </div>
-                          <div className="text-[10px] text-slate-300 truncate">
-                            Title: <strong className="text-white">{acc.accountTitle}</strong>
-                          </div>
-                          <div className="flex items-center justify-between gap-1 bg-[#14181F] px-2 py-1 rounded border border-slate-800 font-mono">
-                            <span className="text-emerald-400 font-bold text-[10px] truncate">
-                              {acc.accountNumber}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                navigator.clipboard.writeText(acc.accountNumber);
-                                setCopiedBankId(acc.id || String(aidx));
-                                showSettingsToast(`Copied ${acc.bankName} Account Number!`);
-                                setTimeout(() => setCopiedBankId(null), 2500);
-                              }}
-                              className="boss-flat-btn px-2 py-0.5 rounded bg-amber-500 text-black text-[10px] font-black shrink-0"
-                            >
-                              {copiedBankId === (acc.id || String(aidx)) ? 'Copied' : 'Copy'}
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                  </div>
-                </div>
-              )}
-
-              <button
-                type="button"
-                onClick={() => setShowPackagesModal(true)}
-                className="boss-flat-btn w-full py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-black font-black text-xs flex items-center justify-center gap-1.5 cursor-pointer"
-              >
-                <Zap className="w-4 h-4 shrink-0" />
-                <span>Submit Transaction ID (TID) for Auto-Verification</span>
-              </button>
-            </div>
-          )}
         </div>
       )}
         </>
@@ -8589,771 +7816,48 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
       )}
 
       {/* =================================================================== */}
-      {/* MODAL: CLIENT PACKAGES, ACTIVE OFFERS & BANK TRANSFER INSTRUCTIONS  */}
+      {/* CONSOLIDATED 5-TAB CLIENT PROFILE & ACCOUNT SETTINGS HUB MODAL      */}
       {/* =================================================================== */}
-      {showPackagesModal && (
-        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-2.5 sm:p-5 overflow-y-auto overflow-x-hidden">
-          <div className="bg-[#0C1017] border-2 border-amber-500/80 rounded-2xl max-w-4xl w-full p-3.5 sm:p-6 space-y-4 sm:space-y-5 shadow-2xl my-4 overflow-x-hidden">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <div className="flex items-center gap-2.5">
-                <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-amber-400 to-amber-600 text-black flex items-center justify-center font-black shrink-0">
-                  <Zap className="w-5 h-5 text-black" />
-                </div>
-                <div>
-                  <h3 className="text-sm sm:text-base font-black text-[#F5B738] tracking-wide">
-                    BOSS Mobile App Subscription Packages & Special Offers
-                  </h3>
-                  <div className="text-[11px] text-slate-400">
-                    Official verified plans & direct bank transfer activation
-                  </div>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowPackagesModal(false)}
-                className="text-slate-400 hover:text-white p-1 rounded-lg bg-slate-800/60"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="space-y-4 max-h-[75vh] overflow-y-auto pr-1">
-              {/* Active Offer Callout */}
-              {activeOffer &&
-                activeOffer.isActive !== false &&
-                activeOffer.isVisible !== false &&
-                activeOffer.showBanner !== false && (
-                  <div className="p-3.5 rounded-xl bg-gradient-to-r from-amber-500/20 via-rose-500/20 to-amber-500/20 border border-amber-500/60 flex items-center justify-between gap-3 flex-wrap">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-rose-600 text-white font-black uppercase">
-                          {activeOffer.badgeText || 'OFFER'}
-                        </span>
-                        <span className="text-xs font-black text-white">{activeOffer.title}</span>
-                        {activeOffer.discountPct && activeOffer.discountPct > 0 && (
-                          <span className="text-[11px] font-black text-amber-300 bg-amber-950/70 px-2 py-0.5 rounded border border-amber-500/40">
-                            {activeOffer.discountPct}% DISCOUNT ACTIVE
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-[11px] text-slate-300 mt-1">{activeOffer.message}</p>
-                    </div>
-                  </div>
-                )}
-
-              {/* Packages Cards Grid */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-amber-300 uppercase tracking-wider">
-                    Available Packages ({packages.length})
-                  </span>
-                  <span className="text-[11px] text-slate-400">
-                    Direct instant activation upon TID receipt verification
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
-                  {packages.map((pkg, idx) => {
-                    const hasDiscount =
-                      (pkg.discountPct && pkg.discountPct > 0) ||
-                      (pkg.originalPriceRs && pkg.originalPriceRs > (pkg.priceRs ?? pkg.price ?? 0));
-                    const origPrice = pkg.originalPriceRs ?? pkg.priceRs ?? pkg.price ?? 0;
-                    const curPrice = pkg.priceRs ?? pkg.price ?? origPrice;
-                    const discPct = pkg.discountPct ?? (origPrice > curPrice ? Math.round(((origPrice - curPrice) / origPrice) * 100) : 0);
-
-                    return (
-                      <div
-                        key={pkg.id || idx}
-                        className={`p-4 rounded-xl bg-[#141A24] border ${
-                          hasDiscount
-                            ? 'border-amber-500/80 shadow-lg shadow-amber-950/30'
-                            : 'border-slate-800'
-                        } flex flex-col justify-between space-y-3 relative`}
-                      >
-                        <div className="space-y-2">
-                          <div className="flex items-start justify-between gap-1.5">
-                            <div>
-                              <div className="font-black text-white text-sm">{pkg.name}</div>
-                              <span className="text-[10px] text-slate-400 font-mono uppercase">
-                                {pkg.planCode}
-                              </span>
-                            </div>
-                            {(pkg.badge || pkg.badgeText) && (
-                              <span className="text-[10px] px-2 py-0.5 rounded bg-amber-500 text-black font-extrabold shadow-sm">
-                                {pkg.badge || pkg.badgeText}
-                              </span>
-                            )}
-                          </div>
-
-                          <div className="pt-1">
-                            {hasDiscount ? (
-                              <div>
-                                <div className="flex items-baseline gap-2 flex-wrap">
-                                  <span className="text-2xl font-black text-emerald-400">
-                                    Rs. {curPrice.toLocaleString()}
-                                  </span>
-                                  <span className="text-xs line-through text-slate-400">
-                                    Rs. {origPrice.toLocaleString()}
-                                  </span>
-                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-600 text-white font-black animate-pulse">
-                                    {discPct}% OFF
-                                  </span>
-                                </div>
-                                {pkg.discountOfferText && (
-                                  <div className="text-[11px] text-amber-300 font-semibold italic mt-0.5">
-                                    ⚡ {pkg.discountOfferText}
-                                  </div>
-                                )}
-                              </div>
-                            ) : (
-                              <div className="text-2xl font-black text-amber-400">
-                                Rs. {curPrice.toLocaleString()}
-                              </div>
-                            )}
-                            <div className="text-slate-400 text-[11px] mt-0.5">
-                              Duration: {pkg.durationLabel || `${pkg.durationMonths} Month(s)`}
-                            </div>
-                          </div>
-
-                          <ul className="space-y-1.5 text-slate-300 border-t border-slate-800 pt-2">
-                            {(pkg.features || []).map((f, fi) => (
-                              <li key={fi} className="flex items-start gap-1.5 text-[11px] leading-tight">
-                                <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
-                                <span>{f}</span>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setOrderSelectedPackage(pkg);
-                            showSettingsToast(`Selected ${pkg.name}! Transfer payment and enter TID below.`);
-                            const elem = document.getElementById('client-tid-submission-box');
-                            if (elem) elem.scrollIntoView({ behavior: 'smooth' });
-                          }}
-                          className={`w-full py-2 rounded-lg font-bold text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-                            orderSelectedPackage?.id === pkg.id
-                              ? 'bg-amber-400 text-black shadow-md shadow-amber-500/30 ring-2 ring-amber-300'
-                              : 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-black shadow-md'
-                          }`}
-                        >
-                          <Zap className="w-3.5 h-3.5 text-black" />
-                          <span>{orderSelectedPackage?.id === pkg.id ? '✓ Plan Selected' : `Select Plan (Rs. ${curPrice.toLocaleString()})`}</span>
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Official Bank Accounts for Payment Transfer */}
-              <div className="p-4 rounded-xl bg-[#141A24] border border-slate-800 space-y-3">
-                <div className="flex items-center justify-between flex-wrap gap-2">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-bold text-[#F5B738] uppercase tracking-wide">
-                      Official Bank Accounts & Wallets ({bankAccounts.filter((a) => a.isActive !== false).length})
-                    </span>
-                  </div>
-                  <span className="text-[11px] text-slate-400">
-                    Paise transfer karne k baad raseed ki TID nechy darj karein
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  {bankAccounts.filter((a) => a.isActive !== false).map((acc, aidx) => (
-                    <div
-                      key={acc.id || aidx}
-                      className="p-3.5 rounded-xl bg-[#0C1017] border border-slate-700/80 space-y-2 text-xs"
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="font-bold text-amber-400 text-sm truncate">{acc.bankName}</span>
-                        <span className="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono uppercase">
-                          {acc.accountType || 'BANK'}
-                        </span>
-                      </div>
-
-                      <div className="space-y-1 text-slate-300 text-[11px]">
-                        <div>Title: <strong className="text-white">{acc.accountTitle}</strong></div>
-                        <div className="flex items-center justify-between gap-1.5 bg-[#141A24] p-1.5 rounded-lg border border-slate-800 font-mono">
-                          <span className="text-emerald-400 font-bold truncate text-[11px]">{acc.accountNumber}</span>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              navigator.clipboard.writeText(acc.accountNumber);
-                              setCopiedBankId(acc.id || String(aidx));
-                              showSettingsToast(`Copied ${acc.bankName} Account Number!`);
-                              setTimeout(() => setCopiedBankId(null), 2500);
-                            }}
-                            className="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-black text-[10px] font-black flex items-center gap-1 transition-colors shrink-0"
-                          >
-                            <Copy className="w-3 h-3" />
-                            <span>{copiedBankId === (acc.id || String(aidx)) ? 'Copied' : 'Copy'}</span>
-                          </button>
-                        </div>
-                        {acc.ibanOrRaast && (
-                          <div className="text-[10px] text-slate-400 font-mono truncate">
-                            IBAN: {acc.ibanOrRaast}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* STEP 1: SUBMIT TRANSACTION ID (TID) FOR AUTO-VERIFICATION */}
-              <div
-                id="client-tid-submission-box"
-                className="p-4 sm:p-5 rounded-2xl bg-gradient-to-b from-[#101726] to-[#0A0E18] border-2 border-amber-500/60 space-y-4 shadow-xl"
-              >
-                <div className="flex items-center justify-between flex-wrap gap-2 border-b border-slate-800 pb-3">
-                  <div className="flex items-center gap-2.5">
-                    <span className="p-2 rounded-xl bg-amber-500/20 text-amber-400 border border-amber-500/40">
-                      <ShieldCheck className="w-5 h-5" />
-                    </span>
-                    <div>
-                      <h4 className="text-sm font-black text-amber-400">
-                        ⚡ Step 1: Submit Bank Receipt Transaction ID (TID)
-                      </h4>
-                      <p className="text-[11px] text-slate-300">
-                        Paise bhejne ke baad raseed par likhi hui TID yahan enter karein. Google Robot foran check karke aapka account LIVE active kar dega!
-                      </p>
-                    </div>
-                  </div>
-
-                  {orderSelectedPackage && (
-                    <span className="text-[11px] px-3 py-1 rounded-full bg-amber-500/20 text-amber-300 font-bold border border-amber-500/40">
-                      Plan: {orderSelectedPackage.name} (Rs. {(orderSelectedPackage.priceRs || orderSelectedPackage.price || 0).toLocaleString()})
-                    </span>
-                  )}
-                </div>
-
-                {/* Real-time Order Status if Already Submitted */}
-                {activeClientOrder && (
-                  <div
-                    className={`p-4 rounded-xl border text-xs space-y-2 ${
-                      activeClientOrder.status === 'APPROVED_AUTO' || activeClientOrder.status === 'APPROVED_MANUAL' || isOrderAutoApproved
-                        ? 'bg-emerald-950/40 border-emerald-500 text-emerald-200'
-                        : activeClientOrder.status === 'REJECTED'
-                        ? 'bg-rose-950/40 border-rose-500 text-rose-200'
-                        : 'bg-amber-950/30 border-amber-500/50 text-amber-200'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between flex-wrap gap-2">
-                      <div className="flex items-center gap-2 font-bold text-sm">
-                        {activeClientOrder.status === 'APPROVED_AUTO' || activeClientOrder.status === 'APPROVED_MANUAL' || isOrderAutoApproved ? (
-                          <>
-                            <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-                            <span className="text-emerald-300">🎉 ACCOUNT ACTIVE & APPROVED!</span>
-                          </>
-                        ) : activeClientOrder.status === 'REJECTED' ? (
-                          <>
-                            <X className="w-5 h-5 text-rose-400" />
-                            <span className="text-rose-300">Order Rejected</span>
-                          </>
-                        ) : (
-                          <>
-                            <Clock className="w-5 h-5 text-amber-400 animate-spin" />
-                            <span className="text-amber-300">⏳ ORDER STATUS: PENDING (Waiting for Bank Email Robot Match)</span>
-                          </>
-                        )}
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={checkClientOrderStatus}
-                        disabled={isCheckingOrderStatus}
-                        className="px-2.5 py-1 rounded-lg bg-[#141A24] text-slate-200 hover:text-white border border-slate-700 flex items-center gap-1 text-[11px] cursor-pointer"
-                      >
-                        <RefreshCw className={`w-3 h-3 text-amber-400 ${isCheckingOrderStatus ? 'animate-spin' : ''}`} />
-                        <span>Refresh Status</span>
-                      </button>
-                    </div>
-
-                    <div className="text-[11px] leading-relaxed">
-                      {activeClientOrder.status === 'APPROVED_AUTO' || activeClientOrder.status === 'APPROVED_MANUAL' || isOrderAutoApproved ? (
-                        <span>Mubarak ho! Aap ki payment TID (<strong>{activeClientOrder.tid}</strong>) verify ho chuki hai. Aap ka <strong>{activeClientOrder.packageName}</strong> plan foran activate ho gaya hai!</span>
-                      ) : activeClientOrder.status === 'REJECTED' ? (
-                        <span>{activeClientOrder.rejectReason || 'Aap ki payment verify nahi ho saki. Baraye meharbani WhatsApp par rabta karein.'}</span>
-                      ) : (
-                        <span>
-                          Aap ki TID (<strong>{activeClientOrder.tid}</strong>) darj ho chuki hai. Bank ki email aatay hi Google Apps Script robot match karke bina kisi manual intezar ke screen ko khud <strong>ACTIVE</strong> kar dega!
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {/* Form to submit TID, Amount & Receipt Screenshot */}
-                <form onSubmit={handleSubmitClientOrder} className="space-y-3.5">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
-                    <div>
-                      <label className="block text-[11px] text-slate-400 mb-1 font-semibold">Select Subscription Package:</label>
-                      <select
-                        value={orderSelectedPackage?.id || (packages[0]?.id ?? '')}
-                        onChange={(e) => {
-                          const chosen = packages.find((p) => p.id === e.target.value);
-                          if (chosen) {
-                            setOrderSelectedPackage(chosen);
-                            setOrderAmountInput(String(chosen.priceRs ?? chosen.price ?? 3000));
-                          }
-                        }}
-                        className="w-full px-3 py-2 rounded-lg bg-[#0C1017] border border-slate-700 text-white text-xs focus:border-amber-400 outline-none"
-                      >
-                        {packages.map((p) => (
-                          <option key={p.id} value={p.id}>
-                            {p.name} — Rs. {(p.priceRs || p.price || 0).toLocaleString()}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="block text-[11px] text-slate-400 mb-1 font-semibold">Bank / Wallet Transferred To:</label>
-                      <select
-                        value={orderBankName}
-                        onChange={(e) => setOrderBankName(e.target.value)}
-                        className="w-full px-3 py-2 rounded-lg bg-[#0C1017] border border-slate-700 text-white text-xs focus:border-amber-400 outline-none"
-                      >
-                        {bankAccounts.filter((b) => b.isActive !== false).map((b) => (
-                          <option key={b.id} value={b.bankName}>
-                            {b.bankName} ({b.accountNumber})
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="block text-[11px] text-slate-400 mb-1 font-semibold">
-                        Amount Sent (Rs.): <span className="text-amber-400">*</span>
-                      </label>
-                      <input
-                        type="number"
-                        min={1}
-                        value={orderAmountInput}
-                        onChange={(e) => setOrderAmountInput(e.target.value)}
-                        placeholder="e.g. 3000"
-                        className="w-full px-3 py-2 rounded-lg bg-[#0C1017] border border-slate-700 text-emerald-300 font-mono font-bold text-xs focus:border-amber-400 outline-none"
-                        required
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-[11px] text-slate-400 mb-1 font-semibold">
-                        Bank Receipt Transaction ID (TID): <span className="text-amber-400">*</span>
-                      </label>
-                      <input
-                        type="text"
-                        value={orderTidInput}
-                        onChange={(e) => setOrderTidInput(e.target.value)}
-                        placeholder="e.g. 42819038291 / FT26111244"
-                        className="w-full px-3 py-2 rounded-lg bg-[#0C1017] border-2 border-amber-500/80 text-amber-300 font-mono font-bold text-xs focus:border-amber-400 outline-none uppercase"
-                        required
-                      />
-                    </div>
-                  </div>
-
-                  {/* Transaction Receipt Screenshot Upload */}
-                  <label className="cursor-pointer rounded-xl bg-[#0C1017] border border-dashed border-slate-700 hover:border-[#F5B738] p-2.5 flex items-center justify-between gap-2 text-xs">
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={handleOrderReceiptUpload}
-                      className="hidden"
-                    />
-                    {orderReceiptUrl ? (
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <img
-                          src={orderReceiptUrl}
-                          alt="Payment Receipt"
-                          className="w-10 h-10 object-cover rounded-lg border border-emerald-500/60 shrink-0"
-                        />
-                        <span className="text-[11px] font-bold text-emerald-400 truncate">
-                          ✓ Transaction Screenshot Ready (Tap to change)
-                        </span>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-2 text-slate-300">
-                        {isUploadingOrderReceipt ? (
-                          <RefreshCw className="w-4 h-4 text-[#F5B738] animate-spin shrink-0" />
-                        ) : (
-                          <Camera className="w-4 h-4 text-[#F5B738] shrink-0" />
-                        )}
-                        <span className="text-[11px] font-semibold">
-                          {isUploadingOrderReceipt
-                            ? 'Uploading Payment Screenshot...'
-                            : 'Upload Payment Screenshot / Receipt (Saved to Admin Cloud)'}
-                        </span>
-                      </div>
-                    )}
-                    <Upload className="w-4 h-4 text-slate-400 shrink-0" />
-                  </label>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                    <div>
-                      <label className="block text-[11px] text-slate-400 mb-1 font-semibold">Your Name:</label>
-                      <input
-                        type="text"
-                        value={orderClientName}
-                        onChange={(e) => setOrderClientName(e.target.value)}
-                        placeholder="Client / Shop Name"
-                        className="w-full px-3 py-2 rounded-lg bg-[#0C1017] border border-slate-700 text-white text-xs focus:border-amber-400 outline-none"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] text-slate-400 mb-1 font-semibold">Your WhatsApp / Phone Number:</label>
-                      <input
-                        type="text"
-                        value={orderClientPhone}
-                        onChange={(e) => setOrderClientPhone(e.target.value)}
-                        placeholder="0300-1234567"
-                        className="w-full px-3 py-2 rounded-lg bg-[#0C1017] border border-slate-700 text-white text-xs focus:border-amber-400 outline-none font-mono"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-between flex-wrap gap-2 pt-2">
-                    <span className="text-[11px] text-slate-400">
-                      TID &amp; Screenshot seedha Supabase par Admin Panel ko send hon ge
-                    </span>
-
-                    <button
-                      type="submit"
-                      disabled={isSubmittingOrder || isUploadingOrderReceipt || !orderTidInput.trim()}
-                      className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 text-black font-black text-xs flex items-center gap-2 shadow-lg shadow-amber-500/30 transition-all cursor-pointer disabled:opacity-50"
-                    >
-                      <Send className={`w-4 h-4 ${isSubmittingOrder ? 'animate-bounce' : ''}`} />
-                      <span>{isSubmittingOrder ? 'Submitting Order...' : '⚡ Submit Payment TID & Receipt'}</span>
-                    </button>
-                  </div>
-                </form>
-              </div>
-
-              {/* WhatsApp Support Callout */}
-              <div className="p-3.5 rounded-xl bg-emerald-950/40 border border-emerald-500/40 flex items-center justify-between gap-3 flex-wrap">
-                <div className="flex items-center gap-2.5">
-                  <Phone className="w-4 h-4 text-emerald-400 shrink-0" />
-                  <div className="text-xs text-emerald-200">
-                    Agar aap WhatsApp par raseed bhejna chahein: <strong>0310-5524225</strong> par bhej dein, tab b foran account activate ho jaye ga!
-                  </div>
-                </div>
-                <a
-                  href="https://wa.me/923105524225?text=Assalam-o-Alaikum%20Syed%20Saboor%20Nawab%20Sahib,%20I%20have%20sent%20payment%20for%20BOSS%20Aluminium%20App%20subscription.%20Kindly%20find%20attached%20receipt."
-                  target="_blank"
-                  rel="noreferrer"
-                  className="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black font-black text-xs flex items-center gap-1.5 shadow-md shadow-emerald-950/60"
-                >
-                  <Phone className="w-3.5 h-3.5" />
-                  <span>Send Receipt on WhatsApp</span>
-                </a>
-              </div>
-            </div>
-
-
-            <div className="flex justify-end border-t border-slate-800 pt-3">
-              <button
-                type="button"
-                onClick={() => setShowPackagesModal(false)}
-                className="px-4 py-2 rounded-xl bg-slate-800 text-slate-200 hover:bg-slate-700 text-xs font-bold"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* =================================================================== */}
-      {/* MODAL: CLIENT SUPPORT TEAM REQUEST BOX                              */}
-      {/* =================================================================== */}
-      {showSupportModal && (
-        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-2.5 sm:p-5 overflow-y-auto overflow-x-hidden">
-          <div className="bg-[#0C1017] border-2 border-sky-500/80 rounded-2xl max-w-2xl w-full p-3.5 sm:p-5 space-y-3.5 shadow-2xl my-4">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
-              <div className="flex items-center gap-2 min-w-0">
-                <div className="w-8 h-8 rounded-xl bg-sky-500 text-black flex items-center justify-center shrink-0">
-                  <MessageSquarePlus className="w-4 h-4" />
-                </div>
-                <div className="min-w-0">
-                  <h3 className="text-sm font-black text-sky-400 truncate">
-                    Support Team Request Box
-                  </h3>
-                  <p className="text-[10px] text-slate-400 truncate">
-                    Device: {clientDeviceId} · Cloud Access: {cloudAccessInfo?.status || 'TRIAL'}
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowSupportModal(false)}
-                className="boss-flat-btn text-slate-400 hover:text-white p-1 rounded-lg bg-slate-800/60 cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <form
-              onSubmit={async (e) => {
-                e.preventDefault();
-                if (!reqMessage.trim() || !onSubmitSupportRequest) return;
-                setSupportSubmitError(null);
-                setSupportSubmitSuccess(null);
-                const result = await onSubmitSupportRequest({
-                  userName: reqUserName.trim() || customerName || 'Client',
-                  userPhone: reqUserPhone.trim() || customerPhone || '',
-                  userEmail: reqUserEmail.trim(),
-                  requestType: reqType,
-                  message: reqMessage.trim(),
-                });
-                const isOk = typeof result === 'boolean' ? result : Boolean(result?.ok);
-                if (isOk) {
-                  setReqMessage('');
-                  setSupportSubmitSuccess('Message Support Team ko send aur Supabase mein save ho gaya hai!');
-                } else {
-                  const errMsg =
-                    typeof result === 'object' && result?.error
-                      ? result.error
-                      : 'Request sending error: Message send nahi ho saka.';
-                  setSupportSubmitError(errMsg);
-                }
-              }}
-              className="space-y-2.5 text-xs"
-            >
-              {supportSubmitError && (
-                <div
-                  role="alert"
-                  className="p-2.5 rounded-xl bg-rose-950/80 border border-rose-500 text-rose-200 text-[11px] flex items-start gap-2"
-                >
-                  <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-                  <div className="min-w-0 break-words">
-                    <div className="font-black text-rose-300">Request Sending Error</div>
-                    <div>{supportSubmitError}</div>
-                  </div>
-                </div>
-              )}
-              {supportSubmitSuccess && (
-                <div className="p-2.5 rounded-xl bg-emerald-950/70 border border-emerald-500/80 text-emerald-200 text-[11px] flex items-center gap-2">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                  <span>{supportSubmitSuccess}</span>
-                </div>
-              )}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-[10px] text-slate-400 mb-0.5 font-semibold">
-                    Request Category
-                  </label>
-                  <select
-                    value={reqType}
-                    onChange={(e) => setReqType(e.target.value)}
-                    className="w-full px-2.5 py-1.5 rounded-lg bg-[#14181F] border border-slate-700 text-white text-xs focus:border-sky-400 outline-none"
-                  >
-                    <option value="Rate List / Section Request">Rate List / Section Request</option>
-                    <option value="Account Activation / TID Help">Account Activation / TID Help</option>
-                    <option value="Formula / Cutting Chart Help">Formula / Cutting Chart Help</option>
-                    <option value="Custom Section / Formula Help">Custom Section / Formula Help</option>
-                    <option value="Technical Support / Bug">Technical Support / Bug</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-[10px] text-slate-400 mb-0.5 font-semibold">
-                    Your Name / Shop Name
-                  </label>
-                  <input
-                    type="text"
-                    value={reqUserName}
-                    onChange={(e) => setReqUserName(e.target.value)}
-                    placeholder="e.g. Tariq Aluminium Works"
-                    className="w-full px-2.5 py-1.5 rounded-lg bg-[#14181F] border border-slate-700 text-white text-xs focus:border-sky-400 outline-none"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-[10px] text-slate-400 mb-0.5 font-semibold">
-                    WhatsApp / Mobile Number
-                  </label>
-                  <input
-                    type="text"
-                    value={reqUserPhone}
-                    onChange={(e) => setReqUserPhone(e.target.value)}
-                    placeholder="0300-1234567"
-                    className="w-full px-2.5 py-1.5 rounded-lg bg-[#14181F] border border-slate-700 text-white font-mono text-xs focus:border-sky-400 outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[10px] text-slate-400 mb-0.5 font-semibold">
-                    Email (Optional)
-                  </label>
-                  <input
-                    type="email"
-                    value={reqUserEmail}
-                    onChange={(e) => setReqUserEmail(e.target.value)}
-                    placeholder="client@email.com"
-                    className="w-full px-2.5 py-1.5 rounded-lg bg-[#14181F] border border-slate-700 text-white text-xs focus:border-sky-400 outline-none"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[10px] text-slate-400 mb-0.5 font-semibold">
-                  Message / Request Details <span className="text-sky-400">*</span>
-                </label>
-                <textarea
-                  rows={3}
-                  required
-                  value={reqMessage}
-                  onChange={(e) => setReqMessage(e.target.value)}
-                  placeholder="Apni request ya masla yahan likhein (maslan naya section code, rate help, ya account issue)..."
-                  className="w-full p-2.5 rounded-lg bg-[#14181F] border border-slate-700 text-white text-xs focus:border-sky-400 outline-none"
-                />
-              </div>
-
-              <div className="flex items-center justify-between gap-2 flex-wrap pt-1">
-                <a
-                  href={`https://wa.me/923105524225?text=${encodeURIComponent(
-                    `Assalam-o-Alaikum Support Team, Device: ${clientDeviceId}\nType: ${reqType}\nName: ${reqUserName || customerName}\nMessage: ${reqMessage}`
-                  )}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="px-2.5 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 text-[11px] font-bold flex items-center gap-1"
-                >
-                  <Phone className="w-3 h-3" />
-                  <span>WhatsApp Support</span>
-                </a>
-
-                <button
-                  type="submit"
-                  disabled={isSubmittingSupportRequest || !reqMessage.trim()}
-                  className="boss-flat-btn px-4 py-1.5 rounded-lg bg-sky-500 hover:bg-sky-400 text-black font-black text-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                >
-                  <Send className="w-3.5 h-3.5" />
-                  <span>{isSubmittingSupportRequest ? 'Sending...' : 'Send Request'}</span>
-                </button>
-              </div>
-            </form>
-
-            {/* Submitted Requests & Admin Messages / Replies */}
-            <div className="border-t border-slate-800 pt-2.5 space-y-2">
-              <div className="flex items-center justify-between gap-2 flex-wrap text-[11px] font-bold text-slate-300">
-                <span>Messages &amp; Admin Replies ({supportRequests.length})</span>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    disabled={isRefreshingSupport}
-                    onClick={() => {
-                      onMarkSupportMessagesRead?.();
-                      if (onRefreshSupportRequests) {
-                        setIsRefreshingSupport(true);
-                        Promise.resolve(onRefreshSupportRequests()).finally(() =>
-                          setIsRefreshingSupport(false)
-                        );
-                      }
-                    }}
-                    className="boss-flat-btn px-2 py-1 rounded bg-sky-500/15 border border-sky-500/50 text-sky-300 hover:bg-sky-500 hover:text-black text-[10px] font-bold flex items-center gap-1 cursor-pointer disabled:opacity-50"
-                  >
-                    <RefreshCw className={`w-3 h-3 ${isRefreshingSupport ? 'animate-spin' : ''}`} />
-                    <span>{isRefreshingSupport ? 'Refreshing...' : 'Refresh'}</span>
-                  </button>
-                  {supportRequests.length > 0 && onClearAllSupportRequests && (
-                    <button
-                      type="button"
-                      onClick={() => onClearAllSupportRequests()}
-                      className="boss-flat-btn px-2 py-1 rounded bg-rose-950/70 border border-rose-500/60 text-rose-300 hover:bg-rose-600 hover:text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                      <span>Clear All</span>
-                    </button>
-                  )}
-                </div>
-              </div>
-              {supportRequests.length === 0 ? (
-                <div className="py-3 text-center text-[11px] text-slate-500">
-                  No messages or admin replies yet.
-                </div>
-              ) : (
-                <div className="max-h-52 overflow-y-auto space-y-2 pr-0.5">
-                  {supportRequests.map((req) => {
-                    const isAdminMsg = req.sender === 'ADMIN';
-                    return (
-                      <div
-                        key={req.id}
-                        className={`p-2.5 rounded-xl border text-[11px] space-y-1.5 ${
-                          isAdminMsg
-                            ? 'bg-emerald-950/25 border-emerald-500/60'
-                            : 'bg-[#14181F] border-slate-800'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-1.5 min-w-0">
-                            {isAdminMsg && (
-                              <span className="px-1.5 py-0.5 rounded bg-emerald-500 text-black text-[9px] font-black uppercase shrink-0">
-                                {req.isBroadcast ? 'ADMIN BROADCAST' : 'ADMIN MESSAGE'}
-                              </span>
-                            )}
-                            <span className="font-bold text-sky-300 truncate">{req.requestType}</span>
-                          </div>
-                          <div className="flex items-center gap-1.5 shrink-0">
-                            {!isAdminMsg && (
-                              <span
-                                className={`px-1.5 py-0.5 rounded text-[9.5px] font-bold ${
-                                  req.adminReply || req.isResolved
-                                    ? 'bg-emerald-500/20 border border-emerald-500/50 text-emerald-300'
-                                    : 'bg-amber-500/20 text-amber-300'
-                                }`}
-                              >
-                                {req.adminReply || req.isResolved ? 'Resolved / Replied' : 'Pending'}
-                              </span>
-                            )}
-                            {onDeleteSupportRequest && (
-                              <button
-                                type="button"
-                                onClick={() => onDeleteSupportRequest(req.id)}
-                                className="boss-flat-btn p-1 rounded bg-rose-950/70 border border-rose-500/40 text-rose-300 hover:bg-rose-600 hover:text-white cursor-pointer"
-                                title="Clear this message"
-                                aria-label="Clear message"
-                              >
-                                <Trash2 className="w-3 h-3" />
-                              </button>
-                            )}
-                          </div>
-                        </div>
-
-                        <div className="text-slate-100 leading-snug whitespace-pre-wrap break-words">
-                          {req.message}
-                        </div>
-
-                        {req.adminReply && (
-                          <div className="p-2 rounded-lg bg-emerald-950/50 border border-emerald-500/50 space-y-0.5">
-                            <div className="flex items-center justify-between gap-2 text-[9.5px] font-black text-emerald-300">
-                              <span>ADMIN REPLY</span>
-                              {req.repliedAt && (
-                                <span className="font-mono text-emerald-200/70">
-                                  {new Date(req.repliedAt).toLocaleString('en-GB')}
-                                </span>
-                              )}
-                            </div>
-                            <div className="text-[11px] text-emerald-100 leading-snug whitespace-pre-wrap break-words">
-                              {req.adminReply}
-                            </div>
-                          </div>
-                        )}
-
-                        <div className="text-[9.5px] text-slate-500 font-mono">
-                          {new Date(req.createdAt).toLocaleString('en-GB')}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
+      {profileHubTab && (
+        <ClientProfileHubModal
+          initialTab={profileHubTab}
+          onClose={() => {
+            setProfileHubTab(null);
+            setProfilePreselectedPkg(null);
+          }}
+          authSession={authSession}
+          clientDeviceId={clientDeviceId}
+          cloudAccessInfo={cloudAccessInfo}
+          isSyncingCloud={isSyncingCloud}
+          onSyncFromSupabase={onSyncFromSupabase}
+          packages={packages}
+          bankAccounts={bankAccounts}
+          activeOffer={activeOffer}
+          preselectedPackage={profilePreselectedPkg}
+          companyName={companyName}
+          companyTagline={companyTagline}
+          companyAddress={companyAddress}
+          companyPhone={companyPhone}
+          companyNtn={companyNtn}
+          onUpdateCompanyInfo={onUpdateCompanyInfo}
+          layoutConfig={layoutConfig}
+          onUpdateLayoutConfig={onUpdateLayoutConfig}
+          mainLogoUrl={mainLogoUrl}
+          letterheadBgUrl={letterheadBgUrl}
+          onUpdateLetterheadBgUrl={onUpdateLetterheadBgUrl}
+          onRestoreDefaultBrandingAssets={onRestoreDefaultBrandingAssets}
+          onSyncUserProfileToCloud={onSyncUserProfileToCloud}
+          supportRequests={supportRequests}
+          isSubmittingSupportRequest={isSubmittingSupportRequest}
+          onSubmitSupportRequest={onSubmitSupportRequest}
+          onRefreshSupportRequests={onRefreshSupportRequests}
+          onDeleteSupportRequest={onDeleteSupportRequest}
+          onClearAllSupportRequests={onClearAllSupportRequests}
+          unreadAdminSupportCount={unreadAdminSupportCount}
+          onMarkSupportMessagesRead={onMarkSupportMessagesRead}
+          onLogout={onLogout}
+          onAccountDeletedLogout={onAccountDeletedLogout}
+        />
       )}
 
       {/* =================================================================== */}

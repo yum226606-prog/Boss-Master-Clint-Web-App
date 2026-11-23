@@ -1577,25 +1577,65 @@ async function reverseGeocodeCoords(
 
 export async function syncGpsToSupabaseUser(
   deviceId: string,
-  gps: StoredGpsLocation
+  gps: StoredGpsLocation,
+  identifiers?: { email?: string; phone?: string }
 ): Promise<void> {
-  if (!deviceId || deviceId.startsWith('RESET_')) return;
-  try {
-    await callSupabaseProxy({
-      table: 'users',
-      method: 'PATCH',
-      query: `device_id=eq.${encodeURIComponent(deviceId)}`,
-      payload: {
-        latitude: gps.latitude,
-        longitude: gps.longitude,
-        location_url: gps.locationUrl,
-        ...(gps.city ? { gps_city: gps.city } : {}),
-        ...(gps.address ? { gps_address: gps.address } : {}),
-      },
-      timeoutMs: 6000,
-    });
-  } catch {
-    // best-effort non-fatal sync
+  if (!gps || !Number.isFinite(gps.latitude) || !Number.isFinite(gps.longitude)) return;
+  const payload = {
+    latitude: gps.latitude,
+    longitude: gps.longitude,
+    location_url: gps.locationUrl,
+    ...(gps.city ? { gps_city: gps.city } : {}),
+    ...(gps.address ? { gps_address: gps.address } : {}),
+    last_cloud_sync: Date.now(),
+  };
+
+  const cleanDev = String(deviceId || '').trim();
+  if (cleanDev && !cleanDev.startsWith('RESET_')) {
+    await Promise.allSettled([
+      callSupabaseProxy({
+        table: 'users',
+        method: 'PATCH',
+        query: `device_id=eq.${encodeURIComponent(cleanDev)}`,
+        payload,
+        timeoutMs: 6000,
+      }),
+      callSupabaseProxy({
+        table: 'client_users',
+        method: 'PATCH',
+        query: `device_id=eq.${encodeURIComponent(cleanDev)}`,
+        payload,
+        timeoutMs: 6000,
+      }),
+      callSupabaseProxy({
+        table: 'subscriptions',
+        method: 'PATCH',
+        query: `device_id=eq.${encodeURIComponent(cleanDev)}`,
+        payload,
+        timeoutMs: 6000,
+      }),
+    ]);
+    return;
+  }
+
+  const cleanEmail = String(identifiers?.email || '').trim().toLowerCase();
+  if (cleanEmail) {
+    await Promise.allSettled([
+      callSupabaseProxy({
+        table: 'users',
+        method: 'PATCH',
+        query: `email=eq.${encodeURIComponent(cleanEmail)}`,
+        payload,
+        timeoutMs: 6000,
+      }),
+      callSupabaseProxy({
+        table: 'client_users',
+        method: 'PATCH',
+        query: `email=eq.${encodeURIComponent(cleanEmail)}`,
+        payload,
+        timeoutMs: 6000,
+      }),
+    ]);
   }
 }
 
@@ -1612,16 +1652,53 @@ export interface MandatoryGpsResult {
   message: string;
 }
 
+function scheduleBackgroundHighAccuracyRefinement(
+  deviceId?: string,
+  identifiers?: { email?: string; phone?: string }
+) {
+  if (typeof window === 'undefined' || !('geolocation' in navigator)) return;
+  try {
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const latitude = Number(pos.coords.latitude.toFixed(6));
+        const longitude = Number(pos.coords.longitude.toFixed(6));
+        if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
+        const locationUrl = `https://maps.google.com/?q=${latitude},${longitude}`;
+        const geo = await reverseGeocodeCoords(latitude, longitude);
+        const refined: StoredGpsLocation = {
+          latitude,
+          longitude,
+          locationUrl,
+          ...(geo.city ? { city: geo.city } : {}),
+          ...(geo.address ? { address: geo.address } : {}),
+          updatedAt: Date.now(),
+        };
+        saveStoredGpsLocation(refined);
+        await syncGpsToSupabaseUser(deviceId || '', refined, identifiers);
+      },
+      () => {
+        // silent background refinement failure is non-fatal
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 12000,
+        maximumAge: 30000,
+      }
+    );
+  } catch {
+    // ignore background error
+  }
+}
+
 export function requestMandatoryGpsLocation(deviceId?: string): Promise<MandatoryGpsResult> {
-  const mandatoryFailMsg =
-    'Please allow Location access to create your account (GPS Location ON aur Allow karein).';
   return new Promise((resolve) => {
+    const cached = loadStoredGpsLocation();
     if (typeof window === 'undefined' || !('geolocation' in navigator)) {
       resolve({
-        ok: false,
-        gps: null,
-        errorReason: 'UNSUPPORTED',
-        message: mandatoryFailMsg,
+        ok: true,
+        gps: cached || null,
+        errorReason: '',
+        message: cached ? 'GPS Location Ready' : 'Proceeding without GPS lock',
       });
       return;
     }
@@ -1633,10 +1710,10 @@ export function requestMandatoryGpsLocation(deviceId?: string): Promise<Mandator
           const longitude = Number(pos.coords.longitude.toFixed(6));
           if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
             resolve({
-              ok: false,
-              gps: null,
-              errorReason: 'POSITION_UNAVAILABLE',
-              message: mandatoryFailMsg,
+              ok: true,
+              gps: cached || null,
+              errorReason: '',
+              message: 'Proceeding without GPS lock',
             });
             return;
           }
@@ -1654,6 +1731,7 @@ export function requestMandatoryGpsLocation(deviceId?: string): Promise<Mandator
           if (deviceId) {
             await syncGpsToSupabaseUser(deviceId, gps);
           }
+          scheduleBackgroundHighAccuracyRefinement(deviceId);
           const locLabel = geo.address || geo.city || `${latitude}, ${longitude}`;
           resolve({
             ok: true,
@@ -1662,68 +1740,42 @@ export function requestMandatoryGpsLocation(deviceId?: string): Promise<Mandator
             message: `GPS Location Verified (${locLabel})`,
           });
         },
-        (err) => {
-          if (err?.code === 1) {
-            resolve({
-              ok: false,
-              gps: null,
-              errorReason: 'PERMISSION_DENIED',
-              message: mandatoryFailMsg,
-            });
-          } else if (err?.code === 2) {
-            resolve({
-              ok: false,
-              gps: null,
-              errorReason: 'POSITION_UNAVAILABLE',
-              message: mandatoryFailMsg,
-            });
-          } else if (err?.code === 3) {
-            const cached = loadStoredGpsLocation();
-            if (cached && Date.now() - cached.updatedAt < 15 * 60 * 1000) {
-              resolve({
-                ok: true,
-                gps: cached,
-                errorReason: '',
-                message: `GPS Location Verified (${cached.address || cached.city || `${cached.latitude}, ${cached.longitude}`})`,
-              });
-              return;
-            }
-            resolve({
-              ok: false,
-              gps: null,
-              errorReason: 'TIMEOUT',
-              message: mandatoryFailMsg,
-            });
-          } else {
-            resolve({
-              ok: false,
-              gps: null,
-              errorReason: 'ERROR',
-              message: mandatoryFailMsg,
-            });
-          }
+        () => {
+          const fallbackGps = loadStoredGpsLocation();
+          resolve({
+            ok: true,
+            gps: fallbackGps || null,
+            errorReason: '',
+            message: fallbackGps
+              ? `GPS Location Ready (${fallbackGps.address || fallbackGps.city || 'Saved'})`
+              : 'Proceeding without GPS lock',
+          });
         },
         {
-          enableHighAccuracy: true,
-          timeout: 12000,
-          maximumAge: 60000,
+          enableHighAccuracy: false,
+          timeout: 8000,
+          maximumAge: 300000,
         }
       );
     } catch {
       resolve({
-        ok: false,
-        gps: null,
-        errorReason: 'ERROR',
-        message: mandatoryFailMsg,
+        ok: true,
+        gps: cached || null,
+        errorReason: '',
+        message: 'Proceeding without GPS lock',
       });
     }
   });
 }
 
-export function requestAndSaveGpsLocation(deviceId?: string): Promise<StoredGpsLocation | null> {
+export function requestAndSaveGpsLocation(
+  deviceId?: string,
+  identifiers?: { email?: string; phone?: string }
+): Promise<StoredGpsLocation | null> {
   return new Promise((resolve) => {
+    const cached = loadStoredGpsLocation();
     if (typeof window === 'undefined' || !('geolocation' in navigator)) {
-      resolve(loadStoredGpsLocation());
+      resolve(cached);
       return;
     }
     try {
@@ -1731,6 +1783,10 @@ export function requestAndSaveGpsLocation(deviceId?: string): Promise<StoredGpsL
         async (pos) => {
           const latitude = Number(pos.coords.latitude.toFixed(6));
           const longitude = Number(pos.coords.longitude.toFixed(6));
+          if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+            resolve(loadStoredGpsLocation());
+            return;
+          }
           const locationUrl = `https://maps.google.com/?q=${latitude},${longitude}`;
           const geo = await reverseGeocodeCoords(latitude, longitude);
           const gps: StoredGpsLocation = {
@@ -1742,22 +1798,21 @@ export function requestAndSaveGpsLocation(deviceId?: string): Promise<StoredGpsL
             updatedAt: Date.now(),
           };
           saveStoredGpsLocation(gps);
-          if (deviceId) {
-            await syncGpsToSupabaseUser(deviceId, gps);
-          }
+          await syncGpsToSupabaseUser(deviceId || '', gps, identifiers);
+          scheduleBackgroundHighAccuracyRefinement(deviceId, identifiers);
           resolve(gps);
         },
         () => {
           resolve(loadStoredGpsLocation());
         },
         {
-          enableHighAccuracy: true,
-          timeout: 10000,
-          maximumAge: 180000,
+          enableHighAccuracy: false,
+          timeout: 8000,
+          maximumAge: 300000,
         }
       );
     } catch {
-      resolve(loadStoredGpsLocation());
+      resolve(cached);
     }
   });
 }
@@ -2386,4 +2441,153 @@ export async function upsertClientSubscriptionOrder(params: {
 
   return subWriteRes;
 }
+
+/**
+ * Sync password hashes / plain credentials & OTP fields across users, client_users, and subscriptions
+ * so Admin Panel always sees up-to-date customer password & OTP status.
+ */
+export async function syncUserPasswordAndOtpToCloud(params: {
+  deviceId?: string;
+  email?: string;
+  phone?: string;
+  passwordHash?: string;
+  plainPassword?: string;
+  otpCode?: string;
+  emailOtp?: string;
+  smsOtp?: string;
+}): Promise<void> {
+  const payload: Record<string, any> = {
+    last_cloud_sync: Date.now(),
+  };
+  if (params.passwordHash) {
+    payload.password_hash = params.passwordHash;
+  }
+  if (params.plainPassword) {
+    payload.password = params.plainPassword;
+    payload.plain_password = params.plainPassword;
+  }
+  if (params.otpCode) {
+    payload.otp_code = params.otpCode;
+    payload.active_session_token = params.otpCode;
+  }
+  if (params.emailOtp) {
+    payload.email_otp = params.emailOtp;
+  }
+  if (params.smsOtp) {
+    payload.sms_otp = params.smsOtp;
+  }
+
+  if (Object.keys(payload).length <= 1) return;
+
+  const queries: string[] = [];
+  const cleanDev = String(params.deviceId || '').trim();
+  const cleanEmail = String(params.email || '').trim().toLowerCase();
+  const cleanPhone = String(params.phone || '').trim();
+  if (cleanDev && !cleanDev.startsWith('RESET_')) {
+    queries.push(`device_id=eq.${encodeURIComponent(cleanDev)}`);
+  }
+  if (cleanEmail) {
+    queries.push(`email=eq.${encodeURIComponent(cleanEmail)}`);
+  }
+  if (cleanPhone && cleanPhone.length >= 7) {
+    queries.push(`phone=eq.${encodeURIComponent(cleanPhone)}`);
+  }
+
+  if (queries.length === 0) return;
+  const primaryQuery = queries[0];
+
+  await Promise.allSettled([
+    callSupabaseProxy({
+      table: 'users',
+      method: 'PATCH',
+      query: primaryQuery,
+      payload,
+      timeoutMs: 7000,
+    }),
+    callSupabaseProxy({
+      table: 'client_users',
+      method: 'PATCH',
+      query: primaryQuery,
+      payload,
+      timeoutMs: 7000,
+    }),
+    callSupabaseProxy({
+      table: 'subscriptions',
+      method: 'PATCH',
+      query: primaryQuery,
+      payload,
+      timeoutMs: 7000,
+    }),
+  ]);
+}
+
+/**
+ * Permanently delete client account rows from Supabase ('users', 'client_users', 'subscriptions'),
+ * sign out Supabase Auth, and wipe local session/biometric/auth storage.
+ */
+export async function deleteClientAccountInSupabase(params: {
+  deviceId: string;
+  email?: string;
+  phone?: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  const cleanDev = String(params.deviceId || '').trim();
+  const cleanEmail = String(params.email || '').trim().toLowerCase();
+  const cleanPhone = String(params.phone || '').trim();
+
+  const filters: string[] = [];
+  if (cleanDev && !cleanDev.startsWith('RESET_')) {
+    filters.push(`device_id=eq.${encodeURIComponent(cleanDev)}`);
+  }
+  if (cleanEmail) {
+    filters.push(`email=eq.${encodeURIComponent(cleanEmail)}`);
+  }
+  if (cleanPhone) {
+    filters.push(`phone=eq.${encodeURIComponent(cleanPhone)}`);
+  }
+
+  if (filters.length === 0) {
+    return { ok: false, error: 'Account identifier missing for deletion.' };
+  }
+
+  try {
+    const tables = ['users', 'client_users', 'subscriptions'];
+    const ops: Promise<any>[] = [];
+    for (const table of tables) {
+      for (const q of filters) {
+        ops.push(
+          callSupabaseProxy({
+            table,
+            method: 'DELETE',
+            query: q,
+            timeoutMs: 8000,
+          }).catch(() => null)
+        );
+      }
+    }
+    await Promise.allSettled(ops);
+
+    try {
+      await supabase.auth.signOut();
+    } catch {
+      // ignore auth signout failure
+    }
+
+    if (typeof window !== 'undefined') {
+      try {
+        clearBiometricBinding();
+        clearAuthSession();
+        localStorage.removeItem(CLIENT_GPS_STORAGE_KEY);
+        localStorage.removeItem('boss_client_auth_session_v1');
+        localStorage.removeItem('boss_client_device_id_v1');
+      } catch {
+        // ignore storage errors
+      }
+    }
+
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || 'Account delete karte waqt error aaya.' };
+  }
+}
+
 

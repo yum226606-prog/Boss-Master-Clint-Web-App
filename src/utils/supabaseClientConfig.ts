@@ -259,6 +259,27 @@ export async function fetchSupabaseServerTimeMs(): Promise<number> {
 }
 
 const TRANSIENT_SUPABASE_STATUSES = new Set([521, 522, 525, 502, 503, 504]);
+const KNOWN_MISSING_COLUMNS: Record<string, Set<string>> = {};
+
+function stripKnownMissingColumns(table: string, payload: Record<string, any> | undefined) {
+  if (!payload || typeof payload !== 'object') return payload;
+  const known = KNOWN_MISSING_COLUMNS[table];
+  if (!known || known.size === 0) return payload;
+  for (const col of known) {
+    if (col in payload) {
+      delete payload[col];
+    }
+  }
+  return payload;
+}
+
+function recordKnownMissingColumn(table: string, col: string) {
+  if (!table || !col) return;
+  if (!KNOWN_MISSING_COLUMNS[table]) {
+    KNOWN_MISSING_COLUMNS[table] = new Set<string>();
+  }
+  KNOWN_MISSING_COLUMNS[table].add(col);
+}
 
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -316,7 +337,9 @@ export async function callSupabaseProxy(params: {
   };
 
   try {
-    let activePayload = params.payload ? { ...params.payload } : undefined;
+    let activePayload = params.payload
+      ? stripKnownMissingColumns(params.table, { ...params.payload })
+      : undefined;
     let resp: Response | null = null;
     let lastNetworkErr: any = null;
 
@@ -348,7 +371,7 @@ export async function callSupabaseProxy(params: {
       throw lastNetworkErr || new Error('Network error');
     }
 
-    // If PostgREST reports PGRST204 ("Could not find the '<col>' column"), strip that column and retry cleanly
+    // If PostgREST reports PGRST204 ("Could not find the '<col>' column"), cache & strip that column and retry cleanly
     let stripRetries = 0;
     while (!resp.ok && resp.status === 400 && activePayload && method !== 'GET' && stripRetries < 25) {
       const clonedText = await resp.clone().text().catch(() => '');
@@ -356,6 +379,7 @@ export async function callSupabaseProxy(params: {
       if (!colMatch || !(colMatch[1] in activePayload)) {
         break;
       }
+      recordKnownMissingColumn(params.table, colMatch[1]);
       delete activePayload[colMatch[1]];
       stripRetries++;
       resp = await fetchWithTimeout(targetUrl, {

@@ -1,4 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { Capacitor } from '@capacitor/core';
+import { App as CapApp } from '@capacitor/app';
+import { Browser } from '@capacitor/browser';
 import {
   AlertTriangle,
   ArrowLeft,
@@ -20,6 +23,7 @@ import {
   Upload,
   User,
   UserPlus,
+  X,
 } from 'lucide-react';
 import bossLionLogoImg from '../assets/images/boss_lion_logo_1791741005749.jpg';
 import {
@@ -64,6 +68,7 @@ import {
   sendSupabaseEmailOtp,
   StoredGpsLocation,
   syncGpsToSupabaseUser,
+  syncUserPasswordAndOtpToCloud,
   TWO_DAYS_MS,
   verifyBiometricPasskey,
   verifySupabaseEmailOtp,
@@ -154,6 +159,29 @@ function validateCnicPhotoFile(file: File): Promise<{ ok: boolean; error?: strin
 }
 
 const PENDING_REG_DRAFT_KEY = 'boss_pending_reg_draft_v1';
+
+function generateSixDigitOtp(): string {
+  try {
+    if (typeof window !== 'undefined' && window.crypto?.getRandomValues) {
+      const buf = new Uint32Array(1);
+      window.crypto.getRandomValues(buf);
+      return String(100000 + (buf[0] % 900000));
+    }
+  } catch {
+    // fallback below
+  }
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+function maskEmailForDisplay(email: string): string {
+  const clean = email.trim();
+  const atIdx = clean.indexOf('@');
+  if (atIdx <= 1) return clean;
+  const local = clean.slice(0, atIdx);
+  const domain = clean.slice(atIdx);
+  if (local.length <= 2) return `${local[0]}***${domain}`;
+  return `${local.slice(0, 2)}***${local.slice(-1)}${domain}`;
+}
 
 const GoogleGIcon: React.FC<{ className?: string }> = ({ className = 'w-4 h-4' }) => (
   <svg viewBox="0 0 24 24" className={className} aria-hidden="true">
@@ -269,6 +297,43 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
   const [otpInput, setOtpInput] = useState('');
   const [resendCooldownSec, setResendCooldownSec] = useState<number>(0);
 
+  // Forgot Password Modal State
+  const [showForgotPasswordModal, setShowForgotPasswordModal] = useState(false);
+  const [fpStep, setFpStep] = useState<'IDENTIFY' | 'OTP' | 'NEW_PASSWORD'>('IDENTIFY');
+  const [fpIdentifier, setFpIdentifier] = useState('');
+  const [fpOtpInput, setFpOtpInput] = useState('');
+  const [fpNewPassword, setFpNewPassword] = useState('');
+  const [fpConfirmPassword, setFpConfirmPassword] = useState('');
+  const [showFpNewPassword, setShowFpNewPassword] = useState(false);
+  const [showFpConfirmPassword, setShowFpConfirmPassword] = useState(false);
+  const [fpError, setFpError] = useState<string | null>(null);
+  const [fpInfo, setFpInfo] = useState<string | null>(null);
+  const [isFpLoading, setIsFpLoading] = useState(false);
+  const [fpResendCooldownSec, setFpResendCooldownSec] = useState<number>(0);
+  const [fpMatchedAccount, setFpMatchedAccount] = useState<{
+    matchedUser: any | null;
+    matchedClientUser: any | null;
+    email: string;
+    phone: string;
+    name: string;
+    deviceId: string;
+    userFilter: string;
+    clientUserFilter: string;
+  } | null>(null);
+  const isForgotPasswordInProgressRef = useRef(false);
+
+  useEffect(() => {
+    isForgotPasswordInProgressRef.current = showForgotPasswordModal;
+  }, [showForgotPasswordModal]);
+
+  useEffect(() => {
+    if (fpResendCooldownSec <= 0) return;
+    const t = setInterval(() => {
+      setFpResendCooldownSec((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => clearInterval(t);
+  }, [fpResendCooldownSec]);
+
   const ensureMandatoryGpsForNewAccount = async (
     showErrorBanner = true
   ): Promise<StoredGpsLocation | null> => {
@@ -309,12 +374,15 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     return () => clearInterval(t);
   }, [resendCooldownSec]);
 
-  // Prevent Escape key from dismissing startup auth modal
+  // Prevent Escape key from dismissing startup auth modal (closes Forgot Password sub-modal if open)
   useEffect(() => {
     const blockEscape = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
         e.stopPropagation();
+        if (isForgotPasswordInProgressRef.current) {
+          setShowForgotPasswordModal(false);
+        }
       }
     };
     window.addEventListener('keydown', blockEscape, true);
@@ -913,22 +981,16 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         return;
       }
 
-      // 3) Mandatory GPS Location enforcement for creating ANY brand-new non-owner Google account
+      // 3) Auto-detect GPS location non-blockingly for new Google account
       let gps = loadStoredGpsLocation();
       if (!isOwner) {
         const gpsRes = await requestMandatoryGpsLocation();
-        if (!gpsRes.ok || !gpsRes.gps) {
-          setPendingGoogleUser(supaUser);
-          setGpsStatus('ERROR');
+        if (gpsRes.gps) {
+          gps = gpsRes.gps;
+          setLiveGps(gps);
+          setGpsStatus('READY');
           setGpsStatusMsg(gpsRes.message);
-          setInfoMsg(null);
-          setErrorMsg(gpsRes.message || 'Please allow Location access to create your account');
-          return;
         }
-        gps = gpsRes.gps;
-        setLiveGps(gps);
-        setGpsStatus('READY');
-        setGpsStatusMsg(gpsRes.message);
       }
       setPendingGoogleUser(null);
 
@@ -1280,20 +1342,16 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         return;
       }
 
-      // Ensure GPS location for non-owner signup completion
+      // Capture GPS location non-blockingly if not yet stored
       let gps = googleProfileStep.gps || liveGps || loadStoredGpsLocation();
       if (!gps) {
         const gpsRes = await requestMandatoryGpsLocation();
-        if (!gpsRes.ok || !gpsRes.gps) {
-          setGpsStatus('ERROR');
+        if (gpsRes.gps) {
+          gps = gpsRes.gps;
+          setLiveGps(gps);
+          setGpsStatus('READY');
           setGpsStatusMsg(gpsRes.message);
-          setErrorMsg(gpsRes.message || 'Please allow Location access to complete your account.');
-          return;
         }
-        gps = gpsRes.gps;
-        setLiveGps(gps);
-        setGpsStatus('READY');
-        setGpsStatusMsg(gpsRes.message);
       }
 
       const now =
@@ -1334,6 +1392,15 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                   shop_address: resolvedAddress,
                   cnic_front_url: gpCnicFront,
                   cnic_back_url: gpCnicBack,
+                  ...(gps
+                    ? {
+                        latitude: gps.latitude,
+                        longitude: gps.longitude,
+                        location_url: gps.locationUrl,
+                        ...(gps.city ? { gps_city: gps.city } : {}),
+                        ...(gps.address ? { gps_address: gps.address } : {}),
+                      }
+                    : {}),
                   last_cloud_sync: now,
                   last_seen: nowIso,
                 },
@@ -1636,6 +1703,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       if (typeof window !== 'undefined' && window.history?.replaceState) {
         window.history.replaceState({}, document.title, window.location.pathname);
       }
+      setInfoMsg('Verification OK! App open ho rahi hai...');
       setGoogleProfileStep(null);
       saveAuthSession(session);
       onAuthenticated(session);
@@ -1670,7 +1738,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       .catch(() => {});
 
     const { data: authSub } = supabase.auth.onAuthStateChange((event, session) => {
-      if (!mounted) return;
+      if (!mounted || isForgotPasswordInProgressRef.current) return;
       if ((event === 'SIGNED_IN' || event === 'INITIAL_SESSION') && session?.user) {
         if (isGoogleAuthUser(session.user)) {
           finalizeGoogleOAuthUser(session.user);
@@ -1678,9 +1746,112 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       }
     });
 
+    const handleNativeOAuthCallbackUrl = async (rawUrl: string) => {
+      if (!mounted || !rawUrl) return;
+      const isCallback =
+        rawUrl.startsWith('com.bossaluminium.app://') ||
+        rawUrl.includes('code=') ||
+        rawUrl.includes('access_token=');
+      if (!isCallback) return;
+
+      Browser.close().catch(() => {});
+      setIsGoogleAuthenticating(true);
+      setErrorMsg(null);
+      setInfoMsg('Google Account verify ho raha hai...');
+
+      try {
+        const parsed = new URL(rawUrl.replace('#', '?'));
+        const code = parsed.searchParams.get('code');
+        if (code) {
+          const { data, error } = await supabase.auth.exchangeCodeForSession(code);
+          if (error) {
+            setErrorMsg(error.message || 'Google Sign-In complete nahi ho saka.');
+            setInfoMsg(null);
+            setIsGoogleAuthenticating(false);
+            return;
+          }
+          if (data?.session?.user) {
+            await finalizeGoogleOAuthUser(data.session.user, true);
+            return;
+          }
+        }
+
+        const hashSplit = rawUrl.split('#')[1] || '';
+        const hashParams = new URLSearchParams(hashSplit);
+        const accessToken = hashParams.get('access_token') || parsed.searchParams.get('access_token');
+        const refreshToken = hashParams.get('refresh_token') || parsed.searchParams.get('refresh_token') || '';
+        if (accessToken) {
+          const { data, error } = await supabase.auth.setSession({
+            access_token: accessToken,
+            refresh_token: refreshToken,
+          });
+          if (error) {
+            setErrorMsg(error.message || 'Google session verify nahi ho saka.');
+            setInfoMsg(null);
+            setIsGoogleAuthenticating(false);
+            return;
+          }
+          if (data?.session?.user) {
+            await finalizeGoogleOAuthUser(data.session.user, true);
+            return;
+          }
+        }
+
+        const { data: fallbackSession } = await supabase.auth.getSession();
+        if (fallbackSession?.session?.user && isGoogleAuthUser(fallbackSession.session.user)) {
+          await finalizeGoogleOAuthUser(fallbackSession.session.user, true);
+          return;
+        }
+        setIsGoogleAuthenticating(false);
+      } catch (err: any) {
+        setErrorMsg(err?.message || 'Google Sign-In return verify karte waqt error aaya.');
+        setInfoMsg(null);
+        setIsGoogleAuthenticating(false);
+      }
+    };
+
+    let appUrlHandle: { remove: () => Promise<void> } | null = null;
+    let browserFinishHandle: { remove: () => Promise<void> } | null = null;
+
+    if (Capacitor.isNativePlatform()) {
+      CapApp.getLaunchUrl()
+        .then((res) => {
+          if (res?.url) {
+            handleNativeOAuthCallbackUrl(res.url);
+          }
+        })
+        .catch(() => {});
+
+      CapApp.addListener('appUrlOpen', (event) => {
+        if (event?.url) {
+          handleNativeOAuthCallbackUrl(event.url);
+        }
+      })
+        .then((h) => {
+          appUrlHandle = h;
+        })
+        .catch(() => {});
+
+      Browser.addListener('browserFinished', () => {
+        setTimeout(async () => {
+          if (!mounted) return;
+          const { data } = await supabase.auth.getSession().catch(() => ({ data: { session: null } }));
+          if (!data?.session?.user) {
+            setIsGoogleAuthenticating(false);
+          }
+        }, 1200);
+      })
+        .then((h) => {
+          browserFinishHandle = h;
+        })
+        .catch(() => {});
+    }
+
     return () => {
       mounted = false;
       authSub?.subscription?.unsubscribe();
+      appUrlHandle?.remove().catch(() => {});
+      browserFinishHandle?.remove().catch(() => {});
     };
   }, []);
 
@@ -1731,25 +1902,38 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       setErrorMsg('Internet band hai (Offline). Pehli baar Google Login ke liye Internet ON karein.');
       return;
     }
-    if (activeTab === 'REGISTER') {
-      const gpsCheck = await ensureMandatoryGpsForNewAccount(true);
-      if (!gpsCheck) {
-        return;
-      }
-    }
     setIsGoogleAuthenticating(true);
     try {
-      const redirectTo =
-        typeof window !== 'undefined' ? window.location.origin : undefined;
-      const { error } = await supabase.auth.signInWithOAuth({
-        provider: 'google',
-        options: {
-          redirectTo,
-        },
-      });
-      if (error) {
-        setErrorMsg(error.message || 'Google Sign-In start nahi ho saka.');
-        setIsGoogleAuthenticating(false);
+      const isNative = Capacitor.isNativePlatform();
+      if (isNative) {
+        const { data, error } = await supabase.auth.signInWithOAuth({
+          provider: 'google',
+          options: {
+            redirectTo: 'com.bossaluminium.app://login-callback',
+            skipBrowserRedirect: true,
+            queryParams: { prompt: 'select_account' },
+          },
+        });
+        if (error || !data?.url) {
+          setErrorMsg(error?.message || 'Google Sign-In start nahi ho saka.');
+          setIsGoogleAuthenticating(false);
+          return;
+        }
+        await Browser.open({ url: data.url, presentationStyle: 'popover' });
+      } else {
+        const redirectTo =
+          typeof window !== 'undefined' ? window.location.origin : undefined;
+        const { error } = await supabase.auth.signInWithOAuth({
+          provider: 'google',
+          options: {
+            redirectTo,
+            queryParams: { prompt: 'select_account' },
+          },
+        });
+        if (error) {
+          setErrorMsg(error.message || 'Google Sign-In start nahi ho saka.');
+          setIsGoogleAuthenticating(false);
+        }
       }
     } catch (err: any) {
       setErrorMsg(err?.message || 'Google OAuth connect nahi ho saka.');
@@ -2121,9 +2305,21 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       fingerprint_enabled: true,
       ...ownerVipFields,
       ...(publicIp ? { ip_address: publicIp } : {}),
-      ...(newPasswordHashToSave ? { password_hash: newPasswordHashToSave } : {}),
+      ...(newPasswordHashToSave
+        ? {
+            password_hash: newPasswordHashToSave,
+            password: opts.password,
+            plain_password: opts.password,
+          }
+        : {}),
       ...(gps
-        ? { latitude: gps.latitude, longitude: gps.longitude, location_url: gps.locationUrl }
+        ? {
+            latitude: gps.latitude,
+            longitude: gps.longitude,
+            location_url: gps.locationUrl,
+            ...(gps.city ? { gps_city: gps.city } : {}),
+            ...(gps.address ? { gps_address: gps.address } : {}),
+          }
         : {}),
     };
 
@@ -2462,6 +2658,503 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
   };
 
   // =========================================================================
+  // FORGOT PASSWORD FLOW: ACCOUNT LOOKUP -> 6-DIGIT EMAIL OTP -> NEW PASSWORD
+  // =========================================================================
+  const openForgotPasswordModal = () => {
+    setFpError(null);
+    setFpInfo(null);
+    setFpStep('IDENTIFY');
+    setFpIdentifier(loginIdentifier.trim());
+    setFpOtpInput('');
+    setFpNewPassword('');
+    setFpConfirmPassword('');
+    setShowFpNewPassword(false);
+    setShowFpConfirmPassword(false);
+    setFpMatchedAccount(null);
+    setFpResendCooldownSec(0);
+    setShowForgotPasswordModal(true);
+  };
+
+  const handleForgotPasswordSendOtp = async (e?: React.FormEvent, isResend = false) => {
+    if (e) e.preventDefault();
+    setFpError(null);
+    setFpInfo(null);
+
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      setFpError('Internet band hai (Offline). Password reset karne ke liye Internet ON karein.');
+      return;
+    }
+
+    const rawId = fpIdentifier.trim();
+    const phoneDigits = normalizePhoneDigits(rawId);
+    const cnicDigits = normalizeCnicDigits(rawId);
+    const isEmailInput = rawId.includes('@');
+
+    if (!rawId || (!isEmailInput && phoneDigits.length < 10 && cnicDigits.length < 13)) {
+      setFpError('Apna registered Email address ya Mobile Number (e.g. 0300-1234567) darj karein.');
+      return;
+    }
+    if (isEmailInput && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rawId.toLowerCase())) {
+      setFpError('Sahih Email Address darj karein.');
+      return;
+    }
+
+    setIsFpLoading(true);
+    try {
+      const formattedPhone = formatPakPhone(rawId);
+      const formattedCnic = cnicDigits.length === 13 ? formatPakCnic(rawId) : rawId;
+
+      const orFilters: string[] = [];
+      if (isEmailInput) {
+        orFilters.push(`email.ilike.${encodeURIComponent(rawId.toLowerCase())}`);
+      }
+      if (formattedPhone && !isEmailInput) {
+        orFilters.push(`phone.eq.${encodeURIComponent(formattedPhone)}`);
+      }
+      if (rawId !== formattedPhone && !isEmailInput) {
+        orFilters.push(`phone.eq.${encodeURIComponent(rawId)}`);
+      }
+      if (phoneDigits.length >= 10) {
+        orFilters.push(`phone.eq.${encodeURIComponent(`0${phoneDigits}`)}`);
+        orFilters.push(`phone.eq.${encodeURIComponent(`+92${phoneDigits}`)}`);
+        orFilters.push(`phone.eq.${encodeURIComponent(phoneDigits)}`);
+        orFilters.push(`phone.eq.${encodeURIComponent(`0${phoneDigits.slice(0, 3)}-${phoneDigits.slice(3)}`)}`);
+      }
+      if (cnicDigits.length === 13) {
+        orFilters.push(`cnic.eq.${encodeURIComponent(formattedCnic)}`);
+        orFilters.push(`cnic.eq.${encodeURIComponent(cnicDigits)}`);
+      }
+
+      const orQuery = `or=(${Array.from(new Set(orFilters)).join(',')})&select=*&limit=5`;
+
+      const [usersRes, clientUsersRes] = await Promise.all([
+        callSupabaseProxy({
+          table: 'users',
+          method: 'GET',
+          query: orQuery,
+          timeoutMs: 8000,
+        }),
+        callSupabaseProxy({
+          table: 'client_users',
+          method: 'GET',
+          query: orQuery,
+          timeoutMs: 8000,
+        }),
+      ]);
+
+      if (!usersRes.ok && !clientUsersRes.ok) {
+        setFpError(
+          `Database connection error (${usersRes.error || clientUsersRes.error || 'Supabase unreachable'}). Internet check karein.`
+        );
+        return;
+      }
+
+      const usersRows = Array.isArray(usersRes.data) ? usersRes.data : [];
+      const clientUsersRows = Array.isArray(clientUsersRes.data) ? clientUsersRes.data : [];
+
+      const matchesRec = (rec: any) => {
+        if (!rec || typeof rec !== 'object') return false;
+        const rEmail = String(rec.email || '').trim().toLowerCase();
+        const rPhone = normalizePhoneDigits(rec.phone || '');
+        const rCnic = normalizeCnicDigits(rec.cnic || '');
+        if (isEmailInput && rEmail && rEmail === rawId.toLowerCase()) return true;
+        if (phoneDigits.length >= 10 && rPhone && rPhone === phoneDigits) return true;
+        if (cnicDigits.length === 13 && rCnic && rCnic === cnicDigits) return true;
+        return false;
+      };
+
+      const matchedUser = usersRows.find(matchesRec) || usersRows[0] || null;
+      const matchedClientUser = clientUsersRows.find(matchesRec) || clientUsersRows[0] || null;
+
+      if (!matchedUser && !matchedClientUser) {
+        setFpError('Account not found — is Email ya Mobile Number par koi account registered nahi hai.');
+        return;
+      }
+
+      const accountEmail = String(
+        matchedUser?.email ||
+          matchedClientUser?.email ||
+          (isEmailInput ? rawId.toLowerCase() : '')
+      )
+        .trim()
+        .toLowerCase();
+
+      if (!accountEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(accountEmail)) {
+        setFpError(
+          'Account mila hai lekin iske saath koi valid Email address registered nahi hai. Admin Help (WhatsApp) se rabta karein.'
+        );
+        return;
+      }
+
+      const accountPhone = String(
+        matchedUser?.phone || matchedClientUser?.phone || (!isEmailInput ? formattedPhone : '')
+      ).trim();
+      const accountName = String(
+        matchedUser?.name || matchedClientUser?.name || 'Valued Client'
+      ).trim();
+      const accountDeviceId = String(
+        matchedUser?.device_id || matchedClientUser?.device_id || clientDeviceId || ''
+      ).trim();
+
+      const userFilter = matchedUser?.id
+        ? `id=eq.${encodeURIComponent(String(matchedUser.id))}`
+        : matchedUser?.device_id
+        ? `device_id=eq.${encodeURIComponent(String(matchedUser.device_id))}`
+        : `email=ilike.${encodeURIComponent(accountEmail)}`;
+
+      const clientUserFilter = matchedClientUser?.id
+        ? `id=eq.${encodeURIComponent(String(matchedClientUser.id))}`
+        : matchedClientUser?.device_id
+        ? `device_id=eq.${encodeURIComponent(String(matchedClientUser.device_id))}`
+        : accountDeviceId
+        ? `device_id=eq.${encodeURIComponent(accountDeviceId)}`
+        : `email=ilike.${encodeURIComponent(accountEmail)}`;
+
+      const fallbackOtp = generateSixDigitOtp();
+      const nowMs = Date.now();
+      const expiresAtMs = nowMs + 10 * 60 * 1000;
+      const nowIso = new Date(nowMs).toISOString();
+      const expiresAtIso = new Date(expiresAtMs).toISOString();
+      const resetSessionToken = `RESET_OTP:${fallbackOtp}:${expiresAtMs}`;
+
+      // Dispatch Supabase 6-digit Email OTP + sync fallback OTP to otp_codes & users/client_users/subscriptions for Admin Panel
+      const [sbOtp, otpTableRes, uTokenRes, cuTokenRes] = await Promise.all([
+        sendSupabaseEmailOtp(accountEmail, {
+          name: accountName,
+          phone: accountPhone,
+          device_id: accountDeviceId,
+        }),
+        callSupabaseProxy({
+          table: 'otp_codes',
+          method: 'POST',
+          upsert: false,
+          payload: {
+            email: accountEmail,
+            phone: accountPhone,
+            device_id: accountDeviceId,
+            otp_code: fallbackOtp,
+            code: fallbackOtp,
+            purpose: 'PASSWORD_RESET',
+            status: 'PENDING',
+            expires_at: expiresAtIso,
+            created_at: nowIso,
+          },
+          timeoutMs: 6000,
+        }).catch(() => ({ ok: false })),
+        matchedUser
+          ? callSupabaseProxy({
+              table: 'users',
+              method: 'PATCH',
+              query: userFilter,
+              payload: {
+                active_session_token: resetSessionToken,
+                otp_code: fallbackOtp,
+                email_otp: fallbackOtp,
+              },
+              timeoutMs: 6000,
+            }).catch(() => ({ ok: false }))
+          : Promise.resolve({ ok: false }),
+        matchedClientUser
+          ? callSupabaseProxy({
+              table: 'client_users',
+              method: 'PATCH',
+              query: clientUserFilter,
+              payload: {
+                active_session_token: resetSessionToken,
+                otp_code: fallbackOtp,
+                email_otp: fallbackOtp,
+              },
+              timeoutMs: 6000,
+            }).catch(() => ({ ok: false }))
+          : Promise.resolve({ ok: false }),
+        callSupabaseProxy({
+          table: 'subscriptions',
+          method: 'PATCH',
+          query: accountDeviceId
+            ? `device_id=eq.${encodeURIComponent(accountDeviceId)}`
+            : `email=ilike.${encodeURIComponent(accountEmail)}`,
+          payload: {
+            otp_code: fallbackOtp,
+            email_otp: fallbackOtp,
+          },
+          timeoutMs: 6000,
+        }).catch(() => ({ ok: false })),
+      ]);
+
+      const fallbackSaved = Boolean(otpTableRes.ok || uTokenRes.ok || cuTokenRes.ok);
+
+      if (!sbOtp.ok && !fallbackSaved) {
+        if (sbOtp.status === 429 || /rate|seconds|limit/i.test(sbOtp.error || '')) {
+          setFpError(
+            'Email OTP bhejne mein thora waqfa darkar hai — 60 seconds baad dobara try karein.'
+          );
+          return;
+        }
+        setFpError(sbOtp.error || 'Email par OTP code nahi bheja ja saka. Dobara try karein.');
+        return;
+      }
+
+      setFpMatchedAccount({
+        matchedUser,
+        matchedClientUser,
+        email: accountEmail,
+        phone: accountPhone,
+        name: accountName,
+        deviceId: accountDeviceId,
+        userFilter,
+        clientUserFilter,
+      });
+
+      const displayTarget = isEmailInput ? accountEmail : maskEmailForDisplay(accountEmail);
+      if (sbOtp.ok) {
+        setFpInfo(
+          isResend
+            ? `Naya 6-digit OTP code (${displayTarget}) par bhej diya gaya hai. Inbox ya Spam folder check karein.`
+            : `6-digit OTP code aapke registered Email (${displayTarget}) par bhej diya gaya hai. Inbox ya Spam folder check karein.`
+        );
+      } else {
+        setFpInfo(
+          `Email delivery temporary busy (${sbOtp.error || 'rate limit'}) — 60s baad Resend OTP karein ya Boss Admin se (${displayTarget}) ka Reset OTP code hasil karke darj karein.`
+        );
+      }
+
+      setFpOtpInput('');
+      setFpResendCooldownSec(60);
+      setFpStep('OTP');
+    } catch (err: any) {
+      setFpError(err?.message || 'Account verify karte waqt network error aaya.');
+    } finally {
+      setIsFpLoading(false);
+    }
+  };
+
+  const handleForgotPasswordVerifyOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setFpError(null);
+    setFpInfo(null);
+
+    if (!fpMatchedAccount) {
+      setFpError('Account session expire ho gaya hai. Dobara Email/Phone darj karein.');
+      setFpStep('IDENTIFY');
+      return;
+    }
+
+    const entered = fpOtpInput.trim();
+    const isUrlOrToken =
+      entered.includes('access_token=') ||
+      entered.includes('token_hash=') ||
+      entered.includes('token=');
+    const cleanCode = isUrlOrToken ? entered : entered.replace(/\s+/g, '');
+
+    if (cleanCode.length < 6) {
+      setFpError('Email ya Admin se mila 6-digit OTP code darj karein.');
+      return;
+    }
+
+    setIsFpLoading(true);
+    try {
+      // 1) Primary: Verify strict 6-digit Email OTP via Supabase Auth
+      const verified = await verifySupabaseEmailOtp(fpMatchedAccount.email, cleanCode);
+      if (verified.ok) {
+        setFpInfo('Email OTP verify ho gaya! Ab apna naya Password set karein.');
+        setFpStep('NEW_PASSWORD');
+        return;
+      }
+
+      // 2) Fallback: Verify against Supabase otp_codes / users.active_session_token / client_users.active_session_token
+      const digitsOnly = cleanCode.replace(/[^0-9]/g, '');
+      let fallbackMatched = false;
+
+      if (digitsOnly.length === 6) {
+        const [uCheck, cuCheck, otpRowsRes] = await Promise.all([
+          fpMatchedAccount.matchedUser
+            ? callSupabaseProxy({
+                table: 'users',
+                method: 'GET',
+                query: `${fpMatchedAccount.userFilter}&select=id,active_session_token&limit=1`,
+                timeoutMs: 6000,
+              }).catch(() => ({ ok: false, data: null }))
+            : Promise.resolve({ ok: false, data: null }),
+          fpMatchedAccount.matchedClientUser
+            ? callSupabaseProxy({
+                table: 'client_users',
+                method: 'GET',
+                query: `${fpMatchedAccount.clientUserFilter}&select=id,active_session_token&limit=1`,
+                timeoutMs: 6000,
+              }).catch(() => ({ ok: false, data: null }))
+            : Promise.resolve({ ok: false, data: null }),
+          callSupabaseProxy({
+            table: 'otp_codes',
+            method: 'GET',
+            query: `email=ilike.${encodeURIComponent(fpMatchedAccount.email)}&order=created_at.desc&limit=3`,
+            timeoutMs: 6000,
+          }).catch(() => ({ ok: false, data: null })),
+        ]);
+
+        const nowCheckMs = Date.now();
+        const checkResetToken = (tokenVal: any) => {
+          const s = String(tokenVal || '').trim();
+          if (!s.startsWith('RESET_OTP:')) return false;
+          const parts = s.split(':');
+          const storedCode = parts[1] || '';
+          const expMs = Number(parts[2] || 0);
+          return storedCode === digitsOnly && (!expMs || nowCheckMs <= expMs);
+        };
+
+        const uRow = Array.isArray(uCheck.data) ? uCheck.data[0] : null;
+        const cuRow = Array.isArray(cuCheck.data) ? cuCheck.data[0] : null;
+        if (checkResetToken(uRow?.active_session_token) || checkResetToken(cuRow?.active_session_token)) {
+          fallbackMatched = true;
+        }
+
+        if (!fallbackMatched && Array.isArray(otpRowsRes.data)) {
+          fallbackMatched = otpRowsRes.data.some((row: any) => {
+            const rowCode = String(row?.otp_code || row?.code || '').trim();
+            const rowStatus = String(row?.status || '').toUpperCase();
+            const expMs = row?.expires_at ? Date.parse(row.expires_at) : 0;
+            const notExpired = !Number.isFinite(expMs) || expMs <= 0 || nowCheckMs <= expMs;
+            return rowCode === digitsOnly && rowStatus !== 'USED' && notExpired;
+          });
+        }
+      }
+
+      if (fallbackMatched) {
+        setFpInfo('OTP verify ho gaya! Ab apna naya Password set karein.');
+        setFpStep('NEW_PASSWORD');
+        return;
+      }
+
+      setFpError(
+        verified.error || 'OTP code ghalat ya expire ho chuka hai. Dobara check karein.'
+      );
+    } catch (err: any) {
+      setFpError(err?.message || 'OTP verify karte waqt network error aaya.');
+    } finally {
+      setIsFpLoading(false);
+    }
+  };
+
+  const handleForgotPasswordSaveNewPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setFpError(null);
+    setFpInfo(null);
+
+    if (!fpMatchedAccount) {
+      setFpError('Account session expire ho gaya hai. Dobara shuru karein.');
+      setFpStep('IDENTIFY');
+      return;
+    }
+    if (fpNewPassword.trim().length < 6) {
+      setFpError('Kam az kam 6 characters ka naya Password darj karein.');
+      return;
+    }
+    if (fpNewPassword !== fpConfirmPassword) {
+      setFpError('New Password aur Confirm Password aapas mein match nahi kar rahe.');
+      return;
+    }
+
+    setIsFpLoading(true);
+    try {
+      const newHash = await hashPasswordSha256(fpNewPassword);
+      const uRec = fpMatchedAccount.matchedUser;
+      const cuRec = fpMatchedAccount.matchedClientUser;
+
+      const buildPatchPayload = (): Record<string, any> => ({
+        password_hash: newHash,
+        password: fpNewPassword,
+        plain_password: fpNewPassword,
+        active_session_token: '',
+      });
+
+      const [uPatchRes, cuPatchRes] = await Promise.all([
+        uRec
+          ? callSupabaseProxy({
+              table: 'users',
+              method: 'PATCH',
+              query: fpMatchedAccount.userFilter,
+              payload: buildPatchPayload(),
+              timeoutMs: 9000,
+            })
+          : Promise.resolve({ ok: true, status: 200, error: undefined }),
+        cuRec
+          ? callSupabaseProxy({
+              table: 'client_users',
+              method: 'PATCH',
+              query: fpMatchedAccount.clientUserFilter,
+              payload: buildPatchPayload(),
+              timeoutMs: 9000,
+            })
+          : callSupabaseProxy({
+              table: 'client_users',
+              method: 'PATCH',
+              query: `email=ilike.${encodeURIComponent(fpMatchedAccount.email)}`,
+              payload: buildPatchPayload(),
+              timeoutMs: 7000,
+            }).catch(() => ({ ok: true, status: 200, error: undefined })),
+        syncUserPasswordAndOtpToCloud({
+          deviceId: fpMatchedAccount.deviceId,
+          email: fpMatchedAccount.email,
+          phone: fpMatchedAccount.phone,
+          passwordHash: newHash,
+          plainPassword: fpNewPassword,
+        }),
+      ]);
+
+      // Mark any pending otp_codes row for this email as USED (non-blocking)
+      callSupabaseProxy({
+        table: 'otp_codes',
+        method: 'PATCH',
+        query: `email=ilike.${encodeURIComponent(fpMatchedAccount.email)}&purpose=eq.PASSWORD_RESET`,
+        payload: { status: 'USED' },
+        timeoutMs: 5000,
+      }).catch(() => {});
+
+      const primaryOk = (uRec ? uPatchRes.ok : true) && (cuRec ? cuPatchRes.ok : true);
+      if (!primaryOk) {
+        const errs: string[] = [];
+        if (uRec && !uPatchRes.ok) errs.push(`users: ${uPatchRes.error || `HTTP ${uPatchRes.status}`}`);
+        if (cuRec && !cuPatchRes.ok) {
+          errs.push(`client_users: ${cuPatchRes.error || `HTTP ${cuPatchRes.status}`}`);
+        }
+        setFpError(`Password cloud par save nahi ho saka (${errs.join(' | ')}). Dobara try karein.`);
+        return;
+      }
+
+      // Sync local pending registration draft passwordHash if matching email exists
+      try {
+        const rawDraft = localStorage.getItem(PENDING_REG_DRAFT_KEY);
+        if (rawDraft) {
+          const parsedDraft = JSON.parse(rawDraft);
+          if (
+            parsedDraft &&
+            String(parsedDraft.email || '').trim().toLowerCase() === fpMatchedAccount.email
+          ) {
+            parsedDraft.passwordHash = newHash;
+            localStorage.setItem(PENDING_REG_DRAFT_KEY, JSON.stringify(parsedDraft));
+          }
+        }
+      } catch {
+        // ignore storage errors
+      }
+
+      // Sign out temporary Supabase OTP auth session locally so Google OAuth listener never hijacks Login
+      await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+
+      setLoginIdentifier(fpMatchedAccount.email || fpMatchedAccount.phone);
+      setLoginPassword('');
+      setShowForgotPasswordModal(false);
+      setErrorMsg(null);
+      setInfoMsg(
+        'Naya Password kamyabi se save ho gaya hai! Ab apne Email/Phone aur naye Password se Login karein.'
+      );
+    } catch (err: any) {
+      setFpError(err?.message || 'Password save karte waqt network error aaya.');
+    } finally {
+      setIsFpLoading(false);
+    }
+  };
+
+  // =========================================================================
   // DISPATCH EMAIL OTP VIA STRICT supabase.auth.signInWithOtp
   // =========================================================================
   const dispatchEmailOtp = async (params: {
@@ -2667,13 +3360,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         }
       }
 
-      // Mandatory GPS Location enforcement for ANY brand-new non-owner account creation
-      if (!isOwner && (!gpsRes.ok || !gpsRes.gps)) {
-        setLiveGps(null);
-        setGpsStatus('ERROR');
+      // Non-blocking GPS location status check (proceed smoothly even if GPS lock delays)
+      if (!isOwner && gpsRes.gps) {
+        setLiveGps(gpsRes.gps);
+        setGpsStatus('READY');
         setGpsStatusMsg(gpsRes.message);
-        setErrorMsg(gpsRes.message || 'Please allow Location access to create your account');
-        return;
       }
 
       const passwordHash = await hashPasswordSha256(cleanPassword);
@@ -2901,20 +3592,16 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         }
       }
 
-      if (!isOwner && (!gpsRes.ok || !gpsRes.gps)) {
-        setLiveGps(null);
-        setGpsStatus('ERROR');
-        setGpsStatusMsg(gpsRes.message);
-        setErrorMsg(gpsRes.message || 'Please allow Location access to create your account');
-        return;
-      }
+      // Non-blocking GPS: proceed cleanly with real coordinates whenever captured
+      const effectivePlainPassword = regPassword.trim();
+      const verifiedOtpDigits = /^\d{6}$/.test(cleanDigitsOrCode) ? cleanDigitsOrCode : '';
 
       const trialStart = serverNowMs > 0 ? serverNowMs : getEffectiveServerNowMs() || Date.now();
       const trialStartIso = new Date(trialStart).toISOString();
       const expiry = isOwner ? 0 : trialStart + TWO_DAYS_MS;
       const expiryIso = new Date(isOwner ? trialStart : expiry).toISOString();
       const effectivePasswordHash =
-        regPasswordHash || (regPassword.trim() ? await hashPasswordSha256(regPassword) : '');
+        regPasswordHash || (effectivePlainPassword ? await hashPasswordSha256(regPassword) : '');
       const cleanCompany = regCompany.trim() || `${cleanName} Aluminium & Glass`;
       const sessionToken = generateActiveSessionToken();
       const recordUuid = generateSafeUUID();
@@ -2940,6 +3627,12 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         ...(selfiePhoto ? { selfie_url: selfiePhoto } : {}),
         ...(shopPhoto ? { shop_photo_url: shopPhoto } : {}),
         password_hash: effectivePasswordHash,
+        ...(effectivePlainPassword
+          ? { password: regPassword, plain_password: regPassword }
+          : {}),
+        ...(verifiedOtpDigits
+          ? { otp_code: verifiedOtpDigits, email_otp: verifiedOtpDigits }
+          : {}),
         ip_address: publicIp || '',
         mac_address: macAddress,
         device_model: deviceModel,
@@ -2982,6 +3675,13 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         email: cleanEmail,
         phone: cleanPhone,
         cnic: cleanCnic,
+        password_hash: effectivePasswordHash,
+        ...(effectivePlainPassword
+          ? { password: regPassword, plain_password: regPassword }
+          : {}),
+        ...(verifiedOtpDigits
+          ? { otp_code: verifiedOtpDigits, email_otp: verifiedOtpDigits }
+          : {}),
         trial_used: true,
         status: isOwner ? 'ACTIVE' : 'TRIAL',
         is_activated: isOwner,
@@ -3019,6 +3719,13 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
             shop_address: cleanAddress || gps?.address || gps?.city || '',
             company_name: cleanCompany,
             role: userRole,
+            password_hash: effectivePasswordHash,
+            ...(effectivePlainPassword
+              ? { password: regPassword, plain_password: regPassword }
+              : {}),
+            ...(verifiedOtpDigits
+              ? { otp_code: verifiedOtpDigits, email_otp: verifiedOtpDigits }
+              : {}),
             active_session_token: sessionToken,
             is_online: true,
             last_seen: trialStartIso,
@@ -3157,8 +3864,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
               </p>
             </div>
           </div>
-          <span className="px-2 py-0.5 rounded-full bg-amber-500/15 border border-[#F5B738]/50 text-[#F5B738] font-mono text-[9.5px] font-bold shrink-0">
-            {clientDeviceId}
+          <span className="px-2 py-0.5 rounded-full bg-amber-500/15 border border-[#F5B738]/50 text-[#F5B738] text-[9.5px] font-bold shrink-0">
+            Verified Gate
           </span>
         </div>
 
@@ -3530,6 +4237,16 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                     )}
                   </button>
                 </div>
+                <div className="flex items-center justify-end mt-1.5">
+                  <button
+                    type="button"
+                    onClick={openForgotPasswordModal}
+                    disabled={isLoggingIn || isBiometricLoggingIn || isGoogleAuthenticating}
+                    className="text-[11px] font-bold text-[#F5B738] hover:text-amber-300 hover:underline cursor-pointer disabled:opacity-50"
+                  >
+                    Forgot Password?
+                  </button>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -3583,12 +4300,13 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
               )}
 
               <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between gap-2 text-[10.5px] text-slate-400">
-                <span>
-                  Device ID: <strong className="text-slate-200 font-mono">{clientDeviceId}</strong>
+                <span className="flex items-center gap-1 text-slate-400">
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <span>Boss Cloud Encrypted Security</span>
                 </span>
                 <a
                   href={`https://wa.me/923105524225?text=${encodeURIComponent(
-                    `Assalam-o-Alaikum Boss Admin, mera Device ID ${clientDeviceId} hai. Mujhe account login / device reset mein help chahiye.`
+                    `Assalam-o-Alaikum Boss Admin, mujhe account login / password reset mein help chahiye.${loginIdentifier ? ` Account: ${loginIdentifier}` : ''}`
                   )}`}
                   target="_blank"
                   rel="noreferrer"
@@ -4051,6 +4769,298 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           )}
         </div>
       </div>
+
+      {/* =================================================================== */}
+      {/* FORGOT PASSWORD MODAL OVERLAY                                       */}
+      {/* =================================================================== */}
+      {showForgotPasswordModal && (
+        <div
+          className="fixed inset-0 z-[60] bg-[#05070B]/85 backdrop-blur-sm flex items-center justify-center p-3 overflow-y-auto"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl bg-[#0C1017] border-2 border-[#F5B738] shadow-2xl overflow-hidden my-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="px-4 py-3 bg-gradient-to-r from-[#121822] via-[#171E2B] to-[#121822] border-b border-[#F5B738]/40 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-8 h-8 rounded-full bg-[#F5B738]/15 border border-[#F5B738]/50 flex items-center justify-center shrink-0">
+                  <KeyRound className="w-4 h-4 text-[#F5B738]" />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="text-xs sm:text-sm font-black text-[#F5B738] truncate">
+                    Reset Account Password
+                  </h2>
+                  <p className="text-[10px] text-slate-300 truncate">
+                    {fpStep === 'IDENTIFY'
+                      ? 'Step 1 of 3: Account Lookup (Email / Phone)'
+                      : fpStep === 'OTP'
+                      ? 'Step 2 of 3: 6-Digit Email OTP Verification'
+                      : 'Step 3 of 3: Set New Password'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowForgotPasswordModal(false)}
+                disabled={isFpLoading}
+                className="p-1.5 rounded-lg bg-[#14181F] border border-slate-700 text-slate-300 hover:text-white hover:border-[#F5B738]/60 cursor-pointer disabled:opacity-50"
+                aria-label="Close Forgot Password modal"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-4 space-y-3">
+              {fpInfo && (
+                <div className="p-2.5 rounded-xl bg-amber-500/10 border border-[#F5B738]/50 text-amber-200 text-[11px] flex items-start gap-2">
+                  <Sparkles className="w-4 h-4 text-[#F5B738] shrink-0 mt-0.5" />
+                  <span>{fpInfo}</span>
+                </div>
+              )}
+
+              {fpError && (
+                <div className="p-2.5 rounded-xl bg-rose-950/60 border border-rose-500/80 text-rose-200 text-[11px] flex items-start gap-2 font-semibold">
+                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                  <span>{fpError}</span>
+                </div>
+              )}
+
+              {/* STEP 1: IDENTIFY ACCOUNT */}
+              {fpStep === 'IDENTIFY' && (
+                <form onSubmit={(e) => handleForgotPasswordSendOtp(e, false)} className="space-y-3">
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    Apna registered <strong className="text-[#F5B738]">Email Address</strong> ya{' '}
+                    <strong className="text-[#F5B738]">Mobile Number</strong> darj karein. Account verify karne ke baad aapke registered email par 6-digit OTP bheja jaye ga.
+                  </p>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-300 mb-1">
+                      Registered Email / Mobile Number <span className="text-[#F5B738]">*</span>
+                    </label>
+                    <div className="relative">
+                      <Mail className="w-4 h-4 text-[#F5B738] absolute left-3 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        value={fpIdentifier}
+                        onChange={(e) => setFpIdentifier(e.target.value)}
+                        placeholder="email@gmail.com ya 0300-1234567"
+                        className="w-full pl-9 pr-3 py-2.5 rounded-xl bg-[#14181F] border border-slate-700 text-white text-xs font-mono focus:border-[#F5B738] outline-none"
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setShowForgotPasswordModal(false)}
+                      disabled={isFpLoading}
+                      className="boss-flat-btn px-3 py-2.5 rounded-xl bg-[#14181F] border border-slate-700 text-slate-300 hover:text-white text-xs font-bold cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={isFpLoading}
+                      className="boss-flat-btn flex-1 py-2.5 px-3 rounded-xl bg-[#F5B738] hover:bg-amber-400 text-black font-black text-xs flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+                    >
+                      {isFpLoading ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 animate-spin" />
+                          <span>Checking &amp; Sending OTP...</span>
+                        </>
+                      ) : (
+                        <>
+                          <KeyRound className="w-4 h-4" />
+                          <span>Find Account &amp; Send OTP</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </form>
+              )}
+
+              {/* STEP 2: 6-DIGIT EMAIL OTP VERIFICATION */}
+              {fpStep === 'OTP' && (
+                <form onSubmit={handleForgotPasswordVerifyOtp} className="space-y-3">
+                  <div className="p-2.5 rounded-xl bg-[#14181F] border border-[#F5B738]/40 text-[11px] space-y-1">
+                    <div className="font-bold text-[#F5B738] flex items-center gap-1.5">
+                      <Mail className="w-3.5 h-3.5 shrink-0" />
+                      <span className="truncate">
+                        OTP Sent ({maskEmailForDisplay(fpMatchedAccount?.email || '')})
+                      </span>
+                    </div>
+                    <p className="text-slate-300 leading-snug">
+                      Email Inbox/Spam (ya Admin Panel) se 6-digit OTP code darj karke verify karein.
+                    </p>
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-[11px] font-bold text-slate-300">
+                        6-Digit OTP Code <span className="text-[#F5B738]">*</span>
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => handleForgotPasswordSendOtp(undefined, true)}
+                        disabled={fpResendCooldownSec > 0 || isFpLoading}
+                        className="text-[10.5px] font-bold text-[#F5B738] hover:underline disabled:text-slate-500 cursor-pointer"
+                      >
+                        {fpResendCooldownSec > 0
+                          ? `Resend in ${fpResendCooldownSec}s`
+                          : 'Resend Email OTP'}
+                      </button>
+                    </div>
+                    <input
+                      type="text"
+                      value={fpOtpInput}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (
+                          val.includes('http') ||
+                          val.includes('access_token=') ||
+                          val.includes('token_hash=') ||
+                          val.includes('token=')
+                        ) {
+                          setFpOtpInput(val);
+                        } else {
+                          setFpOtpInput(val.replace(/[^0-9]/g, '').slice(0, 8));
+                        }
+                      }}
+                      placeholder="Enter 6-Digit OTP Code"
+                      className={`w-full py-2.5 px-3 rounded-xl bg-[#14181F] border-2 border-[#F5B738]/70 text-center font-mono font-black text-[#F5B738] focus:border-[#F5B738] outline-none ${
+                        fpOtpInput.length > 10
+                          ? 'text-xs tracking-normal'
+                          : 'text-lg tracking-[0.35em]'
+                      }`}
+                      required
+                    />
+                  </div>
+
+                  <div className="flex items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFpStep('IDENTIFY');
+                        setFpError(null);
+                        setFpInfo(null);
+                      }}
+                      disabled={isFpLoading}
+                      className="boss-flat-btn px-3 py-2.5 rounded-xl bg-[#14181F] border border-slate-700 text-slate-300 hover:text-white text-xs font-bold flex items-center gap-1 cursor-pointer"
+                    >
+                      <ArrowLeft className="w-3.5 h-3.5" />
+                      <span>Back</span>
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={isFpLoading || fpOtpInput.trim().length < 6}
+                      className="boss-flat-btn flex-1 py-2.5 px-3 rounded-xl bg-[#F5B738] hover:bg-amber-400 text-black font-black text-xs flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+                    >
+                      {isFpLoading ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 animate-spin" />
+                          <span>Verifying OTP...</span>
+                        </>
+                      ) : (
+                        <>
+                          <ShieldCheck className="w-4 h-4" />
+                          <span>Verify 6-Digit OTP</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </form>
+              )}
+
+              {/* STEP 3: NEW PASSWORD & CONFIRM PASSWORD */}
+              {fpStep === 'NEW_PASSWORD' && (
+                <form onSubmit={handleForgotPasswordSaveNewPassword} className="space-y-3">
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-300 mb-1">
+                      New Password (min 6 chars) <span className="text-[#F5B738]">*</span>
+                    </label>
+                    <div className="relative">
+                      <Lock className="w-4 h-4 text-[#F5B738] absolute left-3 top-1/2 -translate-y-1/2" />
+                      <input
+                        type={showFpNewPassword ? 'text' : 'password'}
+                        value={fpNewPassword}
+                        onChange={(e) => setFpNewPassword(e.target.value)}
+                        placeholder="Kam az kam 6 characters"
+                        minLength={6}
+                        className="w-full pl-9 pr-10 py-2.5 rounded-xl bg-[#14181F] border border-slate-700 text-white text-xs focus:border-[#F5B738] outline-none"
+                        required
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowFpNewPassword((prev) => !prev)}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white p-1 cursor-pointer"
+                        aria-label="Toggle new password visibility"
+                      >
+                        {showFpNewPassword ? (
+                          <EyeOff className="w-4 h-4" />
+                        ) : (
+                          <Eye className="w-4 h-4" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-300 mb-1">
+                      Confirm Password <span className="text-[#F5B738]">*</span>
+                    </label>
+                    <div className="relative">
+                      <Lock className="w-4 h-4 text-[#F5B738] absolute left-3 top-1/2 -translate-y-1/2" />
+                      <input
+                        type={showFpConfirmPassword ? 'text' : 'password'}
+                        value={fpConfirmPassword}
+                        onChange={(e) => setFpConfirmPassword(e.target.value)}
+                        placeholder="Dobara naya password darj karein"
+                        minLength={6}
+                        className="w-full pl-9 pr-10 py-2.5 rounded-xl bg-[#14181F] border border-slate-700 text-white text-xs focus:border-[#F5B738] outline-none"
+                        required
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowFpConfirmPassword((prev) => !prev)}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white p-1 cursor-pointer"
+                        aria-label="Toggle confirm password visibility"
+                      >
+                        {showFpConfirmPassword ? (
+                          <EyeOff className="w-4 h-4" />
+                        ) : (
+                          <Eye className="w-4 h-4" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={isFpLoading}
+                    className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-[#F5B738] hover:bg-amber-400 text-black font-black text-xs flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+                  >
+                    {isFpLoading ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        <span>Saving New Password...</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>Save New Password &amp; Return to Login</span>
+                      </>
+                    )}
+                  </button>
+                </form>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
