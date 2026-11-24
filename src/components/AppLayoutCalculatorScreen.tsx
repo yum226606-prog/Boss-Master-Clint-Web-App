@@ -1409,24 +1409,18 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     ctx.restore();
   };
 
-  // High-Resolution Canvas Builder for Quotation & All Charts (used for both PNG & PDF)
-  const buildChartExportCanvas = async (
-    chartType: 'CUTTING' | 'LENGTH' | 'GLASS' | 'QUOTATION'
-  ): Promise<{ canvas: HTMLCanvasElement; title: string } | null> => {
-    const loadImg = (src: string): Promise<HTMLImageElement | null> =>
-      new Promise((resolve) => {
-        if (!src) return resolve(null);
+  const loadExportImageSafe = async (src: string): Promise<HTMLImageElement | null> => {
+    if (!src) return null;
+    if (src.startsWith('data:') || src.startsWith('blob:')) {
+      return new Promise((resolve) => {
         let settled = false;
         const done = (img: HTMLImageElement | null) => {
           if (settled) return;
           settled = true;
           resolve(img);
         };
-        const timer = setTimeout(() => done(null), 2000);
+        const timer = setTimeout(() => done(null), 1500);
         const im = new Image();
-        if (!src.startsWith('data:') && !src.startsWith('blob:')) {
-          im.crossOrigin = 'anonymous';
-        }
         im.onload = () => {
           clearTimeout(timer);
           done(im);
@@ -1437,6 +1431,49 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
         };
         im.src = src;
       });
+    }
+    try {
+      const controller = new AbortController();
+      const fetchTimer = setTimeout(() => controller.abort(), 2000);
+      const resp = await fetch(src, {
+        mode: 'cors',
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+      clearTimeout(fetchTimer);
+      if (!resp.ok) return null;
+      const blob = await resp.blob();
+      const objUrl = URL.createObjectURL(blob);
+      return await new Promise<HTMLImageElement | null>((resolve) => {
+        let settled = false;
+        const done = (img: HTMLImageElement | null) => {
+          if (settled) return;
+          settled = true;
+          URL.revokeObjectURL(objUrl);
+          resolve(img);
+        };
+        const timer = setTimeout(() => done(null), 1500);
+        const im = new Image();
+        im.onload = () => {
+          clearTimeout(timer);
+          done(im);
+        };
+        im.onerror = () => {
+          clearTimeout(timer);
+          done(null);
+        };
+        im.src = objUrl;
+      });
+    } catch {
+      return null;
+    }
+  };
+
+  // High-Resolution Canvas Builder for Quotation & All Charts (used for both PNG & PDF)
+  const buildChartExportCanvas = async (
+    chartType: 'CUTTING' | 'LENGTH' | 'GLASS' | 'QUOTATION'
+  ): Promise<{ canvas: HTMLCanvasElement; title: string } | null> => {
+    const loadImg = loadExportImageSafe;
 
     const lines: { left: string; mid?: string; right: string; highlight?: boolean }[] = [];
     let title = 'OFFICIAL QUOTATION';
@@ -1721,30 +1758,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   const buildHistoryExportCanvas = async (
     item: SavedQuotation
   ): Promise<{ canvas: HTMLCanvasElement; title: string } | null> => {
-    const loadImg = (src: string): Promise<HTMLImageElement | null> =>
-      new Promise((resolve) => {
-        if (!src) return resolve(null);
-        let settled = false;
-        const done = (img: HTMLImageElement | null) => {
-          if (settled) return;
-          settled = true;
-          resolve(img);
-        };
-        const timer = setTimeout(() => done(null), 2000);
-        const im = new Image();
-        if (!src.startsWith('data:') && !src.startsWith('blob:')) {
-          im.crossOrigin = 'anonymous';
-        }
-        im.onload = () => {
-          clearTimeout(timer);
-          done(im);
-        };
-        im.onerror = () => {
-          clearTimeout(timer);
-          done(null);
-        };
-        im.src = src;
-      });
+    const loadImg = loadExportImageSafe;
 
     const lines: { left: string; mid?: string; right: string; highlight?: boolean }[] = [
       {
@@ -2050,15 +2064,15 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   target.item.grandTotal
                 ).toLocaleString()})`
               : `${companyName} — ${docTitle} for ${customerName || 'Valued Client'}`,
-          alsoDownloadOnFallback: true,
+          alsoDownloadOnFallback: false,
+          openWhatsAppFallback: getWhatsAppShareUrl(target),
         });
         if (shareResult === 'shared') {
           showSettingsToast(`✅ ${format === 'PDF' ? 'PDF Document' : 'Picture (PNG)'} share ho gayi!`);
           setShareModalTarget(null);
-        } else if (shareResult === 'downloaded') {
-          showSettingsToast(
-            `✅ ${format === 'PDF' ? 'PDF Document' : 'Picture (PNG)'} save ho gayi — ab WhatsApp par bhej sakte hain!`
-          );
+        } else if (shareResult === 'whatsapp') {
+          showSettingsToast('✅ Direct WhatsApp open ho raha hai!');
+          setShareModalTarget(null);
         }
       }
     } finally {
@@ -2066,7 +2080,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     }
   };
 
-  // Direct Print Handler: tries native print directly first; if blocked/unsupported (iframe or WebView), opens interactive Print Page directly
+  // Direct Print Handler: opens interactive A4 Print Page directly and triggers native print dialog when supported
   const handlePrintDocument = async (
     target:
       | { kind: 'CHART'; chartType: 'CUTTING' | 'LENGTH' | 'GLASS' | 'QUOTATION' }
@@ -2081,7 +2095,6 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
         beforePrintFired = true;
       };
       let printErrored = false;
-      const t0 = Date.now();
       try {
         window.addEventListener('beforeprint', onBeforePrint, { once: true });
         window.print();
@@ -2090,43 +2103,46 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
       } finally {
         window.removeEventListener('beforeprint', onBeforePrint);
       }
-      const elapsed = Date.now() - t0;
-      if (!printErrored && (beforePrintFired || elapsed >= 140)) {
+      if (!printErrored && beforePrintFired) {
         return;
       }
     }
 
-    const built =
-      target.kind === 'HISTORY'
-        ? await buildHistoryExportCanvas(target.item)
-        : await buildChartExportCanvas(target.chartType);
-    if (!built) {
-      showSettingsToast('Print page tayyar karne mein masla aaya.');
-      return;
-    }
+    try {
+      const built =
+        target.kind === 'HISTORY'
+          ? await buildHistoryExportCanvas(target.item)
+          : await buildChartExportCanvas(target.chartType);
+      if (!built) {
+        showSettingsToast('Print page tayyar karne mein masla aaya.');
+        return;
+      }
 
-    const { canvas, title } = built;
-    const previewImageUrl = canvas.toDataURL('image/png');
-    const pdfBlob = canvasToPdfBlob(canvas);
-    const pdfUrl = URL.createObjectURL(pdfBlob);
-    const baseSlug =
-      target.kind === 'HISTORY'
-        ? `Boss-Quotation-${(target.item.customerName || 'Client').replace(/\s+/g, '-')}-${target.item.id}`
-        : `Boss-${target.chartType.toLowerCase()}-${Date.now()}`;
+      const { canvas, title } = built;
+      const previewImageUrl = canvas.toDataURL('image/png');
+      const pdfBlob = canvasToPdfBlob(canvas);
+      const pdfUrl = URL.createObjectURL(pdfBlob);
+      const baseSlug =
+        target.kind === 'HISTORY'
+          ? `Boss-Quotation-${(target.item.customerName || 'Client').replace(/\s+/g, '-')}-${target.item.id}`
+          : `Boss-${target.chartType.toLowerCase()}-${Date.now()}`;
 
-    setPrintPreviewState((prev) => {
-      if (prev?.pdfUrl) URL.revokeObjectURL(prev.pdfUrl);
-      return {
-        title,
-        previewImageUrl,
-        pdfUrl,
-        fileName: `${baseSlug}.pdf`,
-        pngFileName: `${baseSlug}.png`,
-      };
-    });
+      setPrintPreviewState((prev) => {
+        if (prev?.pdfUrl) URL.revokeObjectURL(prev.pdfUrl);
+        return {
+          title,
+          previewImageUrl,
+          pdfUrl,
+          fileName: `${baseSlug}.pdf`,
+          pngFileName: `${baseSlug}.png`,
+        };
+      });
 
-    if (!isNative) {
-      await triggerIframePrint(previewImageUrl, title);
+      if (!isNative && !isIframe) {
+        await triggerIframePrint(previewImageUrl, title);
+      }
+    } catch {
+      showSettingsToast('Print page tayyar karne mein masla aaya — dobara koshish karein.');
     }
   };
 
@@ -8147,7 +8163,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
             <div className="grid grid-cols-1 gap-2">
               <button
                 type="button"
-                disabled={isGeneratingExport !== null}
+                disabled={isGeneratingExport !== null || isPreparingExport}
                 onClick={() =>
                   executeExportTarget(shareModalTarget, 'PNG', shareModalTarget.mode)
                 }
@@ -8164,8 +8180,10 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                         : 'Share Picture (PNG)'}
                     </div>
                     <div className="text-[10px] text-slate-400 group-hover:text-black/80">
-                      {isGeneratingExport === 'PNG'
-                        ? 'Processing PNG...'
+                      {isPreparingExport
+                        ? 'Preparing Picture...'
+                        : isGeneratingExport === 'PNG'
+                        ? 'Opening Share...'
                         : shareModalTarget.mode === 'DOWNLOAD'
                         ? 'HD Image mobile gallery / Downloads mein save karein'
                         : 'Tap karein → WhatsApp / Share apps khulengi'}
@@ -8181,7 +8199,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
 
               <button
                 type="button"
-                disabled={isGeneratingExport !== null}
+                disabled={isGeneratingExport !== null || isPreparingExport}
                 onClick={() =>
                   executeExportTarget(shareModalTarget, 'PDF', shareModalTarget.mode)
                 }
@@ -8198,8 +8216,10 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                         : 'Share PDF Document'}
                     </div>
                     <div className="text-[10px] text-slate-400 group-hover:text-black/80">
-                      {isGeneratingExport === 'PDF'
-                        ? 'Processing PDF...'
+                      {isPreparingExport
+                        ? 'Preparing PDF...'
+                        : isGeneratingExport === 'PDF'
+                        ? 'Opening Share...'
                         : shareModalTarget.mode === 'DOWNLOAD'
                         ? 'A4 Official PDF mobile mein save karein'
                         : 'Tap karein → WhatsApp / Share apps khulengi'}
@@ -8284,9 +8304,23 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                     } catch {
                       // ignore
                     }
-                    showSettingsToast(
-                      'Agar printer dialog browser preview ne roka ho to "Save PDF" dabaa kar print karein!'
-                    );
+                    try {
+                      const resp = await fetch(printPreviewState.pdfUrl);
+                      const blob = await resp.blob();
+                      const pdfFile = new File([blob], printPreviewState.fileName, {
+                        type: 'application/pdf',
+                      });
+                      await shareOrDownloadFile({
+                        file: pdfFile,
+                        title: `Print - ${printPreviewState.title}`,
+                        text: printPreviewState.title,
+                        alsoDownloadOnFallback: true,
+                      });
+                    } catch {
+                      showSettingsToast(
+                        'Direct print dialog unavailable — "Save PDF" dabaa kar print karein!'
+                      );
+                    }
                   }
                 }}
                 className="boss-flat-btn py-2.5 px-3 rounded-xl bg-[#F5B738] hover:bg-amber-400 text-black font-black text-xs flex items-center justify-center gap-1.5 cursor-pointer"

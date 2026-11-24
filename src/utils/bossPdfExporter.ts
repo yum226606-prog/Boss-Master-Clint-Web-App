@@ -2,7 +2,8 @@
  * Zero-dependency Pure TypeScript PDF & Share Helper for Boss Aluminium & Glass.
  * Converts high-resolution HTML5 Canvas renders into valid A4 %PDF-1.4 files,
  * triggers native Capacitor Share / Web Share API with pre-built File objects,
- * handles Blob downloads safely inside iframes & PWAs, and prints cleanly via hidden iframe.
+ * opens WhatsApp directly without unwanted device downloads when file-share is unavailable,
+ * handles Blob downloads safely for explicit Download actions, and prints cleanly via hidden iframe.
  */
 import { Capacitor } from '@capacitor/core';
 import { Share } from '@capacitor/share';
@@ -205,17 +206,31 @@ export const downloadBlobFile = (blob: Blob, filename: string): void => {
   setTimeout(() => URL.revokeObjectURL(url), 20000);
 };
 
+export const openExternalShareUrl = (url: string): void => {
+  if (!url || typeof document === 'undefined') return;
+  const a = document.createElement('a');
+  a.href = url;
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+};
+
 export const shareOrDownloadFile = async ({
   file,
   title,
   text,
-  alsoDownloadOnFallback = true,
+  alsoDownloadOnFallback = false,
+  openWhatsAppFallback,
 }: {
   file: File;
   title: string;
   text: string;
   alsoDownloadOnFallback?: boolean;
-}): Promise<'shared' | 'downloaded' | 'cancelled'> => {
+  openWhatsAppFallback?: string;
+}): Promise<'shared' | 'whatsapp' | 'downloaded' | 'cancelled'> => {
   // 1. Native Android / iOS Capacitor Share Sheet (shows WhatsApp & all installed apps)
   if (Capacitor.isNativePlatform()) {
     try {
@@ -238,16 +253,29 @@ export const shareOrDownloadFile = async ({
       if (msg.includes('cancel') || msg.includes('abort')) {
         return 'cancelled';
       }
-      // Fall through to Web Share API / download fallback
+      // Try Capacitor Share without files array (url / text fallback) before leaving native flow
+      try {
+        await Share.share({
+          title,
+          text,
+          dialogTitle: 'Share via WhatsApp or App',
+        });
+        return 'shared';
+      } catch (err2: unknown) {
+        const msg2 = err2 instanceof Error ? err2.message.toLowerCase() : String(err2 || '').toLowerCase();
+        if (msg2.includes('cancel') || msg2.includes('abort')) {
+          return 'cancelled';
+        }
+      }
     }
   }
 
   // 2. Web Share API with files (Android Chrome, iOS Safari, modern PWAs -> opens bottom app chooser sheet)
   if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
-    const supportsFileShare =
+    const canShareFiles =
       typeof navigator.canShare !== 'function' || navigator.canShare({ files: [file] });
 
-    if (supportsFileShare) {
+    if (canShareFiles) {
       try {
         await navigator.share({ title, text, files: [file] });
         return 'shared';
@@ -255,16 +283,32 @@ export const shareOrDownloadFile = async ({
         if (err instanceof Error && err.name === 'AbortError') {
           return 'cancelled';
         }
-        // If browser blocked file share or timed out user activation, continue cleanly to fallback
+      }
+    }
+
+    // If file sharing wasn't accepted by browser/WebView, still open OS share sheet with text/summary
+    try {
+      await navigator.share({ title, text });
+      return 'shared';
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        return 'cancelled';
       }
     }
   }
 
-  // 3. Fallback: Save directly to device Downloads folder
+  // 3. Direct WhatsApp Launch Fallback (NEVER save file when user specifically tapped Share!)
+  if (openWhatsAppFallback) {
+    openExternalShareUrl(openWhatsAppFallback);
+    return 'whatsapp';
+  }
+
+  // 4. Explicit download fallback (only when alsoDownloadOnFallback is true)
   if (alsoDownloadOnFallback) {
     downloadBlobFile(file, file.name);
     return 'downloaded';
   }
+
   return 'cancelled';
 };
 
