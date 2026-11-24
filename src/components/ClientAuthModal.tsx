@@ -53,6 +53,7 @@ import {
   getOrCreateClientDeviceId,
   getOrCreateDeviceMacFingerprint,
   hashPasswordSha256,
+  isManualLoggedOut,
   isOwnerIdentity,
   loadBiometricBinding,
   loadCachedMasterEngineConfig,
@@ -60,12 +61,15 @@ import {
   normalizeCnicDigits,
   normalizePhoneDigits,
   parseTimestampMs,
+  performCleanSupabaseAndStorageSignOut,
   requestMandatoryGpsLocation,
   resolveUserRole,
   saveActiveSessionToken,
   saveAuthSession,
   saveBiometricBinding,
   sendSupabaseEmailOtp,
+  setManualLoggedOut,
+  sortRowsByLatestTimestamp,
   StoredGpsLocation,
   syncEmailOtpVerifiedStatus,
   syncGpsToSupabaseUser,
@@ -74,6 +78,25 @@ import {
   verifyBiometricPasskey,
   verifySupabaseEmailOtp,
 } from '../utils/adminApiConfig';
+
+function isRowDeviceResetOrEmpty(row: any): boolean {
+  if (!row || typeof row !== 'object') return false;
+  const d = String(row.device_id ?? row.deviceId ?? '').trim();
+  return !d || d.toLowerCase() === 'null' || d.toLowerCase() === 'undefined' || d.startsWith('RESET_');
+}
+
+function buildRowPatchFilter(row: any, fallbackFilter = ''): string {
+  if (!row || typeof row !== 'object') return fallbackFilter;
+  const rid = String(row.id || '').trim();
+  if (rid) return `id=eq.${encodeURIComponent(rid)}`;
+  const rdev = String(row.device_id || '').trim();
+  if (rdev) return `device_id=eq.${encodeURIComponent(rdev)}`;
+  const remail = String(row.email || '').trim().toLowerCase();
+  if (remail && remail.includes('@')) return `email=ilike.${encodeURIComponent(remail)}`;
+  const rphone = String(row.phone || '').trim();
+  if (rphone) return `phone=eq.${encodeURIComponent(rphone)}`;
+  return fallbackFilter;
+}
 
 function validateCnicPhotoFile(file: File): Promise<{ ok: boolean; error?: string }> {
   return new Promise((resolve) => {
@@ -487,16 +510,33 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       matchedUac?.deviceId,
     ]
       .map((d) => String(d || '').trim())
-      .filter(Boolean);
+      .filter((d) => Boolean(d) && d.toLowerCase() !== 'null' && d.toLowerCase() !== 'undefined');
     const resetDevId = devCandidates.find((d) => d.startsWith('RESET_')) || '';
+    const existingMatchedRows = [matchedUser, matchedClientUser, matchedSub, matchedUac].filter(Boolean);
+    const isUnboundOrReset =
+      Boolean(resetDevId) ||
+      devCandidates.length === 0 ||
+      existingMatchedRows.some(isRowDeviceResetOrEmpty);
     const cloudDevId = resetDevId || devCandidates[0] || '';
     const effectiveDeviceId = isOwner
       ? cloudDevId && !cloudDevId.startsWith('RESET_')
         ? cloudDevId
         : activeDeviceId
-      : resetDevId || !cloudDevId
+      : isUnboundOrReset
       ? activeDeviceId
       : cloudDevId;
+
+    const latestForceLogoutTs = Math.max(
+      parseTimestampMs(matchedUser?.force_logout_at),
+      parseTimestampMs(matchedUser?.forced_logout_at),
+      parseTimestampMs(matchedClientUser?.force_logout_at),
+      parseTimestampMs(matchedClientUser?.forced_logout_at),
+      parseTimestampMs(matchedSub?.force_logout_at),
+      parseTimestampMs(matchedSub?.forced_logout_at),
+      parseTimestampMs(matchedUac?.force_logout_at),
+      parseTimestampMs(matchedUac?.forced_logout_at)
+    );
+    const safeLoginNow = Math.max(now, latestForceLogoutTs > 0 ? latestForceLogoutTs + 1000 : 0);
 
     const sessionToken = generateActiveSessionToken();
 
@@ -504,6 +544,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       session: {
         verified: true,
         deviceId: effectiveDeviceId,
+        userId: String(matchedUser?.id || matchedClientUser?.id || effectiveDeviceId),
         name: resolvedName,
         phone: resolvedPhone,
         email: resolvedEmail,
@@ -514,7 +555,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
             matchedUac?.shop_address ||
             fallbackAddress
         ),
-        loggedInAt: now,
+        loggedInAt: safeLoginNow,
         activeSessionToken: sessionToken,
         userRole: resolvedRole,
       },
@@ -529,7 +570,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     });
 
     if (!isOwner && preEval.status === 'BLOCKED') {
-      await supabase.auth.signOut().catch(() => {});
+      await performCleanSupabaseAndStorageSignOut(true).catch(() => {});
       setErrorMsg(`Account Blocked: ${preEval.reason || 'Suspended by Master Admin'}`);
       setInfoMsg(null);
       return false;
@@ -548,32 +589,33 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         }
       : {};
 
-    const buildFilter = (row: any) =>
-      row?.device_id
-        ? `device_id=eq.${encodeURIComponent(String(row.device_id))}`
-        : row?.email
-        ? `email=ilike.${encodeURIComponent(String(row.email))}`
-        : row?.phone
-        ? `phone=eq.${encodeURIComponent(String(row.phone))}`
-        : '';
+    const fallbackIdentityFilter = resolvedEmail
+      ? `email=ilike.${encodeURIComponent(resolvedEmail)}`
+      : resolvedPhone
+      ? `phone=eq.${encodeURIComponent(resolvedPhone)}`
+      : '';
 
-    const userFilter = buildFilter(matchedUser);
-    const clientUserFilter = buildFilter(matchedClientUser) || userFilter;
-    const subFilter = buildFilter(matchedSub) || userFilter;
+    const userFilter = buildRowPatchFilter(matchedUser, fallbackIdentityFilter);
+    const clientUserFilter = buildRowPatchFilter(matchedClientUser, fallbackIdentityFilter || userFilter);
+    const subFilter = buildRowPatchFilter(matchedSub, fallbackIdentityFilter || userFilter);
 
-    // Mark trial_used = true, refresh telemetry & save active_session_token for single-device lock
+    const shouldRebindDevice = Boolean(isUnboundOrReset && (!isOwner || resetDevId || !cloudDevId));
+
+    // Mark trial_used = true, refresh telemetry, bind current device_id if reset/empty, & save active_session_token
     const telemetryPatch: Record<string, any> = {
       trial_used: true,
       is_registered: true,
       is_online: true,
       active_session_token: sessionToken,
+      force_logout_at: null,
+      forced_logout_at: null,
       last_seen: nowIso,
       last_cloud_sync: now,
       mac_address: macAddress,
       device_model: deviceModel,
       fingerprint_enabled: true,
       ...ownerVipFields,
-      ...(resetDevId ? { device_id: activeDeviceId, user_id: activeDeviceId } : {}),
+      ...(shouldRebindDevice ? { device_id: effectiveDeviceId, user_id: effectiveDeviceId } : {}),
       ...(publicIp ? { ip_address: publicIp } : {}),
       ...(gps
         ? { latitude: gps.latitude, longitude: gps.longitude, location_url: gps.locationUrl }
@@ -583,12 +625,13 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     const subPatch: Record<string, any> = {
       trial_used: true,
       ...ownerVipFields,
-      ...(resetDevId ? { device_id: activeDeviceId } : {}),
+      ...(shouldRebindDevice ? { device_id: effectiveDeviceId } : {}),
       updated_at: nowIso,
       last_updated: now,
     };
 
     saveActiveSessionToken(sessionToken);
+    setManualLoggedOut(false);
 
     await Promise.all([
       userFilter
@@ -607,9 +650,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
             query: clientUserFilter,
             payload: {
               active_session_token: sessionToken,
+              force_logout_at: null,
+              forced_logout_at: null,
               is_online: true,
               last_seen: nowIso,
-              ...(resetDevId ? { device_id: activeDeviceId } : {}),
+              ...(shouldRebindDevice ? { device_id: effectiveDeviceId } : {}),
             },
             timeoutMs: 7000,
           })
@@ -649,15 +694,22 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
             matchedSub?.activated_until_ms,
             matchedSub?.activated_until,
             matchedSub?.subscription_expiry,
+            matchedSub?.expiry_date,
+            matchedSub?.expires_at,
             matchedSub?.trial_expires_at,
             matchedUser?.activated_until_ms,
             matchedUser?.activated_until,
             matchedUser?.subscription_expiry,
+            matchedUser?.expiry_date,
+            matchedUser?.expires_at,
             matchedUser?.trial_end,
             matchedClientUser?.activated_until_ms,
             matchedClientUser?.activated_until,
             matchedClientUser?.subscription_expiry,
+            matchedClientUser?.expiry_date,
+            matchedClientUser?.expires_at,
             matchedUac?.subscription_expiry,
+            matchedUac?.expiry_date,
             matchedUac?.subscriptionExpiresAt,
             matchedUac?.activatedUntil,
             matchedUac?.activated_until,
@@ -667,7 +719,13 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     const session: ClientAuthSession = {
       verified: true,
       deviceId: effectiveDeviceId,
-      userId: String(matchedUser?.user_id || matchedClientUser?.user_id || effectiveDeviceId),
+      userId: String(
+        matchedUser?.id ||
+          matchedClientUser?.id ||
+          matchedUser?.user_id ||
+          matchedClientUser?.user_id ||
+          effectiveDeviceId
+      ),
       name: resolvedName,
       phone: resolvedPhone,
       email: resolvedEmail,
@@ -703,7 +761,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           matchedSub?.cnic_back ||
           ''
       ),
-      loggedInAt: now,
+      loggedInAt: safeLoginNow,
       trialStartTime: trialStart,
       trialExpiresAt: isOwner ? 0 : cloudExpiry > 0 ? cloudExpiry : trialStart + TWO_DAYS_MS,
       activeSessionToken: sessionToken,
@@ -899,7 +957,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
               .trim()
               .toUpperCase() === 'BLOCKED' || Boolean(fullMatchedUser?.is_blocked);
           if (existingBlocked) {
-            await supabase.auth.signOut().catch(() => {});
+            await performCleanSupabaseAndStorageSignOut(true).catch(() => {});
             setErrorMsg(
               `Account Blocked: ${fullMatchedUser?.block_reason || 'Suspended by Master Admin'}`
             );
@@ -1003,7 +1061,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         !deviceComboMatch.allowMultiAccount
       ) {
         setPendingGoogleUser(null);
-        await supabase.auth.signOut().catch(() => {});
+        await performCleanSupabaseAndStorageSignOut(true).catch(() => {});
         setInfoMsg(null);
         setErrorMsg(
           `Is Device (${activeDeviceId}) par pehle se aik account registered hai. Duplicate account banana allowed nahi — apni purani ID se Login karein.`
@@ -1408,9 +1466,28 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         const targetDev = String(
           matchedUser?.device_id || matchedClientUser?.device_id || ''
         ).trim();
-        const userPatchQuery = targetDev
-          ? `device_id=eq.${encodeURIComponent(targetDev)}`
-          : `email=ilike.${encodeURIComponent(targetEmail)}`;
+        const isExistingReset =
+          !targetDev ||
+          targetDev.toLowerCase() === 'null' ||
+          targetDev.startsWith('RESET_') ||
+          isRowDeviceResetOrEmpty(matchedUser) ||
+          isRowDeviceResetOrEmpty(matchedClientUser) ||
+          isRowDeviceResetOrEmpty(matchedSub);
+        const finalBoundDeviceId = isExistingReset ? activeDeviceId : targetDev;
+        const userPatchQuery = buildRowPatchFilter(
+          matchedUser,
+          `email=ilike.${encodeURIComponent(targetEmail)}`
+        );
+        const clientPatchQuery = buildRowPatchFilter(
+          matchedClientUser,
+          `email=ilike.${encodeURIComponent(targetEmail)}`
+        );
+        const subPatchQuery = buildRowPatchFilter(
+          matchedSub,
+          `email=ilike.${encodeURIComponent(targetEmail)}`
+        );
+
+        setManualLoggedOut(false);
 
         const [uPatchRes, cuPatchRes] = await Promise.all([
           matchedUser
@@ -1419,6 +1496,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                 method: 'PATCH',
                 query: userPatchQuery,
                 payload: {
+                  device_id: finalBoundDeviceId,
+                  user_id: finalBoundDeviceId,
                   name: cleanName,
                   company_name: cleanCompany,
                   phone: cleanPhone,
@@ -1450,8 +1529,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                 upsert: true,
                 payload: {
                   id: generateSafeUUID(),
-                  device_id: targetDev || activeDeviceId,
-                  user_id: targetDev || activeDeviceId,
+                  device_id: finalBoundDeviceId,
+                  user_id: finalBoundDeviceId,
                   name: cleanName,
                   company_name: cleanCompany,
                   phone: cleanPhone,
@@ -1474,10 +1553,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
             table: 'client_users',
             method: matchedClientUser ? 'PATCH' : 'POST',
             ...(matchedClientUser
-              ? { query: userPatchQuery }
+              ? { query: clientPatchQuery }
               : { upsert: true }),
             payload: {
-              ...(matchedClientUser ? {} : { id: generateSafeUUID(), device_id: targetDev || activeDeviceId, email: gEmail, created_at: nowIso }),
+              ...(matchedClientUser ? {} : { id: generateSafeUUID(), email: gEmail, created_at: nowIso }),
+              device_id: finalBoundDeviceId,
               name: cleanName,
               company_name: cleanCompany,
               phone: cleanPhone,
@@ -1497,10 +1577,9 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
             ? callSupabaseProxy({
                 table: 'subscriptions',
                 method: 'PATCH',
-                query: matchedSub?.device_id
-                  ? `device_id=eq.${encodeURIComponent(String(matchedSub.device_id))}`
-                  : userPatchQuery,
+                query: subPatchQuery,
                 payload: {
+                  device_id: finalBoundDeviceId,
                   user_name: cleanName,
                   phone: cleanPhone,
                   cnic: cleanCnic,
@@ -1525,6 +1604,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
 
         const updatedMatchedUser = {
           ...(matchedUser || {}),
+          device_id: finalBoundDeviceId,
+          user_id: finalBoundDeviceId,
           name: cleanName,
           company_name: cleanCompany,
           phone: cleanPhone,
@@ -1538,6 +1619,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         };
         const updatedMatchedClient = {
           ...(matchedClientUser || {}),
+          device_id: finalBoundDeviceId,
           name: cleanName,
           company_name: cleanCompany,
           phone: cleanPhone,
@@ -1807,7 +1889,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     supabase.auth
       .getSession()
       .then(({ data }) => {
-        if (!mounted) return;
+        if (!mounted || isManualLoggedOut()) return;
         const u = data?.session?.user;
         if (u && isGoogleAuthUser(u)) {
           finalizeGoogleOAuthUser(u);
@@ -1816,7 +1898,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       .catch(() => {});
 
     const { data: authSub } = supabase.auth.onAuthStateChange((event, session) => {
-      if (!mounted || isForgotPasswordInProgressRef.current) return;
+      if (!mounted || isForgotPasswordInProgressRef.current || isManualLoggedOut()) return;
       if ((event === 'SIGNED_IN' || event === 'INITIAL_SESSION') && session?.user) {
         if (isGoogleAuthUser(session.user)) {
           finalizeGoogleOAuthUser(session.user);
@@ -1832,6 +1914,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         rawUrl.includes('access_token=');
       if (!isCallback) return;
 
+      setManualLoggedOut(false);
       Browser.close().catch(() => {});
       setIsGoogleAuthenticating(true);
       setErrorMsg(null);
@@ -1976,6 +2059,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     setInfoMsg(null);
     setShowSwitchToRegisterHint(false);
     setShowSwitchToLoginHint(false);
+    setManualLoggedOut(false);
     if (typeof navigator !== 'undefined' && navigator.onLine === false) {
       setErrorMsg('Internet band hai (Offline). Pehli baar Google Login ke liye Internet ON karein.');
       return;
@@ -2196,9 +2280,15 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       return false;
     };
 
-    const directUsers = Array.isArray(directUserRes.data) ? directUserRes.data : [];
-    const clientUsersList = Array.isArray(clientUsersRes.data) ? clientUsersRes.data : [];
-    const directSubs = Array.isArray(directSubRes.data) ? directSubRes.data : [];
+    const directUsers = sortRowsByLatestTimestamp(
+      Array.isArray(directUserRes.data) ? directUserRes.data : []
+    );
+    const clientUsersList = sortRowsByLatestTimestamp(
+      Array.isArray(clientUsersRes.data) ? clientUsersRes.data : []
+    );
+    const directSubs = sortRowsByLatestTimestamp(
+      Array.isArray(directSubRes.data) ? directSubRes.data : []
+    );
     const usersList = directUsers;
     const subsList = directSubs;
     const uacList = Array.isArray(masterCfg?.userAccessControl)
@@ -2348,10 +2438,27 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       matchedUac?.deviceId,
     ]
       .map((d) => String(d || '').trim())
-      .filter(Boolean);
+      .filter((d) => Boolean(d) && d.toLowerCase() !== 'null' && d.toLowerCase() !== 'undefined');
 
     const resetDeviceId = loginDevCandidates.find((d) => d.startsWith('RESET_')) || '';
+    const existingMatchedLoginRows = [matchedUser, matchedClientUser, matchedSub, matchedUac].filter(Boolean);
+    const isDeviceResetOrUnbound =
+      Boolean(resetDeviceId) ||
+      loginDevCandidates.length === 0 ||
+      existingMatchedLoginRows.some(isRowDeviceResetOrEmpty);
     const cloudDeviceId = resetDeviceId || loginDevCandidates[0] || '';
+
+    const latestForceLogoutTs = Math.max(
+      parseTimestampMs(matchedUser?.force_logout_at),
+      parseTimestampMs(matchedUser?.forced_logout_at),
+      parseTimestampMs(matchedClientUser?.force_logout_at),
+      parseTimestampMs(matchedClientUser?.forced_logout_at),
+      parseTimestampMs(matchedSub?.force_logout_at),
+      parseTimestampMs(matchedSub?.forced_logout_at),
+      parseTimestampMs(matchedUac?.force_logout_at),
+      parseTimestampMs(matchedUac?.forced_logout_at)
+    );
+    const safeLoginNow = Math.max(now, latestForceLogoutTs > 0 ? latestForceLogoutTs + 1000 : 0);
 
     // Optional new password save if legacy account had none
     const newPasswordHashToSave =
@@ -2377,6 +2484,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       is_registered: true,
       is_online: true,
       active_session_token: sessionToken,
+      force_logout_at: null,
+      forced_logout_at: null,
       last_seen: nowIso,
       last_cloud_sync: now,
       mac_address: macAddress,
@@ -2401,6 +2510,18 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           }
         : {}),
     };
+
+    const fallbackLoginFilter = targetEmailCheck
+      ? `email=ilike.${encodeURIComponent(targetEmailCheck)}`
+      : targetPhoneCheck
+      ? `phone=eq.${encodeURIComponent(targetPhoneCheck)}`
+      : formattedPhone
+      ? `phone=eq.${encodeURIComponent(formattedPhone)}`
+      : '';
+
+    const loginUserFilter = buildRowPatchFilter(matchedUser, fallbackLoginFilter);
+    const loginClientFilter = buildRowPatchFilter(matchedClientUser, fallbackLoginFilter || loginUserFilter);
+    const loginSubFilter = buildRowPatchFilter(matchedSub, fallbackLoginFilter || loginUserFilter);
 
     if (!matchedUser && isOwner) {
       const ownerName = String(
@@ -2461,61 +2582,52 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           timeoutMs: 8000,
         }),
       ]).catch(() => {});
-    } else if (resetDeviceId) {
-      const targetPhone =
-        matchedUser?.phone ||
-        matchedClientUser?.phone ||
-        matchedUac?.phone ||
-        matchedSub?.phone ||
-        formattedPhone;
-      const targetEmail =
-        matchedUser?.email ||
-        matchedClientUser?.email ||
-        matchedUac?.email ||
-        matchedSub?.email ||
-        (isEmailInput ? rawId.toLowerCase() : '');
-      const patchFilter =
-        matchedUser?.device_id && String(matchedUser.device_id).startsWith('RESET_')
-          ? `device_id=eq.${encodeURIComponent(resetDeviceId)}`
-          : targetPhone
-          ? `phone=eq.${encodeURIComponent(targetPhone)}`
-          : targetEmail
-          ? `email=ilike.${encodeURIComponent(targetEmail)}`
-          : `device_id=eq.${encodeURIComponent(resetDeviceId)}`;
-
+    } else if (isDeviceResetOrUnbound) {
+      // Admin triggered Device Reset (RESET_... / null / empty): smoothly allow login & bind activeDeviceId across all 3 tables
       await Promise.all([
-        callSupabaseProxy({
-          table: 'users',
-          method: 'PATCH',
-          query: patchFilter,
-          payload: {
-            device_id: activeDeviceId,
-            user_id: activeDeviceId,
-            ...commonTelemetryPayload,
-          },
-        }),
-        callSupabaseProxy({
-          table: 'client_users',
-          method: 'PATCH',
-          query: patchFilter,
-          payload: {
-            device_id: activeDeviceId,
-            active_session_token: sessionToken,
-            is_online: true,
-            last_seen: nowIso,
-          },
-        }).catch(() => ({ ok: false })),
-        callSupabaseProxy({
-          table: 'subscriptions',
-          method: 'PATCH',
-          query: patchFilter,
-          payload: {
-            device_id: activeDeviceId,
-            ...ownerVipFields,
-            last_updated: now,
-            updated_at: nowIso,
-          },
-        }),
+        loginUserFilter
+          ? callSupabaseProxy({
+              table: 'users',
+              method: 'PATCH',
+              query: loginUserFilter,
+              payload: {
+                device_id: activeDeviceId,
+                user_id: activeDeviceId,
+                ...commonTelemetryPayload,
+              },
+              timeoutMs: 7000,
+            }).catch(() => null)
+          : Promise.resolve(null),
+        loginClientFilter
+          ? callSupabaseProxy({
+              table: 'client_users',
+              method: 'PATCH',
+              query: loginClientFilter,
+              payload: {
+                device_id: activeDeviceId,
+                active_session_token: sessionToken,
+                force_logout_at: null,
+                forced_logout_at: null,
+                is_online: true,
+                last_seen: nowIso,
+              },
+              timeoutMs: 7000,
+            }).catch(() => null)
+          : Promise.resolve(null),
+        loginSubFilter
+          ? callSupabaseProxy({
+              table: 'subscriptions',
+              method: 'PATCH',
+              query: loginSubFilter,
+              payload: {
+                device_id: activeDeviceId,
+                ...ownerVipFields,
+                last_updated: now,
+                updated_at: nowIso,
+              },
+              timeoutMs: 7000,
+            }).catch(() => null)
+          : Promise.resolve(null),
       ]);
     } else if (enforceLock && cloudDeviceId && cloudDeviceId !== activeDeviceId) {
       setErrorMsg(
@@ -2523,53 +2635,53 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       );
       return false;
     } else {
-      const targetFilter = cloudDeviceId
-        ? `device_id=eq.${encodeURIComponent(cloudDeviceId)}`
-        : matchedUser?.phone || matchedClientUser?.phone
-        ? `phone=eq.${encodeURIComponent(matchedUser?.phone || matchedClientUser?.phone)}`
-        : matchedUser?.email || matchedClientUser?.email
-        ? `email=ilike.${encodeURIComponent(matchedUser?.email || matchedClientUser?.email)}`
-        : '';
-
-      if (targetFilter) {
-        await Promise.all([
-          callSupabaseProxy({
-            table: 'users',
-            method: 'PATCH',
-            query: targetFilter,
-            payload: {
-              ...(!cloudDeviceId ? { device_id: activeDeviceId, user_id: activeDeviceId } : {}),
-              ...commonTelemetryPayload,
-            },
-            timeoutMs: 6000,
-          }).catch(() => {}),
-          callSupabaseProxy({
-            table: 'client_users',
-            method: 'PATCH',
-            query: targetFilter,
-            payload: {
-              active_session_token: sessionToken,
-              is_online: true,
-              last_seen: nowIso,
-              ...(!cloudDeviceId ? { device_id: activeDeviceId } : {}),
-            },
-            timeoutMs: 6000,
-          }).catch(() => {}),
-        ]);
-      }
+      await Promise.all([
+        loginUserFilter
+          ? callSupabaseProxy({
+              table: 'users',
+              method: 'PATCH',
+              query: loginUserFilter,
+              payload: {
+                ...(!cloudDeviceId ? { device_id: activeDeviceId, user_id: activeDeviceId } : {}),
+                ...commonTelemetryPayload,
+              },
+              timeoutMs: 6000,
+            }).catch(() => {})
+          : Promise.resolve(null),
+        loginClientFilter
+          ? callSupabaseProxy({
+              table: 'client_users',
+              method: 'PATCH',
+              query: loginClientFilter,
+              payload: {
+                active_session_token: sessionToken,
+                force_logout_at: null,
+                forced_logout_at: null,
+                is_online: true,
+                last_seen: nowIso,
+                ...(!cloudDeviceId ? { device_id: activeDeviceId } : {}),
+              },
+              timeoutMs: 6000,
+            }).catch(() => {})
+          : Promise.resolve(null),
+      ]);
     }
 
     saveActiveSessionToken(sessionToken);
+    setManualLoggedOut(false);
 
     const trialStart =
-      Number(
-        matchedSub?.trial_start_ms ||
-          matchedSub?.trial_start_time ||
-          matchedUser?.trial_start_time ||
-          matchedClientUser?.trial_start_time ||
-          matchedUac?.trial_start_time ||
-          now
-      ) || now;
+      [
+        matchedSub?.trial_start_ms,
+        matchedSub?.trial_start_time,
+        matchedUser?.trial_start,
+        matchedUser?.trial_start_time,
+        matchedClientUser?.trial_start,
+        matchedClientUser?.trial_start_time,
+        matchedUac?.trial_start_time,
+      ]
+        .map(parseTimestampMs)
+        .find((t) => t > 0) || now;
 
     const cloudExpiry = isOwner
       ? 0
@@ -2579,30 +2691,43 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
             matchedSub?.activated_until_ms,
             matchedSub?.activated_until,
             matchedSub?.subscription_expiry,
+            matchedSub?.expiry_date,
+            matchedSub?.expires_at,
             matchedUser?.activated_until_ms,
             matchedUser?.activated_until,
             matchedUser?.subscription_expiry,
+            matchedUser?.expiry_date,
+            matchedUser?.expires_at,
             matchedClientUser?.activated_until_ms,
             matchedClientUser?.activated_until,
             matchedClientUser?.subscription_expiry,
+            matchedClientUser?.expiry_date,
+            matchedClientUser?.expires_at,
             matchedUac?.subscription_expiry,
+            matchedUac?.expiry_date,
             matchedUac?.subscriptionExpiresAt,
             matchedUac?.activatedUntil,
             matchedUac?.activated_until,
-          ].map((v) => (Number.isFinite(Number(v)) ? Number(v) : 0))
+          ].map(parseTimestampMs)
         );
 
     const sessionDeviceId = isOwner
       ? cloudDeviceId && !cloudDeviceId.startsWith('RESET_')
         ? cloudDeviceId
         : activeDeviceId
-      : resetDeviceId || !cloudDeviceId
+      : isDeviceResetOrUnbound
       ? activeDeviceId
       : cloudDeviceId;
     const session: ClientAuthSession = {
       verified: true,
       deviceId: sessionDeviceId,
-      userId: String(matchedUser?.user_id || matchedClientUser?.user_id || sessionDeviceId),
+      userId: String(
+        matchedUser?.id ||
+          matchedClientUser?.id ||
+          matchedUser?.user_id ||
+          matchedClientUser?.user_id ||
+          sessionDeviceId
+      ),
       name: String(
         matchedUser?.name ||
           matchedClientUser?.name ||
@@ -2626,7 +2751,25 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       ),
       selfieUrl: String(matchedUser?.selfie_url || ''),
       shopPhotoUrl: String(matchedUser?.shop_photo_url || ''),
-      loggedInAt: now,
+      cnicFrontUrl: String(
+        matchedUser?.cnic_front_url ||
+          matchedUser?.cnic_front ||
+          matchedClientUser?.cnic_front_url ||
+          matchedClientUser?.cnic_front ||
+          matchedSub?.cnic_front_url ||
+          matchedSub?.cnic_front ||
+          ''
+      ),
+      cnicBackUrl: String(
+        matchedUser?.cnic_back_url ||
+          matchedUser?.cnic_back ||
+          matchedClientUser?.cnic_back_url ||
+          matchedClientUser?.cnic_back ||
+          matchedSub?.cnic_back_url ||
+          matchedSub?.cnic_back ||
+          ''
+      ),
+      loggedInAt: safeLoginNow,
       trialStartTime: trialStart,
       trialExpiresAt: isOwner ? 0 : cloudExpiry > 0 ? cloudExpiry : trialStart + TWO_DAYS_MS,
       activeSessionToken: sessionToken,
@@ -2677,6 +2820,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     setInfoMsg(null);
     setShowSwitchToRegisterHint(false);
     setShowSwitchToLoginHint(false);
+    setManualLoggedOut(false);
     if (typeof navigator !== 'undefined' && navigator.onLine === false) {
       setErrorMsg('Internet band hai (Offline). Account login karne ke liye internet ON karein; login ke baad app offline bhi chale gi.');
       return;
@@ -2701,6 +2845,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     setInfoMsg(null);
     setShowSwitchToRegisterHint(false);
     setShowSwitchToLoginHint(false);
+    setManualLoggedOut(false);
 
     const saved = loadBiometricBinding();
     const enteredId = loginIdentifier.trim();
@@ -4248,7 +4393,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                     setErrorMsg(null);
                     setInfoMsg(null);
                     processedGoogleUserIdRef.current = null;
-                    await supabase.auth.signOut().catch(() => {});
+                    await performCleanSupabaseAndStorageSignOut(true).catch(() => {});
                   }}
                   className="boss-flat-btn px-3 py-2.5 rounded-xl bg-[#14181F] border border-slate-700 text-slate-300 hover:text-white text-xs font-bold flex items-center gap-1 cursor-pointer"
                 >

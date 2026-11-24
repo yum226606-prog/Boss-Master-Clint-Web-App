@@ -1,8 +1,12 @@
 /**
  * Zero-dependency Pure TypeScript PDF & Share Helper for Boss Aluminium & Glass.
- * Converts high-resolution HTML5 Canvas renders into valid A4 %PDF-1.4 files
- * and handles native Web Share API + Blob downloads safely inside iframes & PWAs.
+ * Converts high-resolution HTML5 Canvas renders into valid A4 %PDF-1.4 files,
+ * triggers native Capacitor Share / Web Share API with pre-built File objects,
+ * handles Blob downloads safely inside iframes & PWAs, and prints cleanly via hidden iframe.
  */
+import { Capacitor } from '@capacitor/core';
+import { Share } from '@capacitor/share';
+import { Filesystem, Directory } from '@capacitor/filesystem';
 
 const asciiToBytes = (str: string): Uint8Array => {
   const bytes = new Uint8Array(str.length);
@@ -23,6 +27,18 @@ const dataUrlToJpegBytes = (dataUrl: string): Uint8Array => {
   return bytes;
 };
 
+const blobToBase64 = (blob: Blob): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const res = typeof reader.result === 'string' ? reader.result : '';
+      const commaIdx = res.indexOf(',');
+      resolve(commaIdx >= 0 ? res.slice(commaIdx + 1) : res);
+    };
+    reader.onerror = () => reject(reader.error || new Error('Failed to encode file'));
+    reader.readAsDataURL(blob);
+  });
+
 export interface PdfPageImage {
   jpegBytes: Uint8Array;
   widthPx: number;
@@ -36,13 +52,6 @@ export const buildPdfFromJpegPages = (pages: PdfPageImage[]): Blob => {
   const pageWidthPt = 595.28;
   const pageHeightPt = 841.89;
 
-  // Object numbering:
-  // 1 = Catalog
-  // 2 = Pages
-  // For page i (0-based):
-  //   pageObj = 3 + i * 3
-  //   contentObj = 4 + i * 3
-  //   imgObj = 5 + i * 3
   const pageObjIds: number[] = [];
   const objects: { id: number; chunks: Uint8Array[] }[] = [];
 
@@ -188,11 +197,12 @@ export const downloadBlobFile = (blob: Blob, filename: string): void => {
   const a = document.createElement('a');
   a.href = url;
   a.download = filename;
+  a.rel = 'noopener';
   a.style.display = 'none';
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 15000);
+  setTimeout(() => URL.revokeObjectURL(url), 20000);
 };
 
 export const shareOrDownloadFile = async ({
@@ -206,26 +216,133 @@ export const shareOrDownloadFile = async ({
   text: string;
   alsoDownloadOnFallback?: boolean;
 }): Promise<'shared' | 'downloaded' | 'cancelled'> => {
-  const canNativeShare =
-    typeof navigator !== 'undefined' &&
-    typeof navigator.share === 'function' &&
-    (typeof navigator.canShare !== 'function' || navigator.canShare({ files: [file] }));
-
-  if (canNativeShare) {
+  // 1. Native Android / iOS Capacitor Share Sheet (shows WhatsApp & all installed apps)
+  if (Capacitor.isNativePlatform()) {
     try {
-      await navigator.share({ title, text, files: [file] });
+      const base64Data = await blobToBase64(file);
+      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const written = await Filesystem.writeFile({
+        path: safeName,
+        data: base64Data,
+        directory: Directory.Cache,
+      });
+      await Share.share({
+        title,
+        text,
+        files: [written.uri],
+        dialogTitle: 'Share via WhatsApp or App',
+      });
       return 'shared';
     } catch (err: unknown) {
-      if (err instanceof Error && err.name === 'AbortError') {
+      const msg = err instanceof Error ? err.message.toLowerCase() : String(err || '').toLowerCase();
+      if (msg.includes('cancel') || msg.includes('abort')) {
         return 'cancelled';
       }
-      // Browser/iframe blocked file share gesture -> fall through to direct download
+      // Fall through to Web Share API / download fallback
     }
   }
 
+  // 2. Web Share API with files (Android Chrome, iOS Safari, modern PWAs -> opens bottom app chooser sheet)
+  if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+    const supportsFileShare =
+      typeof navigator.canShare !== 'function' || navigator.canShare({ files: [file] });
+
+    if (supportsFileShare) {
+      try {
+        await navigator.share({ title, text, files: [file] });
+        return 'shared';
+      } catch (err: unknown) {
+        if (err instanceof Error && err.name === 'AbortError') {
+          return 'cancelled';
+        }
+        // If browser blocked file share or timed out user activation, continue cleanly to fallback
+      }
+    }
+  }
+
+  // 3. Fallback: Save directly to device Downloads folder
   if (alsoDownloadOnFallback) {
     downloadBlobFile(file, file.name);
     return 'downloaded';
   }
   return 'cancelled';
 };
+
+/**
+ * Triggers a clean A4 print dialog via a temporary hidden iframe containing the exact rendered image.
+ * Returns true if the browser actually opened the print dialog (`beforeprint` fired), false otherwise.
+ */
+export const triggerIframePrint = (imageDataUrl: string, title: string): Promise<boolean> =>
+  new Promise((resolve) => {
+    if (typeof document === 'undefined' || !imageDataUrl) {
+      resolve(false);
+      return;
+    }
+
+    const iframe = document.createElement('iframe');
+    iframe.style.position = 'fixed';
+    iframe.style.right = '0';
+    iframe.style.bottom = '0';
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.border = '0';
+    iframe.style.opacity = '0';
+    iframe.style.pointerEvents = 'none';
+    iframe.setAttribute('aria-hidden', 'true');
+
+    let settled = false;
+    const cleanup = (didPrint: boolean) => {
+      if (settled) return;
+      settled = true;
+      setTimeout(() => {
+        if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+      }, 2500);
+      resolve(didPrint);
+    };
+
+    const safeTitle = String(title || 'Boss Aluminium & Glass')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+
+    iframe.onload = () => {
+      const win = iframe.contentWindow;
+      if (!win) {
+        cleanup(false);
+        return;
+      }
+      let beforePrintFired = false;
+      const onBeforePrint = () => {
+        beforePrintFired = true;
+      };
+      try {
+        win.addEventListener('beforeprint', onBeforePrint, { once: true });
+        win.focus();
+        win.print();
+      } catch {
+        cleanup(false);
+        return;
+      }
+      setTimeout(() => {
+        cleanup(beforePrintFired);
+      }, 350);
+    };
+
+    iframe.srcdoc = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>${safeTitle}</title>
+<style>
+  @page { size: A4 portrait; margin: 0; }
+  html, body { margin: 0; padding: 0; background: #fff; }
+  img { width: 100%; max-width: 210mm; height: auto; display: block; margin: 0 auto; }
+</style>
+</head>
+<body>
+  <img src="${imageDataUrl}" alt="${safeTitle}" />
+</body>
+</html>`;
+
+    document.body.appendChild(iframe);
+    setTimeout(() => cleanup(false), 3000);
+  });

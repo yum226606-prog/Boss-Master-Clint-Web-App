@@ -130,10 +130,12 @@ import {
   mergeDgSeriesRates,
   resolveSectionRate,
 } from '../utils/bossDefaultRates';
+import { Capacitor } from '@capacitor/core';
 import {
   canvasToPdfBlob,
   downloadBlobFile,
   shareOrDownloadFile,
+  triggerIframePrint,
 } from '../utils/bossPdfExporter';
 
 interface AppLayoutCalculatorScreenProps {
@@ -567,16 +569,25 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   };
 
   const [shareModalTarget, setShareModalTarget] = useState<
-    | { kind: 'CHART'; chartType: 'CUTTING' | 'LENGTH' | 'GLASS' | 'QUOTATION' }
-    | { kind: 'HISTORY'; item: SavedQuotation }
+    | { kind: 'CHART'; chartType: 'CUTTING' | 'LENGTH' | 'GLASS' | 'QUOTATION'; mode: 'SHARE' | 'DOWNLOAD' }
+    | { kind: 'HISTORY'; item: SavedQuotation; mode: 'SHARE' | 'DOWNLOAD' }
     | null
   >(null);
+  const [preparedExportAssets, setPreparedExportAssets] = useState<{
+    title: string;
+    pngFile: File;
+    pdfFile: File;
+    pngUrl: string;
+    pdfUrl: string;
+  } | null>(null);
+  const [isPreparingExport, setIsPreparingExport] = useState(false);
   const [isGeneratingExport, setIsGeneratingExport] = useState<'PNG' | 'PDF' | null>(null);
   const [printPreviewState, setPrintPreviewState] = useState<{
     title: string;
     previewImageUrl: string;
     pdfUrl: string;
     fileName: string;
+    pngFileName: string;
   } | null>(null);
   const a4WrapperRef = useRef<HTMLDivElement | null>(null);
   const [a4Scale, setA4Scale] = useState<number>(1);
@@ -1405,10 +1416,25 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     const loadImg = (src: string): Promise<HTMLImageElement | null> =>
       new Promise((resolve) => {
         if (!src) return resolve(null);
+        let settled = false;
+        const done = (img: HTMLImageElement | null) => {
+          if (settled) return;
+          settled = true;
+          resolve(img);
+        };
+        const timer = setTimeout(() => done(null), 2000);
         const im = new Image();
-        im.crossOrigin = 'anonymous';
-        im.onload = () => resolve(im);
-        im.onerror = () => resolve(null);
+        if (!src.startsWith('data:') && !src.startsWith('blob:')) {
+          im.crossOrigin = 'anonymous';
+        }
+        im.onload = () => {
+          clearTimeout(timer);
+          done(im);
+        };
+        im.onerror = () => {
+          clearTimeout(timer);
+          done(null);
+        };
         im.src = src;
       });
 
@@ -1698,10 +1724,25 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     const loadImg = (src: string): Promise<HTMLImageElement | null> =>
       new Promise((resolve) => {
         if (!src) return resolve(null);
+        let settled = false;
+        const done = (img: HTMLImageElement | null) => {
+          if (settled) return;
+          settled = true;
+          resolve(img);
+        };
+        const timer = setTimeout(() => done(null), 2000);
         const im = new Image();
-        im.crossOrigin = 'anonymous';
-        im.onload = () => resolve(im);
-        im.onerror = () => resolve(null);
+        if (!src.startsWith('data:') && !src.startsWith('blob:')) {
+          im.crossOrigin = 'anonymous';
+        }
+        im.onload = () => {
+          clearTimeout(timer);
+          done(im);
+        };
+        im.onerror = () => {
+          clearTimeout(timer);
+          done(null);
+        };
         im.src = src;
       });
 
@@ -1884,7 +1925,85 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     return { canvas, title };
   };
 
-  // Unified Export / Share Executor (PNG Picture OR Real Binary A4 PDF)
+  const buildExportFilesForTarget = async (
+    target:
+      | { kind: 'CHART'; chartType: 'CUTTING' | 'LENGTH' | 'GLASS' | 'QUOTATION' }
+      | { kind: 'HISTORY'; item: SavedQuotation }
+  ): Promise<{
+    title: string;
+    pngFile: File;
+    pdfFile: File;
+    pngUrl: string;
+    pdfUrl: string;
+  } | null> => {
+    const built =
+      target.kind === 'HISTORY'
+        ? await buildHistoryExportCanvas(target.item)
+        : await buildChartExportCanvas(target.chartType);
+    if (!built) return null;
+
+    const { canvas, title } = built;
+    const baseSlug =
+      target.kind === 'HISTORY'
+        ? `Boss-Quotation-${(target.item.customerName || 'Client').replace(/\s+/g, '-')}-${target.item.id}`
+        : `Boss-${target.chartType.toLowerCase()}-${Date.now()}`;
+
+    const pdfBlob = canvasToPdfBlob(canvas);
+    const pdfFile = new File([pdfBlob], `${baseSlug}.pdf`, { type: 'application/pdf' });
+
+    const pngBlob = await new Promise<Blob | null>((resolve) => {
+      try {
+        canvas.toBlob((b) => resolve(b), 'image/png');
+      } catch {
+        resolve(null);
+      }
+    });
+    if (!pngBlob) return null;
+    const pngFile = new File([pngBlob], `${baseSlug}.png`, { type: 'image/png' });
+
+    return {
+      title,
+      pngFile,
+      pdfFile,
+      pngUrl: URL.createObjectURL(pngFile),
+      pdfUrl: URL.createObjectURL(pdfFile),
+    };
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    setPreparedExportAssets((prev) => {
+      if (prev?.pngUrl) URL.revokeObjectURL(prev.pngUrl);
+      if (prev?.pdfUrl) URL.revokeObjectURL(prev.pdfUrl);
+      return null;
+    });
+    if (!shareModalTarget) {
+      setIsPreparingExport(false);
+      return;
+    }
+    setIsPreparingExport(true);
+    buildExportFilesForTarget(shareModalTarget)
+      .then((res) => {
+        if (cancelled) {
+          if (res?.pngUrl) URL.revokeObjectURL(res.pngUrl);
+          if (res?.pdfUrl) URL.revokeObjectURL(res.pdfUrl);
+          return;
+        }
+        setPreparedExportAssets(res);
+      })
+      .catch(() => {
+        if (!cancelled) setPreparedExportAssets(null);
+      })
+      .finally(() => {
+        if (!cancelled) setIsPreparingExport(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shareModalTarget]);
+
+  // Unified Export / Share Executor (uses pre-built files synchronously so mobile user gesture never expires)
   const executeExportTarget = async (
     target:
       | { kind: 'CHART'; chartType: 'CUTTING' | 'LENGTH' | 'GLASS' | 'QUOTATION' }
@@ -1895,100 +2014,94 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   ) => {
     setIsGeneratingExport(format);
     try {
-      const built =
-        target.kind === 'HISTORY'
-          ? await buildHistoryExportCanvas(target.item)
-          : await buildChartExportCanvas(target.chartType);
-      if (!built) {
-        showSettingsToast('Unable to render document for export.');
-        return;
-      }
+      let fileToExport: File | null = preparedExportAssets
+        ? format === 'PDF'
+          ? preparedExportAssets.pdfFile
+          : preparedExportAssets.pngFile
+        : null;
+      let docTitle = preparedExportAssets?.title || 'Official Quotation';
 
-      const { canvas, title } = built;
-      const baseSlug =
-        target.kind === 'HISTORY'
-          ? `Boss-Quotation-${(target.item.customerName || 'Client').replace(/\s+/g, '-')}-${target.item.id}`
-          : `Boss-${target.chartType.toLowerCase()}-${Date.now()}`;
-
-      let fileToExport: File;
-      if (format === 'PDF') {
-        const pdfBlob = canvasToPdfBlob(canvas);
-        fileToExport = new File([pdfBlob], `${baseSlug}.pdf`, { type: 'application/pdf' });
-      } else {
-        const pngBlob = await new Promise<Blob | null>((resolve) =>
-          canvas.toBlob((b) => resolve(b), 'image/png')
-        );
-        if (!pngBlob) {
-          showSettingsToast('Unable to encode Picture (PNG).');
+      if (!fileToExport) {
+        const freshlyBuilt = await buildExportFilesForTarget(target);
+        if (!freshlyBuilt) {
+          showSettingsToast('Unable to render document for export.');
           return;
         }
-        fileToExport = new File([pngBlob], `${baseSlug}.png`, { type: 'image/png' });
+        docTitle = freshlyBuilt.title;
+        fileToExport = format === 'PDF' ? freshlyBuilt.pdfFile : freshlyBuilt.pngFile;
+        URL.revokeObjectURL(freshlyBuilt.pngUrl);
+        URL.revokeObjectURL(freshlyBuilt.pdfUrl);
       }
 
       if (action === 'DOWNLOAD') {
         downloadBlobFile(fileToExport, fileToExport.name);
         showSettingsToast(
           customToastMsg ||
-            `✅ ${format === 'PDF' ? 'PDF Document' : 'Picture (PNG)'} downloaded: ${fileToExport.name}`
+            `✅ ${format === 'PDF' ? 'PDF Document' : 'Picture (PNG)'} mobile mein save ho gayi: ${fileToExport.name}`
         );
+        setShareModalTarget(null);
       } else {
         const shareResult = await shareOrDownloadFile({
           file: fileToExport,
-          title: `${companyName} - ${title}`,
+          title: `${companyName} - ${docTitle}`,
           text:
             target.kind === 'HISTORY'
               ? `${companyName} — Official Quotation for ${target.item.customerName || target.item.label} (Rs ${Math.round(
                   target.item.grandTotal
                 ).toLocaleString()})`
-              : `${companyName} — ${title} for ${customerName || 'Valued Client'}`,
+              : `${companyName} — ${docTitle} for ${customerName || 'Valued Client'}`,
           alsoDownloadOnFallback: true,
         });
         if (shareResult === 'shared') {
-          showSettingsToast(`✅ ${format === 'PDF' ? 'PDF Document' : 'Picture (PNG)'} shared!`);
+          showSettingsToast(`✅ ${format === 'PDF' ? 'PDF Document' : 'Picture (PNG)'} share ho gayi!`);
+          setShareModalTarget(null);
         } else if (shareResult === 'downloaded') {
           showSettingsToast(
-            `✅ ${format === 'PDF' ? 'PDF Document' : 'Picture (PNG)'} saved — ready to share on WhatsApp!`
+            `✅ ${format === 'PDF' ? 'PDF Document' : 'Picture (PNG)'} save ho gayi — ab WhatsApp par bhej sakte hain!`
           );
         }
       }
-      setShareModalTarget(null);
     } finally {
       setIsGeneratingExport(null);
     }
   };
 
-  // Smart Print Handler: runs native window.print() first; if blocked inside iframe/WebView, opens interactive Print Preview Page (NO forced download!)
+  // Direct Print Handler: tries native print directly first; if blocked/unsupported (iframe or WebView), opens interactive Print Page directly
   const handlePrintDocument = async (
     target:
       | { kind: 'CHART'; chartType: 'CUTTING' | 'LENGTH' | 'GLASS' | 'QUOTATION' }
       | { kind: 'HISTORY'; item: SavedQuotation }
   ) => {
-    const t0 = Date.now();
-    let printErrored = false;
-    try {
-      window.print();
-    } catch {
-      printErrored = true;
-    }
-    const elapsed = Date.now() - t0;
     const isIframe = typeof window !== 'undefined' && window.self !== window.top;
+    const isNative = Capacitor.isNativePlatform();
 
-    // If native print dialog paused (>140ms) outside a blocked iframe, print dialog opened natively!
-    if (!printErrored && !isIframe && elapsed >= 140) {
-      return;
-    }
-    // Even in iframe, if native dialog blocked for >= 250ms it actually opened!
-    if (!printErrored && elapsed >= 250) {
-      return;
+    if (!isIframe && !isNative && target.kind === 'CHART') {
+      let beforePrintFired = false;
+      const onBeforePrint = () => {
+        beforePrintFired = true;
+      };
+      let printErrored = false;
+      const t0 = Date.now();
+      try {
+        window.addEventListener('beforeprint', onBeforePrint, { once: true });
+        window.print();
+      } catch {
+        printErrored = true;
+      } finally {
+        window.removeEventListener('beforeprint', onBeforePrint);
+      }
+      const elapsed = Date.now() - t0;
+      if (!printErrored && (beforePrintFired || elapsed >= 140)) {
+        return;
+      }
     }
 
-    // Native print was blocked or non-blocking inside frame -> open visual Print Page Preview (NOT auto-download!)
     const built =
       target.kind === 'HISTORY'
         ? await buildHistoryExportCanvas(target.item)
         : await buildChartExportCanvas(target.chartType);
     if (!built) {
-      showSettingsToast('Unable to prepare print page.');
+      showSettingsToast('Print page tayyar karne mein masla aaya.');
       return;
     }
 
@@ -2008,8 +2121,13 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
         previewImageUrl,
         pdfUrl,
         fileName: `${baseSlug}.pdf`,
+        pngFileName: `${baseSlug}.png`,
       };
     });
+
+    if (!isNative) {
+      await triggerIframePrint(previewImageUrl, title);
+    }
   };
 
   const getWhatsAppShareUrl = (
@@ -2270,38 +2388,38 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
       {/* =================================================================== */}
       {/* UNIFIED STICKY COMPACT MOBILE & DESKTOP HEADER BAR                  */}
       {/* =================================================================== */}
-      <div className="sticky top-0 z-40 rounded-xl bg-[#0C0F14]/95 backdrop-blur border border-[#2B3441] p-1.5 sm:p-2.5 space-y-1 sm:space-y-1.5 shadow-lg no-print">
+      <div className="sticky top-0 z-40 rounded-xl bg-[#0C0F14]/95 backdrop-blur border border-[#2B3441] px-2.5 py-2.5 sm:px-3.5 sm:py-3 space-y-2 shadow-lg no-print">
         {/* Row 1: Brand + Compact Action Pills (Done, Theme, Download/Install) */}
-        <div className="flex items-center justify-between gap-1.5">
+        <div className="flex items-center justify-between gap-2 min-h-[54px] sm:min-h-[60px] py-0.5">
           <div
             onClick={() => onSelectTab('WINDOWS')}
-            className="flex items-center gap-1.5 sm:gap-2 min-w-0 cursor-pointer flex-1"
+            className="flex items-center gap-2 sm:gap-2.5 min-w-0 cursor-pointer flex-1"
           >
             <img
               src={mainLogoUrl}
               alt="Boss Aluminium Lion Emblem"
-              className="w-8 h-8 sm:w-9 sm:h-9 rounded-full object-cover border-2 border-[#F5B738] shrink-0 shadow-sm"
+              className="w-10 h-10 sm:w-11 sm:h-11 rounded-full object-cover border-2 border-[#F5B738] shrink-0 shadow-sm"
             />
-            <div className="min-w-0 flex-1">
-              <div className="text-xs sm:text-sm font-black text-[#F5B738] tracking-wide truncate leading-tight">
+            <div className="min-w-0 flex-1 space-y-0.5">
+              <div className="text-[13px] sm:text-base font-black text-[#F5B738] tracking-wide truncate leading-tight">
                 {companyName || 'BOSS ALUMINIUM & GLASS'}
               </div>
-              <div className="text-[9px] sm:text-[10px] text-amber-200/80 font-medium truncate leading-tight">
+              <div className="text-[10px] sm:text-xs text-amber-200/85 font-medium truncate leading-tight">
                 {companyTagline || 'Aluminium & Glass Fabrication Works'}
               </div>
             </div>
           </div>
 
-          <div className="flex items-center gap-1 shrink-0">
+          <div className="flex items-center gap-1.5 shrink-0">
             {layoutConfig.showDoneQuotationButton && (
               <button
                 type="button"
                 onClick={() => onSelectTab('QUOTATION')}
-                className="w-7 h-7 rounded-full bg-[#F5B738] text-black hover:bg-amber-400 flex items-center justify-center transition-colors cursor-pointer shrink-0"
+                className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-[#F5B738] text-black hover:bg-amber-400 flex items-center justify-center transition-colors cursor-pointer shrink-0"
                 title="View Official Quotation"
                 aria-label="View Official Quotation"
               >
-                <CheckCircle2 className="w-3.5 h-3.5" />
+                <CheckCircle2 className="w-4 h-4" />
               </button>
             )}
 
@@ -2309,11 +2427,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               <button
                 type="button"
                 onClick={onOpenThemeStudio}
-                className="w-7 h-7 rounded-full bg-[#1C222B] border border-[#F5B738]/70 text-[#F5B738] hover:bg-[#F5B738] hover:text-black flex items-center justify-center transition-colors cursor-pointer shrink-0"
+                className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-[#1C222B] border border-[#F5B738]/70 text-[#F5B738] hover:bg-[#F5B738] hover:text-black flex items-center justify-center transition-colors cursor-pointer shrink-0"
                 title={`Theme Studio (${currentThemeName})`}
                 aria-label={`Theme Studio (${currentThemeName})`}
               >
-                <Palette className="w-3.5 h-3.5" />
+                <Palette className="w-4 h-4" />
               </button>
             )}
 
@@ -2330,11 +2448,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                 type="button"
                 onClick={onTriggerInstall}
                 onDoubleClick={onTriggerInstall}
-                className="w-7 h-7 rounded-full bg-[#1C222B] border border-[#F5B738]/70 text-[#F5B738] hover:bg-[#F5B738] hover:text-black flex items-center justify-center transition-colors cursor-pointer shrink-0"
+                className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-[#1C222B] border border-[#F5B738]/70 text-[#F5B738] hover:bg-[#F5B738] hover:text-black flex items-center justify-center transition-colors cursor-pointer shrink-0"
                 title="Install Mobile App (Android / iOS / PC)"
                 aria-label="Install Mobile App"
               >
-                <Download className="w-3.5 h-3.5" />
+                <Download className="w-4 h-4" />
               </button>
             )}
           </div>
@@ -2466,32 +2584,9 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
           )}
         </div>
 
-        {/* Row 3: Slim Client Utility Strip (Unit Switcher + Plan Badge + Request + Rates + Logout) */}
-        <div className="flex items-center justify-between gap-1 px-1.5 sm:px-2 py-0.5 rounded-lg bg-[#14181F] border border-[#2B3441] text-[10px]">
-          <div className="flex items-center gap-1 min-w-0 overflow-x-auto no-scrollbar">
-            {(
-              [
-                { id: 'INCH_SUTAR', label: 'Inch & Sutar' },
-                { id: 'CM', label: 'Centimeter' },
-                { id: 'MM', label: 'Millimeter' },
-              ] as const
-            ).map((u) => (
-              <button
-                key={u.id}
-                type="button"
-                onClick={() => onSetMeasurementUnit(u.id)}
-                className={`boss-flat-btn h-6 px-1.5 sm:px-2 rounded-md text-[9.5px] sm:text-[10px] font-extrabold whitespace-nowrap transition-colors cursor-pointer shrink-0 flex items-center justify-center ${
-                  measurementUnit === u.id
-                    ? 'bg-[#F5B738] text-black'
-                    : 'bg-[#0C0F14] border border-slate-700 text-slate-200 hover:border-[#F5B738]'
-                }`}
-              >
-                {u.label}
-              </button>
-            ))}
-          </div>
-
-          <div className="flex items-center gap-1 shrink-0">
+        {/* Row 3: Client Utility Strip + Dedicated Full-Width Unit Switcher Row on Next Line */}
+        <div className="flex flex-col gap-1.5 px-1.5 sm:px-2.5 py-1.5 rounded-lg bg-[#14181F] border border-[#2B3441] text-[10px]">
+          <div className="flex items-center justify-between sm:justify-end gap-1 flex-wrap w-full">
             {/* Exact Role Badge (OWNER VIP / ADMIN / CLIENT) + Active Plan Badge */}
             {(() => {
               const effectiveNow =
@@ -2646,6 +2741,29 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                 <LogOut className="w-3 h-3" />
               </button>
             )}
+          </div>
+
+          <div className="grid grid-cols-3 gap-1 w-full pt-1 border-t border-slate-800/80">
+            {(
+              [
+                { id: 'INCH_SUTAR', label: 'Inch & Sutar' },
+                { id: 'CM', label: 'Centimeter' },
+                { id: 'MM', label: 'Millimeter' },
+              ] as const
+            ).map((u) => (
+              <button
+                key={u.id}
+                type="button"
+                onClick={() => onSetMeasurementUnit(u.id)}
+                className={`boss-flat-btn h-5 py-0 px-1.5 rounded text-[9.5px] sm:text-[10px] font-extrabold leading-none whitespace-nowrap transition-colors cursor-pointer flex items-center justify-center ${
+                  measurementUnit === u.id
+                    ? 'bg-[#F5B738] text-black shadow-sm'
+                    : 'bg-[#0C0F14] border border-slate-700 text-slate-200 hover:border-[#F5B738]'
+                }`}
+              >
+                {u.label}
+              </button>
+            ))}
           </div>
         </div>
 
@@ -4610,17 +4728,19 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               <button
                 type="button"
                 onClick={() =>
-                  executeExportTarget({ kind: 'CHART', chartType: 'CUTTING' }, 'PDF', 'DOWNLOAD')
+                  setShareModalTarget({ kind: 'CHART', chartType: 'CUTTING', mode: 'DOWNLOAD' })
                 }
-                className="boss-flat-btn w-8 h-8 rounded-lg bg-[#0C0F14] border border-slate-700 hover:border-[#F5B738] text-[#F5B738] flex items-center justify-center cursor-pointer"
-                title="Download PDF"
-                aria-label="Download PDF"
+                className="boss-flat-btn w-8 h-8 rounded-lg bg-[#60A5FA] hover:bg-sky-400 text-black flex items-center justify-center cursor-pointer"
+                title="Download (Pic or PDF)"
+                aria-label="Download (Pic or PDF)"
               >
-                <FileText className="w-4 h-4" />
+                <Download className="w-4 h-4" />
               </button>
               <button
                 type="button"
-                onClick={() => setShareModalTarget({ kind: 'CHART', chartType: 'CUTTING' })}
+                onClick={() =>
+                  setShareModalTarget({ kind: 'CHART', chartType: 'CUTTING', mode: 'SHARE' })
+                }
                 className="boss-flat-btn w-8 h-8 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black flex items-center justify-center transition-colors cursor-pointer"
                 title="Share (Pic or PDF)"
                 aria-label="Share (Pic or PDF)"
@@ -4774,17 +4894,19 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               <button
                 type="button"
                 onClick={() =>
-                  executeExportTarget({ kind: 'CHART', chartType: 'LENGTH' }, 'PDF', 'DOWNLOAD')
+                  setShareModalTarget({ kind: 'CHART', chartType: 'LENGTH', mode: 'DOWNLOAD' })
                 }
-                className="boss-flat-btn w-8 h-8 rounded-lg bg-[#0C0F14] border border-slate-700 hover:border-[#F5B738] text-[#F5B738] flex items-center justify-center cursor-pointer"
-                title="Download PDF"
-                aria-label="Download PDF"
+                className="boss-flat-btn w-8 h-8 rounded-lg bg-[#60A5FA] hover:bg-sky-400 text-black flex items-center justify-center cursor-pointer"
+                title="Download (Pic or PDF)"
+                aria-label="Download (Pic or PDF)"
               >
-                <FileText className="w-4 h-4" />
+                <Download className="w-4 h-4" />
               </button>
               <button
                 type="button"
-                onClick={() => setShareModalTarget({ kind: 'CHART', chartType: 'LENGTH' })}
+                onClick={() =>
+                  setShareModalTarget({ kind: 'CHART', chartType: 'LENGTH', mode: 'SHARE' })
+                }
                 className="boss-flat-btn w-8 h-8 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black flex items-center justify-center transition-colors cursor-pointer"
                 title="Share (Pic or PDF)"
                 aria-label="Share (Pic or PDF)"
@@ -4962,17 +5084,19 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   <button
                     type="button"
                     onClick={() =>
-                      executeExportTarget({ kind: 'CHART', chartType: 'GLASS' }, 'PDF', 'DOWNLOAD')
+                      setShareModalTarget({ kind: 'CHART', chartType: 'GLASS', mode: 'DOWNLOAD' })
                     }
                     className="boss-flat-btn w-8 h-8 rounded-lg bg-[#60A5FA] hover:bg-sky-400 text-black flex items-center justify-center cursor-pointer"
-                    title="Download PDF"
-                    aria-label="Download PDF"
+                    title="Download (Pic or PDF)"
+                    aria-label="Download (Pic or PDF)"
                   >
-                    <FileText className="w-4 h-4" />
+                    <Download className="w-4 h-4" />
                   </button>
                   <button
                     type="button"
-                    onClick={() => setShareModalTarget({ kind: 'CHART', chartType: 'GLASS' })}
+                    onClick={() =>
+                      setShareModalTarget({ kind: 'CHART', chartType: 'GLASS', mode: 'SHARE' })
+                    }
                     className="boss-flat-btn w-8 h-8 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black flex items-center justify-center cursor-pointer"
                     title="Share (Pic or PDF)"
                     aria-label="Share (Pic or PDF)"
@@ -5268,18 +5392,20 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                 <button
                   type="button"
                   onClick={() =>
-                    executeExportTarget({ kind: 'CHART', chartType: 'QUOTATION' }, 'PDF', 'DOWNLOAD')
+                    setShareModalTarget({ kind: 'CHART', chartType: 'QUOTATION', mode: 'DOWNLOAD' })
                   }
                   className="boss-flat-btn w-8 h-8 rounded-lg bg-[#60A5FA] hover:bg-sky-400 text-black flex items-center justify-center cursor-pointer shrink-0"
-                  title="Download PDF"
-                  aria-label="Download PDF"
+                  title="Download (Pic or PDF)"
+                  aria-label="Download (Pic or PDF)"
                 >
-                  <FileText className="w-4 h-4" />
+                  <Download className="w-4 h-4" />
                 </button>
 
                 <button
                   type="button"
-                  onClick={() => setShareModalTarget({ kind: 'CHART', chartType: 'QUOTATION' })}
+                  onClick={() =>
+                    setShareModalTarget({ kind: 'CHART', chartType: 'QUOTATION', mode: 'SHARE' })
+                  }
                   className="boss-flat-btn w-8 h-8 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black flex items-center justify-center transition-colors cursor-pointer shrink-0"
                   title="Share (Pic or PDF)"
                   aria-label="Share (Pic or PDF)"
@@ -6237,8 +6363,17 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                       </button>
                       <button
                         type="button"
-                        onClick={() => setShareModalTarget({ kind: 'HISTORY', item })}
-                        className="boss-flat-btn w-8 h-8 rounded-lg bg-[#0C0F14] border border-sky-500/70 text-sky-300 hover:bg-sky-500 hover:text-black flex items-center justify-center cursor-pointer"
+                        onClick={() => setShareModalTarget({ kind: 'HISTORY', item, mode: 'DOWNLOAD' })}
+                        className="boss-flat-btn w-8 h-8 rounded-lg bg-[#60A5FA] hover:bg-sky-400 text-black flex items-center justify-center cursor-pointer"
+                        title="Download (Pic or PDF)"
+                        aria-label="Download (Pic or PDF)"
+                      >
+                        <Download className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShareModalTarget({ kind: 'HISTORY', item, mode: 'SHARE' })}
+                        className="boss-flat-btn w-8 h-8 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-black flex items-center justify-center cursor-pointer"
                         title="Share (Pic or PDF)"
                         aria-label="Share (Pic or PDF)"
                       >
@@ -6248,8 +6383,8 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                         type="button"
                         onClick={() => handlePrintDocument({ kind: 'HISTORY', item })}
                         className="boss-flat-btn w-8 h-8 rounded-lg bg-[#0C0F14] border border-slate-700 hover:border-[#F5B738] text-slate-200 flex items-center justify-center cursor-pointer"
-                        title="Print / Download PDF"
-                        aria-label="Print / Download PDF"
+                        title="Print Page (A4)"
+                        aria-label="Print Page (A4)"
                       >
                         <Printer className="w-4 h-4" />
                       </button>
@@ -7960,22 +8095,42 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
       )}
 
       {/* =================================================================== */}
-      {/* MODAL: 2-OPTION SHARE CHOOSER (PICTURE PNG vs PDF DOCUMENT)         */}
+      {/* MODAL: 2-OPTION SHARE / DOWNLOAD CHOOSER (PICTURE PNG vs PDF)       */}
       {/* =================================================================== */}
       {shareModalTarget && (
         <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-3 overflow-y-auto no-print">
-          <div className="bg-[#0C1017] border-2 border-emerald-500/80 rounded-2xl max-w-sm w-full p-4 space-y-3 shadow-2xl">
+          <div
+            className={`bg-[#0C1017] border-2 rounded-2xl max-w-sm w-full p-4 space-y-3 shadow-2xl ${
+              shareModalTarget.mode === 'DOWNLOAD' ? 'border-sky-400/80' : 'border-emerald-500/80'
+            }`}
+          >
             <div className="flex items-center justify-between border-b border-slate-800 pb-2">
               <div className="flex items-center gap-2 min-w-0">
-                <div className="w-8 h-8 rounded-xl bg-emerald-500 text-black flex items-center justify-center shrink-0">
-                  <Share2 className="w-4 h-4" />
+                <div
+                  className={`w-8 h-8 rounded-xl text-black flex items-center justify-center shrink-0 ${
+                    shareModalTarget.mode === 'DOWNLOAD' ? 'bg-[#60A5FA]' : 'bg-emerald-500'
+                  }`}
+                >
+                  {shareModalTarget.mode === 'DOWNLOAD' ? (
+                    <Download className="w-4 h-4" />
+                  ) : (
+                    <Share2 className="w-4 h-4" />
+                  )}
                 </div>
                 <div className="min-w-0">
-                  <h3 className="text-sm font-black text-emerald-400 truncate">
-                    Share Options
+                  <h3
+                    className={`text-sm font-black truncate ${
+                      shareModalTarget.mode === 'DOWNLOAD' ? 'text-sky-400' : 'text-emerald-400'
+                    }`}
+                  >
+                    {shareModalTarget.mode === 'DOWNLOAD' ? 'Download Options' : 'Share Options'}
                   </h3>
                   <p className="text-[10.5px] text-slate-400 truncate">
-                    Picture (PNG) ya PDF select karein
+                    {isPreparingExport
+                      ? 'Preparing Picture & PDF...'
+                      : shareModalTarget.mode === 'DOWNLOAD'
+                      ? 'Mobile mein Picture (PNG) ya PDF save karein'
+                      : 'Picture ya PDF select kar ke WhatsApp/App par share karein'}
                   </p>
                 </div>
               </div>
@@ -7993,7 +8148,9 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               <button
                 type="button"
                 disabled={isGeneratingExport !== null}
-                onClick={() => executeExportTarget(shareModalTarget, 'PNG', 'SHARE')}
+                onClick={() =>
+                  executeExportTarget(shareModalTarget, 'PNG', shareModalTarget.mode)
+                }
                 className="boss-flat-btn w-full p-3 rounded-xl bg-[#14181F] border-2 border-emerald-500/70 hover:bg-emerald-500 hover:text-black text-left flex items-center justify-between gap-2 transition-colors cursor-pointer disabled:opacity-60 group"
               >
                 <div className="flex items-center gap-2.5 min-w-0">
@@ -8002,20 +8159,32 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   </div>
                   <div className="min-w-0">
                     <div className="text-xs font-black text-white group-hover:text-black">
-                      Share Picture (PNG)
+                      {shareModalTarget.mode === 'DOWNLOAD'
+                        ? 'Download Picture (PNG)'
+                        : 'Share Picture (PNG)'}
                     </div>
                     <div className="text-[10px] text-slate-400 group-hover:text-black/80">
-                      {isGeneratingExport === 'PNG' ? 'Generating PNG...' : 'HD Image save & share'}
+                      {isGeneratingExport === 'PNG'
+                        ? 'Processing PNG...'
+                        : shareModalTarget.mode === 'DOWNLOAD'
+                        ? 'HD Image mobile gallery / Downloads mein save karein'
+                        : 'Tap karein → WhatsApp / Share apps khulengi'}
                     </div>
                   </div>
                 </div>
-                <Share2 className="w-4 h-4 shrink-0" />
+                {shareModalTarget.mode === 'DOWNLOAD' ? (
+                  <Download className="w-4 h-4 shrink-0" />
+                ) : (
+                  <Share2 className="w-4 h-4 shrink-0" />
+                )}
               </button>
 
               <button
                 type="button"
                 disabled={isGeneratingExport !== null}
-                onClick={() => executeExportTarget(shareModalTarget, 'PDF', 'SHARE')}
+                onClick={() =>
+                  executeExportTarget(shareModalTarget, 'PDF', shareModalTarget.mode)
+                }
                 className="boss-flat-btn w-full p-3 rounded-xl bg-[#14181F] border-2 border-[#F5B738]/70 hover:bg-[#F5B738] hover:text-black text-left flex items-center justify-between gap-2 transition-colors cursor-pointer disabled:opacity-60 group"
               >
                 <div className="flex items-center gap-2.5 min-w-0">
@@ -8024,35 +8193,47 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   </div>
                   <div className="min-w-0">
                     <div className="text-xs font-black text-white group-hover:text-black">
-                      Share PDF Document
+                      {shareModalTarget.mode === 'DOWNLOAD'
+                        ? 'Download PDF Document'
+                        : 'Share PDF Document'}
                     </div>
                     <div className="text-[10px] text-slate-400 group-hover:text-black/80">
-                      {isGeneratingExport === 'PDF' ? 'Generating PDF...' : 'A4 Official PDF save & share'}
+                      {isGeneratingExport === 'PDF'
+                        ? 'Processing PDF...'
+                        : shareModalTarget.mode === 'DOWNLOAD'
+                        ? 'A4 Official PDF mobile mein save karein'
+                        : 'Tap karein → WhatsApp / Share apps khulengi'}
                     </div>
                   </div>
                 </div>
-                <Download className="w-4 h-4 shrink-0" />
+                {shareModalTarget.mode === 'DOWNLOAD' ? (
+                  <Download className="w-4 h-4 shrink-0" />
+                ) : (
+                  <Share2 className="w-4 h-4 shrink-0" />
+                )}
               </button>
 
-              <a
-                href={getWhatsAppShareUrl(shareModalTarget)}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="boss-flat-btn w-full py-2 px-3 rounded-xl bg-[#1C222B] border border-emerald-500/40 hover:border-emerald-400 text-emerald-300 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"
-              >
-                <Phone className="w-3.5 h-3.5" />
-                <span>Send Text Summary on WhatsApp</span>
-              </a>
+              {shareModalTarget.mode === 'SHARE' && (
+                <a
+                  href={getWhatsAppShareUrl(shareModalTarget)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-[#1C222B] border border-emerald-500/50 hover:bg-emerald-500/15 hover:border-emerald-400 text-emerald-300 text-xs font-black flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <Phone className="w-3.5 h-3.5" />
+                  <span>Direct WhatsApp Par Bhejein</span>
+                </a>
+              )}
             </div>
           </div>
         </div>
       )}
 
       {/* =================================================================== */}
-      {/* MODAL: PRINT PAGE PREVIEW (WHEN FRAME BLOCKS NATIVE PRINT DIALOG)   */}
+      {/* MODAL: DIRECT PRINT PAGE PREVIEW (A4 PRINTABLE SHEET)               */}
       {/* =================================================================== */}
       {printPreviewState && (
-        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-2.5 sm:p-4 overflow-y-auto no-print">
+        <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-2.5 sm:p-4 overflow-y-auto no-print">
           <div className="bg-[#0C1017] border-2 border-[#F5B738] rounded-2xl max-w-2xl w-full p-3.5 sm:p-4 space-y-3 shadow-2xl my-2">
             <div className="flex items-center justify-between border-b border-slate-800 pb-2">
               <div className="flex items-center gap-2 min-w-0">
@@ -8061,7 +8242,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                 </div>
                 <div className="min-w-0">
                   <h3 className="text-sm font-black text-[#F5B738] truncate">
-                    Print Page Preview (A4)
+                    Direct Print Page (A4)
                   </h3>
                   <p className="text-[10px] text-slate-400 truncate">
                     {printPreviewState.title}
@@ -8090,38 +8271,46 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-              <a
-                href={printPreviewState.pdfUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="boss-flat-btn py-2.5 px-3 rounded-xl bg-[#F5B738] hover:bg-amber-400 text-black font-black text-xs flex items-center justify-center gap-1.5 cursor-pointer"
-              >
-                <ExternalLink className="w-4 h-4" />
-                <span>Open Print Page</span>
-              </a>
-
               <button
                 type="button"
-                onClick={() => {
-                  try {
-                    window.print();
-                  } catch {
-                    showSettingsToast('Preview frame ne direct print block kiya hai — "Open Print Page" par click karein!');
+                onClick={async () => {
+                  const ok = await triggerIframePrint(
+                    printPreviewState.previewImageUrl,
+                    printPreviewState.title
+                  );
+                  if (!ok) {
+                    try {
+                      window.print();
+                    } catch {
+                      // ignore
+                    }
+                    showSettingsToast(
+                      'Agar printer dialog browser preview ne roka ho to "Save PDF" dabaa kar print karein!'
+                    );
                   }
                 }}
-                className="boss-flat-btn py-2.5 px-3 rounded-xl bg-[#14181F] border border-[#F5B738]/70 text-[#F5B738] hover:bg-[#F5B738] hover:text-black font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                className="boss-flat-btn py-2.5 px-3 rounded-xl bg-[#F5B738] hover:bg-amber-400 text-black font-black text-xs flex items-center justify-center gap-1.5 cursor-pointer"
               >
                 <Printer className="w-4 h-4" />
-                <span>System Print</span>
+                <span>Print Now</span>
               </button>
 
               <a
                 href={printPreviewState.pdfUrl}
                 download={printPreviewState.fileName}
-                className="boss-flat-btn py-2.5 px-3 rounded-xl bg-[#1C222B] border border-slate-700 hover:border-emerald-400 text-emerald-300 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                className="boss-flat-btn py-2.5 px-3 rounded-xl bg-[#60A5FA] hover:bg-sky-400 text-black font-black text-xs flex items-center justify-center gap-1.5 cursor-pointer"
               >
                 <Download className="w-4 h-4" />
-                <span>Save PDF</span>
+                <span>Save PDF (For Print)</span>
+              </a>
+
+              <a
+                href={printPreviewState.previewImageUrl}
+                download={printPreviewState.pngFileName}
+                className="boss-flat-btn py-2.5 px-3 rounded-xl bg-[#1C222B] border border-slate-700 hover:border-emerald-400 text-emerald-300 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <ImageIcon className="w-4 h-4" />
+                <span>Save Picture</span>
               </a>
             </div>
           </div>
@@ -8190,6 +8379,12 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               </button>
             </div>
           </div>
+        </div>
+      )}
+      {settingsNotice && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[60] max-w-[92vw] sm:max-w-md px-3.5 py-2.5 rounded-xl bg-emerald-950/95 border border-emerald-400 text-emerald-100 text-xs font-bold flex items-center gap-2 shadow-2xl backdrop-blur-md no-print">
+          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span className="truncate">{settingsNotice}</span>
         </div>
       )}
     </div>

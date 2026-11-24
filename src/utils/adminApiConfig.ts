@@ -17,6 +17,7 @@ export const DEVICE_ID_STORAGE_KEY = 'boss_client_device_id';
 export const MASTER_ENGINE_CACHE_KEY = 'boss_cached_master_engine_config_v1';
 export const ACTIVE_SESSION_TOKEN_KEY = 'boss_active_session_token_v1';
 export const LAST_ACTIVE_AT_KEY = 'boss_last_active_at_v1';
+export const MANUAL_LOGGED_OUT_KEY = 'manual_logged_out';
 export const PRIMARY_OWNER_EMAIL = 'ssaboor2t@gmail.com';
 export const DEFAULT_OWNER_EMAILS = ['ssaboor2t@gmail.com', 'yum226606@gmail.com'];
 export const DEFAULT_OWNER_PHONES = ['3105524225'];
@@ -175,9 +176,32 @@ export function getOrCreateClientDeviceId(): string {
   }
 }
 
+export function isManualLoggedOut(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return localStorage.getItem(MANUAL_LOGGED_OUT_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+export function setManualLoggedOut(flag: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (flag) {
+      localStorage.setItem(MANUAL_LOGGED_OUT_KEY, 'true');
+    } else {
+      localStorage.removeItem(MANUAL_LOGGED_OUT_KEY);
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
+
 export function loadAuthSession(): ClientAuthSession | null {
   if (typeof window === 'undefined') return null;
   try {
+    if (isManualLoggedOut()) return null;
     const raw = localStorage.getItem(AUTH_SESSION_STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
@@ -200,6 +224,7 @@ export function loadAuthSession(): ClientAuthSession | null {
 export function saveAuthSession(session: ClientAuthSession): void {
   if (typeof window === 'undefined') return;
   try {
+    localStorage.removeItem(MANUAL_LOGGED_OUT_KEY);
     localStorage.setItem(DEVICE_ID_STORAGE_KEY, session.deviceId);
     if (session.activeSessionToken) {
       localStorage.setItem(ACTIVE_SESSION_TOKEN_KEY, session.activeSessionToken);
@@ -217,6 +242,79 @@ export function clearAuthSession(): void {
     localStorage.removeItem(ACTIVE_SESSION_TOKEN_KEY);
   } catch {
     // ignore storage errors
+  }
+}
+
+function wipeSupabaseAndOAuthTokensFromStorage(storage: Storage | undefined): void {
+  if (!storage) return;
+  try {
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < storage.length; i++) {
+      const k = storage.key(i);
+      if (!k) continue;
+      const lower = k.toLowerCase();
+      if (
+        k.startsWith('sb-') ||
+        lower.includes('supabase.auth') ||
+        lower.includes('gotrue') ||
+        lower.includes('oauth') ||
+        k === 'g_state'
+      ) {
+        keysToRemove.push(k);
+      }
+    }
+    keysToRemove.forEach((k) => {
+      try {
+        storage.removeItem(k);
+      } catch {
+        // ignore individual removal failure
+      }
+    });
+  } catch {
+    // ignore storage iteration failure
+  }
+}
+
+export async function performCleanSupabaseAndStorageSignOut(
+  markManualLoggedOut = true
+): Promise<void> {
+  if (markManualLoggedOut) {
+    setManualLoggedOut(true);
+  }
+  clearAuthSession();
+  clearActiveSessionToken();
+
+  if (typeof window !== 'undefined') {
+    wipeSupabaseAndOAuthTokensFromStorage(window.localStorage);
+    wipeSupabaseAndOAuthTokensFromStorage(window.sessionStorage);
+    try {
+      const href = window.location?.href || '';
+      if (
+        href.includes('access_token=') ||
+        href.includes('refresh_token=') ||
+        href.includes('code=') ||
+        href.includes('token_hash=')
+      ) {
+        window.history?.replaceState?.({}, document.title, window.location.pathname || '/');
+      }
+    } catch {
+      // ignore history errors
+    }
+  }
+
+  try {
+    await supabase.auth.signOut({ scope: 'global' });
+  } catch {
+    try {
+      await supabase.auth.signOut({ scope: 'local' });
+    } catch {
+      // ignore final fallback error
+    }
+  }
+
+  if (typeof window !== 'undefined') {
+    wipeSupabaseAndOAuthTokensFromStorage(window.localStorage);
+    wipeSupabaseAndOAuthTokensFromStorage(window.sessionStorage);
   }
 }
 
@@ -772,12 +870,18 @@ export function resolveUserRole(params: {
     )
       .trim()
       .toUpperCase();
+    const isAdminFlag =
+      r.is_admin === true ||
+      r.isAdmin === true ||
+      String(r.is_admin || '').toLowerCase() === 'true' ||
+      r.is_sub_admin === true ||
+      r.isSubAdmin === true ||
+      String(r.is_sub_admin || '').toLowerCase() === 'true';
     if (
-      r.is_admin ||
-      r.isAdmin ||
-      r.is_sub_admin ||
-      r.isSubAdmin ||
-      ['ADMIN', 'SUB_ADMIN', 'SUBADMIN', 'MODERATOR', 'STAFF', 'MANAGER'].includes(roleVal)
+      isAdminFlag ||
+      ['ADMIN', 'SUB_ADMIN', 'SUBADMIN', 'SUB-ADMIN', 'MODERATOR', 'STAFF', 'MANAGER'].includes(
+        roleVal
+      )
     ) {
       return 'ADMIN';
     }
@@ -1097,6 +1201,23 @@ export interface EvaluatedCloudAccess {
   matchedUac: any | null;
 }
 
+export function sortRowsByLatestTimestamp(rows: any[]): any[] {
+  if (!Array.isArray(rows) || rows.length <= 1) return Array.isArray(rows) ? rows : [];
+  const getRowTs = (r: any): number => {
+    if (!r || typeof r !== 'object') return 0;
+    return Math.max(
+      parseTimestampMs(r.updated_at),
+      parseTimestampMs(r.last_updated),
+      parseTimestampMs(r.last_seen),
+      parseTimestampMs(r.last_cloud_sync),
+      parseTimestampMs(r.forced_logout_at),
+      parseTimestampMs(r.force_logout_at),
+      parseTimestampMs(r.created_at)
+    );
+  };
+  return [...rows].sort((a, b) => getRowTs(b) - getRowTs(a));
+}
+
 export function evaluateClientAccessState(params: {
   session: ClientAuthSession | null;
   clientDeviceId: string;
@@ -1113,15 +1234,17 @@ export function evaluateClientAccessState(params: {
     clientDeviceId,
     clientIpAddress = '',
     clientMacAddress = '',
-    usersList,
-    clientUsersList = [],
-    subsList,
     masterCfg,
   } = params;
+
+  const usersList = sortRowsByLatestTimestamp(params.usersList || []);
+  const clientUsersList = sortRowsByLatestTimestamp(params.clientUsersList || []);
+  const subsList = sortRowsByLatestTimestamp(params.subsList || []);
 
   const targetPhoneDigits = normalizePhoneDigits(session?.phone || '');
   const targetCnicDigits = normalizeCnicDigits(session?.cnic || '');
   const targetEmail = (session?.email || '').trim().toLowerCase();
+  const targetUserId = String(session?.userId || '').trim();
   const targetIp = clientIpAddress.trim();
   const targetMac = clientMacAddress.trim().toLowerCase();
 
@@ -1133,6 +1256,8 @@ export function evaluateClientAccessState(params: {
     if (targetPhoneDigits && p && p === targetPhoneDigits) return true;
     const c = normalizeCnicDigits(r.cnic || '');
     if (targetCnicDigits && c && c === targetCnicDigits) return true;
+    const rId = String(r.id || '').trim();
+    if (targetUserId && rId && rId === targetUserId) return true;
     const dev = String(r.device_id || r.deviceId || '').trim();
     if (dev && clientDeviceId && dev === clientDeviceId) return true;
     return false;
@@ -1151,6 +1276,10 @@ export function evaluateClientAccessState(params: {
         (r) => r && normalizePhoneDigits(r.phone || '') === targetPhoneDigits
       );
       if (byPhone) return byPhone;
+    }
+    if (targetUserId) {
+      const byId = list.find((r) => r && String(r.id || '').trim() === targetUserId);
+      if (byId) return byId;
     }
     if (targetCnicDigits) {
       const byCnic = list.find(
@@ -1212,13 +1341,23 @@ export function evaluateClientAccessState(params: {
       cloudSessionToken !== localSessionToken
   );
 
-  // Check if Admin triggered RESET_ OR force_logout_at is newer than session.loggedInAt
+  // Check if Admin triggered RESET_ OR force_logout_at / forced_logout_at is newer than session.loggedInAt
   const forceLogoutTs = Math.max(
     parseTimestampMs(matchedUser?.force_logout_at),
+    parseTimestampMs(matchedUser?.forced_logout_at),
+    parseTimestampMs(matchedUser?.forcedLogoutAt),
+    parseTimestampMs(matchedUser?.forceLogoutAt),
     parseTimestampMs(matchedClientUser?.force_logout_at),
+    parseTimestampMs(matchedClientUser?.forced_logout_at),
+    parseTimestampMs(matchedClientUser?.forcedLogoutAt),
+    parseTimestampMs(matchedClientUser?.forceLogoutAt),
     parseTimestampMs(matchedSub?.force_logout_at),
+    parseTimestampMs(matchedSub?.forced_logout_at),
+    parseTimestampMs(matchedSub?.forcedLogoutAt),
     parseTimestampMs(matchedUac?.force_logout_at),
-    parseTimestampMs(matchedUac?.forceLogoutAt)
+    parseTimestampMs(matchedUac?.forced_logout_at),
+    parseTimestampMs(matchedUac?.forceLogoutAt),
+    parseTimestampMs(matchedUac?.forcedLogoutAt)
   );
   const isRemoteForceLogout = Boolean(
     session && forceLogoutTs > 0 && forceLogoutTs > Number(session.loggedInAt || 0)
@@ -1238,10 +1377,11 @@ export function evaluateClientAccessState(params: {
   const isRowBlocked = (r: any) =>
     Boolean(
       r &&
-        (r.is_blocked ||
-          r.isBlocked ||
-          String(r.account_status || '').toUpperCase() === 'BLOCKED' ||
-          String(r.status || '').toUpperCase() === 'BLOCKED')
+        (r.is_blocked === true ||
+          String(r.is_blocked || '').toLowerCase() === 'true' ||
+          r.isBlocked === true ||
+          ['BLOCKED', 'SUSPENDED', 'BANNED'].includes(String(r.account_status || '').trim().toUpperCase()) ||
+          ['BLOCKED', 'SUSPENDED', 'BANNED'].includes(String(r.status || '').trim().toUpperCase()))
     );
 
   // Check if any matching record (Account, Device ID, IP, MAC, CNIC, or Email) is blocked
@@ -1299,18 +1439,23 @@ export function evaluateClientAccessState(params: {
 
   const isOwnerUser = userRole === 'OWNER';
 
+  const isRowLifetime = (r: any) =>
+    Boolean(
+      r &&
+        (r.is_lifetime === true ||
+          String(r.is_lifetime || '').toLowerCase() === 'true' ||
+          r.isLifetimeFree === true ||
+          String(r.subscription_tier || '').trim().toUpperCase() === 'LIFETIME_VIP' ||
+          String(r.package_name || '').trim().toUpperCase() === 'LIFETIME_VIP' ||
+          String(r.packagePlan || '').trim().toUpperCase() === 'LIFETIME_VIP')
+    );
+
   const isLifetimeFlag = Boolean(
     isOwnerUser ||
-      effectiveUser?.is_lifetime ||
-      matchedClientUser?.is_lifetime ||
-      matchedSub?.is_lifetime ||
-      matchedUac?.is_lifetime ||
-      matchedUac?.isLifetimeFree ||
-      String(effectiveUser?.subscription_tier || '').toUpperCase() === 'LIFETIME_VIP' ||
-      String(matchedClientUser?.subscription_tier || '').toUpperCase() === 'LIFETIME_VIP' ||
-      String(matchedSub?.subscription_tier || '').toUpperCase() === 'LIFETIME_VIP' ||
-      String(matchedUac?.subscription_tier || '').toUpperCase() === 'LIFETIME_VIP' ||
-      String(matchedUac?.packagePlan || '').toUpperCase() === 'LIFETIME_VIP'
+      isRowLifetime(matchedUser) ||
+      isRowLifetime(matchedClientUser) ||
+      isRowLifetime(matchedSub) ||
+      isRowLifetime(matchedUac)
   );
 
   const rawCloudExpiry = Math.max(
@@ -1319,16 +1464,28 @@ export function evaluateClientAccessState(params: {
       matchedSub?.activated_until_ms,
       matchedSub?.activated_until,
       matchedSub?.subscription_expiry,
+      matchedSub?.expiry_date,
+      matchedSub?.expiryDate,
+      matchedSub?.expires_at,
       matchedSub?.trial_expires_at,
       matchedUser?.activated_until_ms,
       matchedUser?.activated_until,
       matchedUser?.subscription_expiry,
+      matchedUser?.expiry_date,
+      matchedUser?.expiryDate,
+      matchedUser?.expires_at,
       matchedUser?.trial_end,
       matchedClientUser?.activated_until_ms,
       matchedClientUser?.activated_until,
       matchedClientUser?.subscription_expiry,
+      matchedClientUser?.expiry_date,
+      matchedClientUser?.expiryDate,
+      matchedClientUser?.expires_at,
       matchedClientUser?.trial_end,
       matchedUac?.subscription_expiry,
+      matchedUac?.expiry_date,
+      matchedUac?.expiryDate,
+      matchedUac?.expires_at,
       matchedUac?.subscriptionExpiresAt,
       matchedUac?.activatedUntil,
       matchedUac?.activated_until,
@@ -1354,17 +1511,34 @@ export function evaluateClientAccessState(params: {
       .map(parseTimestampMs)
       .find((t) => t > 0) || 0;
 
+  const isRowExplicitlyActivated = (r: any) =>
+    Boolean(
+      r &&
+        (r.is_activated === true ||
+          String(r.is_activated || '').toLowerCase() === 'true' ||
+          r.isPaidActive === true ||
+          ['ACTIVE', 'APPROVED'].includes(String(r.account_status || '').trim().toUpperCase()) ||
+          ['ACTIVE', 'APPROVED'].includes(String(r.status || '').trim().toUpperCase()))
+    );
+
+  const userExplicitTrialRevoke = Boolean(
+    matchedUser &&
+      matchedUser.is_activated === false &&
+      ['TRIAL', 'EXPIRED', 'PENDING'].includes(
+        String(matchedUser.account_status || matchedUser.status || '').trim().toUpperCase()
+      ) &&
+      (!matchedSub ||
+        parseTimestampMs(matchedUser.last_cloud_sync || matchedUser.updated_at) >
+          parseTimestampMs(matchedSub.last_updated || matchedSub.updated_at) + 5000)
+  );
+
   const isPaidActivated = Boolean(
     isOwnerUser ||
-      matchedSub?.is_activated ||
-      matchedUser?.is_activated ||
-      matchedClientUser?.is_activated ||
-      String(effectiveUser?.account_status || '').toUpperCase() === 'ACTIVE' ||
-      String(effectiveUser?.account_status || '').toUpperCase() === 'APPROVED' ||
-      String(effectiveUser?.status || '').toUpperCase() === 'ACTIVE' ||
-      String(matchedSub?.status || '').toUpperCase() === 'ACTIVE' ||
-      matchedUac?.is_activated ||
-      matchedUac?.isPaidActive
+      (!userExplicitTrialRevoke &&
+        (isRowExplicitlyActivated(matchedUser) ||
+          isRowExplicitlyActivated(matchedClientUser) ||
+          isRowExplicitlyActivated(matchedSub) ||
+          isRowExplicitlyActivated(matchedUac)))
   );
 
   if (isOwnerUser) {
@@ -1388,10 +1562,11 @@ export function evaluateClientAccessState(params: {
     expiresAt = null;
   } else if (isPaidActivated) {
     const cloudTier = String(
-      matchedSub?.subscription_tier ||
+      matchedUser?.subscription_tier ||
+        matchedSub?.subscription_tier ||
         matchedSub?.package_name ||
-        effectiveUser?.subscription_tier ||
-        effectiveUser?.package_name ||
+        matchedUser?.package_name ||
+        matchedClientUser?.subscription_tier ||
         matchedUac?.subscription_tier ||
         matchedUac?.packagePlan ||
         matchedUac?.planName ||
@@ -2240,11 +2415,15 @@ export async function markUserOfflineInSupabase(deviceId: string): Promise<void>
   }
 }
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
  * Build a scoped PostgREST query for ONLY the current logged-in user (prevents full-table 250/400-row downloads).
+ * Matches email (lowercase), phone, id (when UUID), device_id, and cnic cleanly.
  */
 export function buildScopedUserQuery(params: {
   deviceId?: string;
+  userId?: string;
   email?: string;
   phone?: string;
   cnic?: string;
@@ -2255,6 +2434,14 @@ export function buildScopedUserQuery(params: {
   const dev = String(params.deviceId || '').trim();
   if (dev && dev !== 'DEV-CLIENT-DEFAULT' && !dev.startsWith('RESET_')) {
     filters.push(`device_id.eq.${encodeURIComponent(dev)}`);
+  }
+  const uid = String(params.userId || '').trim();
+  if (uid) {
+    if (UUID_REGEX.test(uid)) {
+      filters.push(`id.eq.${encodeURIComponent(uid)}`);
+    } else if (uid !== 'DEV-CLIENT-DEFAULT' && !uid.startsWith('RESET_') && uid !== dev) {
+      filters.push(`device_id.eq.${encodeURIComponent(uid)}`);
+    }
   }
   const email = String(params.email || '').trim().toLowerCase();
   if (email && email.includes('@')) {
@@ -2287,17 +2474,19 @@ export function buildScopedUserQuery(params: {
   const uniqueFilters = Array.from(new Set(filters));
   if (uniqueFilters.length === 0) return null;
   const selectPart = params.select ? `select=${params.select}` : 'select=*';
-  const limitPart = `limit=${params.limit ?? 5}`;
+  const limitPart = `limit=${params.limit ?? 10}`;
   return `or=(${uniqueFilters.join(',')})&${selectPart}&${limitPart}`;
 }
 
 /**
- * Targeted PostgREST query specifically for 'subscriptions' using ONLY device_id.eq and phone.eq
- * (avoids unquoted phone.ilike.* wildcards and unsupported columns that cause 400 Bad Request).
+ * Targeted multi-key PostgREST query for 'subscriptions' supporting email (lowercase), phone, id, device_id, and cnic.
  */
 export function buildScopedSubscriptionQuery(params: {
   deviceId?: string;
+  userId?: string;
+  email?: string;
   phone?: string;
+  cnic?: string;
   select?: string;
   limit?: number;
 }): string | null {
@@ -2305,6 +2494,14 @@ export function buildScopedSubscriptionQuery(params: {
   const dev = String(params.deviceId || '').trim();
   if (dev && dev !== 'DEV-CLIENT-DEFAULT' && !dev.startsWith('RESET_')) {
     filters.push(`device_id.eq.${encodeURIComponent(dev)}`);
+  }
+  const uid = String(params.userId || '').trim();
+  if (uid && UUID_REGEX.test(uid)) {
+    filters.push(`id.eq.${encodeURIComponent(uid)}`);
+  }
+  const email = String(params.email || '').trim().toLowerCase();
+  if (email && email.includes('@')) {
+    filters.push(`email.ilike.${encodeURIComponent(email)}`);
   }
   const rawPhone = String(params.phone || '').trim();
   const phoneDigits = normalizePhoneDigits(rawPhone);
@@ -2314,12 +2511,105 @@ export function buildScopedSubscriptionQuery(params: {
   if (phoneDigits.length >= 10) {
     filters.push(`phone.eq.${encodeURIComponent(`0${phoneDigits}`)}`);
     filters.push(`phone.eq.${encodeURIComponent(`+92${phoneDigits}`)}`);
+    filters.push(`phone.eq.${encodeURIComponent(phoneDigits)}`);
   }
   const uniqueFilters = Array.from(new Set(filters));
   if (uniqueFilters.length === 0) return null;
   const selectPart = params.select ? `select=${params.select}` : 'select=*';
-  const limitPart = `limit=${params.limit ?? 5}`;
+  const limitPart = `limit=${params.limit ?? 10}`;
   return `or=(${uniqueFilters.join(',')})&${selectPart}&${limitPart}`;
+}
+
+/**
+ * Pull current user's latest rows from Supabase ('users', 'client_users', 'subscriptions')
+ * using email (lowercase), phone, id, device_id & cnic with automatic 400-safe fallback.
+ */
+export async function fetchMultiKeyUserRecords(params: {
+  deviceId?: string;
+  userId?: string;
+  email?: string;
+  phone?: string;
+  cnic?: string;
+}): Promise<{
+  usersRes: { ok: boolean; status: number; data: any[] };
+  clientUsersRes: { ok: boolean; status: number; data: any[] };
+  subsRes: { ok: boolean; status: number; data: any[] };
+}> {
+  const emptyRes = { ok: true, status: 200, data: [] as any[] };
+  const userQuery = buildScopedUserQuery({
+    deviceId: params.deviceId,
+    userId: params.userId,
+    email: params.email,
+    phone: params.phone,
+    cnic: params.cnic,
+    select: '*',
+    limit: 10,
+  });
+  const subQueryFull = buildScopedSubscriptionQuery({
+    deviceId: params.deviceId,
+    userId: params.userId,
+    email: params.email,
+    phone: params.phone,
+    cnic: params.cnic,
+    select: '*',
+    limit: 10,
+  });
+
+  const safeTableFetch = async (
+    table: 'users' | 'client_users' | 'subscriptions',
+    primaryQuery: string | null,
+    fallbackQuery: string | null
+  ) => {
+    if (!primaryQuery) return emptyRes;
+    const res = await callSupabaseProxy({
+      table,
+      method: 'GET',
+      query: primaryQuery,
+      timeoutMs: 8000,
+    });
+    if (res.ok && Array.isArray(res.data)) {
+      return { ok: true, status: res.status, data: sortRowsByLatestTimestamp(res.data) };
+    }
+    if (res.status === 400 && fallbackQuery && fallbackQuery !== primaryQuery) {
+      const fb = await callSupabaseProxy({
+        table,
+        method: 'GET',
+        query: fallbackQuery,
+        timeoutMs: 8000,
+      });
+      if (fb.ok && Array.isArray(fb.data)) {
+        return { ok: true, status: fb.status, data: sortRowsByLatestTimestamp(fb.data) };
+      }
+      return { ok: false, status: fb.status, data: [] as any[] };
+    }
+    return {
+      ok: Boolean(res.ok),
+      status: res.status,
+      data: Array.isArray(res.data) ? sortRowsByLatestTimestamp(res.data) : ([] as any[]),
+    };
+  };
+
+  const minimalUserFallback = buildScopedUserQuery({
+    deviceId: params.deviceId,
+    email: params.email,
+    phone: params.phone,
+    select: '*',
+    limit: 10,
+  });
+  const minimalSubFallback = buildScopedSubscriptionQuery({
+    deviceId: params.deviceId,
+    phone: params.phone,
+    select: '*',
+    limit: 10,
+  });
+
+  const [usersRes, clientUsersRes, subsRes] = await Promise.all([
+    safeTableFetch('users', userQuery, minimalUserFallback),
+    safeTableFetch('client_users', userQuery, minimalUserFallback),
+    safeTableFetch('subscriptions', subQueryFull, minimalSubFallback),
+  ]);
+
+  return { usersRes, clientUsersRes, subsRes };
 }
 
 /**
@@ -2661,11 +2951,7 @@ export async function deleteClientAccountInSupabase(params: {
     }
     await Promise.allSettled(ops);
 
-    try {
-      await supabase.auth.signOut();
-    } catch {
-      // ignore auth signout failure
-    }
+    await performCleanSupabaseAndStorageSignOut(true).catch(() => {});
 
     if (typeof window !== 'undefined') {
       try {

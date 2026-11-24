@@ -75,7 +75,6 @@ import {
 } from './components/AccountLockModals';
 import {
   BossUserRole,
-  buildScopedSubscriptionQuery,
   buildScopedUserQuery,
   clearActiveSessionToken,
   clearAuthSession,
@@ -83,19 +82,23 @@ import {
   ClientAuthSession,
   collectAndSyncUserTelemetryToSupabase,
   evaluateClientAccessState,
+  fetchMultiKeyUserRecords,
   getClientPublicIpAddress,
   getOrCreateClientDeviceId,
   getOrCreateDeviceMacFingerprint,
+  isManualLoggedOut,
   isOwnerIdentity,
   isSessionInactiveExpired,
   loadActiveSessionToken,
   loadAuthSession,
   loadCachedMasterEngineConfig,
   markUserOfflineInSupabase,
+  performCleanSupabaseAndStorageSignOut,
   requestAndSaveGpsLocation,
   saveAuthSession,
   saveCachedMasterEngineConfig,
   saveLastActiveAtMs,
+  setManualLoggedOut,
 } from './utils/adminApiConfig';
 
 const STORAGE_KEY = 'boss_aluminium_master_web_state_v1';
@@ -613,52 +616,24 @@ export default function App() {
 
     setIsSyncingCloud(true);
     try {
-      const scopedUserQuery = buildScopedUserQuery({
-        deviceId: activeSession?.deviceId || clientDeviceId,
-        email: activeSession?.email,
-        phone: activeSession?.phone,
-        cnic: activeSession?.cnic,
-        select: '*',
-        limit: 5,
-      });
-      const scopedSubQuery = buildScopedSubscriptionQuery({
-        deviceId: activeSession?.deviceId || clientDeviceId,
-        phone: activeSession?.phone,
-        select: '*',
-        limit: 5,
-      });
-      const emptyTableResult = { ok: true, status: 200, data: [] as any[] };
-
-      const [cfgRes, usersRes, clientUsersRes, subsRes, clientIpAddress, serverNowMs] = await Promise.all([
+      const [cfgRes, multiKeyRes, clientIpAddress, serverNowMs] = await Promise.all([
         callSupabaseProxy({
           table: 'app_configs',
           method: 'GET',
           query: 'select=id,value',
         }),
-        scopedUserQuery
-          ? callSupabaseProxy({
-              table: 'users',
-              method: 'GET',
-              query: scopedUserQuery,
-            })
-          : Promise.resolve(emptyTableResult),
-        scopedUserQuery
-          ? callSupabaseProxy({
-              table: 'client_users',
-              method: 'GET',
-              query: scopedUserQuery,
-            })
-          : Promise.resolve(emptyTableResult),
-        scopedSubQuery
-          ? callSupabaseProxy({
-              table: 'subscriptions',
-              method: 'GET',
-              query: scopedSubQuery,
-            })
-          : Promise.resolve(emptyTableResult),
+        fetchMultiKeyUserRecords({
+          deviceId: activeSession?.deviceId || clientDeviceId,
+          userId: activeSession?.userId,
+          email: activeSession?.email,
+          phone: activeSession?.phone,
+          cnic: activeSession?.cnic,
+        }),
         getClientPublicIpAddress(),
         fetchSupabaseServerTimeMs(),
       ]);
+
+      const { usersRes, clientUsersRes, subsRes } = multiKeyRes;
 
       // Offline / unreachable network guard: NEVER overwrite cached access, offers, packages, or rates when offline!
       const anyCloudSuccess =
@@ -1219,7 +1194,9 @@ export default function App() {
         evaluated.matchedClientUser?.locked_tabs,
         evaluated.matchedClientUser?.lockedTabs,
         evaluated.matchedUser?.layout_config?.lockedTabs,
-        evaluated.matchedClientUser?.layout_config?.lockedTabs
+        evaluated.matchedUser?.layout_config?.locked_tabs,
+        evaluated.matchedClientUser?.layout_config?.lockedTabs,
+        evaluated.matchedClientUser?.layout_config?.locked_tabs
       );
       try {
         localStorage.setItem(USER_LOCKED_TABS_KEY, JSON.stringify(userLevelLockedTabs));
@@ -1229,7 +1206,7 @@ export default function App() {
       setUserLockedTabs(userLevelLockedTabs);
 
       if (evaluated.sessionConflict) {
-        triggerSessionConflictLogout();
+        await triggerSessionConflictLogout();
         return false;
       }
 
@@ -1244,15 +1221,14 @@ export default function App() {
       );
 
       if (evaluated.forceResetLogout && !isOwnerAccount) {
-        clearAuthSession();
-        clearActiveSessionToken();
+        clearLastActiveAtMs();
         clearInitialSyncCompletedFlag();
         try {
           localStorage.removeItem(USER_LOCKED_TABS_KEY);
         } catch {}
         setUserLockedTabs({});
-        supabase.auth.signOut().catch(() => {});
         markUserOfflineInSupabase(clientDeviceId);
+        await performCleanSupabaseAndStorageSignOut(true);
         setAuthSession(null);
         setIsSubscriptionExpired(false);
         setAuthNotice(
@@ -1263,10 +1239,46 @@ export default function App() {
       }
 
       const resolvedRole: BossUserRole = isOwnerAccount ? 'OWNER' : evaluated.userRole || 'CLIENT';
-      if (activeSession && activeSession.userRole !== resolvedRole) {
+      const nextIsActivated = isOwnerAccount
+        ? true
+        : evaluated.status === 'ACTIVE' || evaluated.status === 'FREE';
+      const nextIsLifetimeFree = isOwnerAccount
+        ? true
+        : evaluated.tier === 'LIFETIME_VIP' || evaluated.status === 'FREE';
+      const nextPackagePlan = isOwnerAccount ? 'LIFETIME_VIP' : evaluated.tier;
+      const nextIsBlocked = isOwnerAccount ? false : evaluated.status === 'BLOCKED';
+      const nextExpiresAt = isOwnerAccount
+        ? 0
+        : evaluated.expiresAt !== null
+        ? evaluated.expiresAt
+        : activeSession?.trialExpiresAt;
+      const nextUserId = String(
+        evaluated.matchedUser?.id ||
+          evaluated.matchedClientUser?.id ||
+          activeSession?.userId ||
+          activeSession?.deviceId ||
+          ''
+      );
+
+      if (
+        activeSession &&
+        (activeSession.userRole !== resolvedRole ||
+          activeSession.isActivated !== nextIsActivated ||
+          activeSession.isLifetimeFree !== nextIsLifetimeFree ||
+          activeSession.packagePlan !== nextPackagePlan ||
+          activeSession.isBlocked !== nextIsBlocked ||
+          activeSession.trialExpiresAt !== nextExpiresAt ||
+          (nextUserId && activeSession.userId !== nextUserId))
+      ) {
         const syncedSess: ClientAuthSession = {
           ...activeSession,
+          userId: nextUserId || activeSession.userId,
           userRole: resolvedRole,
+          isActivated: nextIsActivated,
+          isLifetimeFree: nextIsLifetimeFree,
+          packagePlan: nextPackagePlan,
+          isBlocked: nextIsBlocked,
+          trialExpiresAt: nextExpiresAt,
         };
         saveAuthSession(syncedSess);
         setAuthSession(syncedSess);
@@ -1318,16 +1330,14 @@ export default function App() {
     }
   };
 
-  const triggerSessionConflictLogout = () => {
-    clearAuthSession();
-    clearActiveSessionToken();
+  const triggerSessionConflictLogout = async () => {
     clearLastActiveAtMs();
     clearInitialSyncCompletedFlag();
     try {
       localStorage.removeItem(USER_LOCKED_TABS_KEY);
     } catch {}
     setUserLockedTabs({});
-    supabase.auth.signOut().catch(() => {});
+    await performCleanSupabaseAndStorageSignOut(true);
     setAuthSession(null);
     setIsSubscriptionExpired(false);
     setCloudAccessInfo({
@@ -1341,17 +1351,15 @@ export default function App() {
     setAuthNotice('Your ID was logged in on another device.');
   };
 
-  const triggerInactivityLogout = () => {
+  const triggerInactivityLogout = async () => {
     markUserOfflineInSupabase(clientDeviceId);
-    clearAuthSession();
-    clearActiveSessionToken();
     clearLastActiveAtMs();
     clearInitialSyncCompletedFlag();
     try {
       localStorage.removeItem(USER_LOCKED_TABS_KEY);
     } catch {}
     setUserLockedTabs({});
-    supabase.auth.signOut().catch(() => {});
+    await performCleanSupabaseAndStorageSignOut(true);
     setAuthSession(null);
     setIsSubscriptionExpired(false);
     setCloudAccessInfo({
@@ -1379,10 +1387,11 @@ export default function App() {
     try {
       const scopedTokenQuery = buildScopedUserQuery({
         deviceId: activeSess.deviceId || clientDeviceId,
+        userId: activeSess.userId,
         email: activeSess.email,
         phone: activeSess.phone,
         cnic: activeSess.cnic,
-        select: 'device_id,email,phone,cnic,active_session_token',
+        select: 'id,device_id,email,phone,cnic,active_session_token',
         limit: 5,
       });
       if (!scopedTokenQuery) return true;
@@ -1412,7 +1421,7 @@ export default function App() {
         masterCfg: loadCachedMasterEngineConfig(),
       });
       if (evalRes.sessionConflict) {
-        triggerSessionConflictLogout();
+        await triggerSessionConflictLogout();
         return false;
       }
     } catch {
@@ -1832,6 +1841,7 @@ export default function App() {
   };
 
   const handleAuthenticated = async (session: ClientAuthSession) => {
+    setManualLoggedOut(false);
     setClientDeviceId(session.deviceId);
     saveAuthSession(session);
     saveLastActiveAtMs(Date.now());
@@ -1876,17 +1886,15 @@ export default function App() {
     markInitialSyncCompletedForDevice(session.deviceId);
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
     markUserOfflineInSupabase(clientDeviceId);
-    clearAuthSession();
-    clearActiveSessionToken();
     clearLastActiveAtMs();
     clearInitialSyncCompletedFlag();
     try {
       localStorage.removeItem(USER_LOCKED_TABS_KEY);
     } catch {}
     setUserLockedTabs({});
-    supabase.auth.signOut().catch(() => {});
+    await performCleanSupabaseAndStorageSignOut(true);
     setAuthSession(null);
     setIsSubscriptionExpired(false);
     setCloudAccessInfo({
@@ -1900,9 +1908,7 @@ export default function App() {
     setAuthNotice('Aap logout ho chuke hain. Dobara Login karein.');
   };
 
-  const handleAccountDeletedLogout = () => {
-    clearAuthSession();
-    clearActiveSessionToken();
+  const handleAccountDeletedLogout = async () => {
     clearLastActiveAtMs();
     clearInitialSyncCompletedFlag();
     try {
@@ -1921,7 +1927,7 @@ export default function App() {
     setProjectExtras([]);
     setCustomerName('');
     setCustomerPhone('');
-    supabase.auth.signOut().catch(() => {});
+    await performCleanSupabaseAndStorageSignOut(true);
     setAuthSession(null);
     setIsSubscriptionExpired(false);
     setCloudAccessInfo({
@@ -2282,28 +2288,29 @@ export default function App() {
       // ignore storage errors
     }
 
-    // Strict Offline-First: Run from localStorage with ZERO automatic Supabase calls on routine app open.
-    // Only auto-sync ONCE if the device has never synced yet for this authenticated session.
+    // Multi-key auto-sync on app open whenever an authenticated session exists (unless manually logged out)
     const existingSession = loadAuthSession();
     const alreadySyncedForSession = Boolean(
       existingSession &&
         (hasInitialSyncCompletedForDevice(existingSession.deviceId) || hasLocalSyncEvidence)
     );
-    if (existingSession && !alreadySyncedForSession) {
+    if (existingSession?.verified && !isManualLoggedOut()) {
       if (typeof navigator === 'undefined' || navigator.onLine !== false) {
-        requestAndSaveGpsLocation(existingSession.deviceId, {
-          email: existingSession.email,
-          phone: existingSession.phone,
-        });
-        collectAndSyncUserTelemetryToSupabase({
-          deviceId: existingSession.deviceId,
-          session: existingSession,
-          companyName: existingSession.companyName || companyName,
-          selfieUrl: existingSession.selfieUrl,
-          shopPhotoUrl: existingSession.shopPhotoUrl,
-          isOnline: true,
-        });
-        syncFromSupabase({ forceRates: false, silent: true });
+        if (!alreadySyncedForSession) {
+          requestAndSaveGpsLocation(existingSession.deviceId, {
+            email: existingSession.email,
+            phone: existingSession.phone,
+          });
+          collectAndSyncUserTelemetryToSupabase({
+            deviceId: existingSession.deviceId,
+            session: existingSession,
+            companyName: existingSession.companyName || companyName,
+            selfieUrl: existingSession.selfieUrl,
+            shopPhotoUrl: existingSession.shopPhotoUrl,
+            isOnline: true,
+          });
+        }
+        syncFromSupabase({ forceRates: false, silent: true, sessionOverride: existingSession });
       }
     } else {
       // Auto-detect real GPS location immediately on app launch and sync cleanly when online
@@ -2380,6 +2387,114 @@ export default function App() {
       window.removeEventListener('offline', handleGoOffline);
     };
   }, []);
+
+  // Keep latest syncFromSupabase reference for Realtime & Focus auto-sync listeners
+  const syncFromSupabaseRef = useRef(syncFromSupabase);
+  syncFromSupabaseRef.current = syncFromSupabase;
+
+  // Live Supabase Realtime Listener + Focus/Periodic Auto-Sync for immediate Admin updates
+  useEffect(() => {
+    if (!authSession?.verified || isManualLoggedOut()) return;
+
+    const myEmail = String(authSession.email || '').trim().toLowerCase();
+    const myPhoneDigits = normalizePhoneDigits(authSession.phone || '');
+    const myDevId = String(authSession.deviceId || clientDeviceId || '').trim();
+    const myUserId = String(authSession.userId || '').trim();
+
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastAutoSyncMs = 0;
+
+    const triggerDebouncedSync = (delayMs = 450) => {
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      if (isManualLoggedOut()) return;
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        lastAutoSyncMs = Date.now();
+        syncFromSupabaseRef.current?.({ forceRates: false, silent: true });
+      }, delayMs);
+    };
+
+    const matchesCurrentUserPayload = (payload: any): boolean => {
+      const candidates = [payload?.new, payload?.old].filter(
+        (r) => r && typeof r === 'object'
+      );
+      if (candidates.length === 0) return true;
+      return candidates.some((r: any) => {
+        const em = String(r.email || '').trim().toLowerCase();
+        if (myEmail && em && em === myEmail) return true;
+        const ph = normalizePhoneDigits(String(r.phone || ''));
+        if (myPhoneDigits.length >= 10 && ph && ph === myPhoneDigits) return true;
+        const dev = String(r.device_id || r.deviceId || '').trim();
+        if (myDevId && dev && dev === myDevId) return true;
+        const rid = String(r.id || '').trim();
+        if (myUserId && rid && rid === myUserId) return true;
+        return false;
+      });
+    };
+
+    let channel: ReturnType<typeof supabase.channel> | null = null;
+    try {
+      channel = supabase
+        .channel(`boss-client-sync-${myDevId || 'user'}-${Date.now()}`)
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'users' },
+          (payload) => {
+            if (matchesCurrentUserPayload(payload)) triggerDebouncedSync(350);
+          }
+        )
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'client_users' },
+          (payload) => {
+            if (matchesCurrentUserPayload(payload)) triggerDebouncedSync(350);
+          }
+        )
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'subscriptions' },
+          (payload) => {
+            if (matchesCurrentUserPayload(payload)) triggerDebouncedSync(350);
+          }
+        )
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'app_configs' },
+          () => {
+            triggerDebouncedSync(600);
+          }
+        )
+        .subscribe();
+    } catch {
+      // non-fatal if WebSocket realtime is unavailable
+    }
+
+    const handleVisibleOrFocus = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      if (Date.now() - lastAutoSyncMs < 10_000) return;
+      triggerDebouncedSync(250);
+    };
+
+    window.addEventListener('focus', handleVisibleOrFocus);
+    document.addEventListener('visibilitychange', handleVisibleOrFocus);
+
+    const pollInterval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      lastAutoSyncMs = Date.now();
+      syncFromSupabaseRef.current?.({ forceRates: false, silent: true });
+    }, 45_000);
+
+    return () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      window.removeEventListener('focus', handleVisibleOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibleOrFocus);
+      clearInterval(pollInterval);
+      if (channel) {
+        supabase.removeChannel(channel).catch(() => {});
+      }
+    };
+  }, [authSession?.verified, authSession?.email, authSession?.phone, authSession?.deviceId, authSession?.userId, clientDeviceId]);
 
   // Anti-Theft, Anti-Inspect & Formula/Rate Copy Protection (Right-click, DevTools shortcuts & Protected Copy Guard)
   useEffect(() => {
