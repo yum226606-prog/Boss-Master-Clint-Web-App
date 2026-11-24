@@ -22,7 +22,7 @@ import {
   WindowFormulaSettings,
   WindowItem,
 } from '../types/bossModels';
-import { MASTER_PASSCODES } from './bossDefaultRates';
+import { MASTER_PASSCODES, normalizeSectionCode } from './bossDefaultRates';
 
 export const ELEVEN_FT_IN = 132.0; // 11 ft
 export const BAR_EXTRA_IN = 1.0; // 1 inch extra stock margin
@@ -81,21 +81,23 @@ export function billFeet(decIn: number): number {
 
 export function barLengthsFor(section: string): number[] {
   const u = section.toUpperCase().trim();
+  const norm = normalizeSectionCode(section);
   const isF =
     /(?:^|[^A-Z0-9])(?:M26F|M30F|DC26F|DC30F|D42F|D51F|D54F|E60F|EC26F|EC30F|DG26F|CW1F)/.test(u) ||
-    u.includes('M26F') ||
-    u.includes('M30F') ||
-    u.includes('DC26F') ||
-    u.includes('DC30F') ||
-    u.endsWith('F');
+    norm.includes('M26F') ||
+    norm.includes('M30F') ||
+    norm.includes('DC26F') ||
+    norm.includes('DC30F') ||
+    norm.includes('DG26F') ||
+    norm.endsWith('F');
   if (isF) return [15, 17, 19];
   if (
-    u.startsWith('ANGLE') ||
-    u.startsWith('PIPE') ||
-    u.startsWith('U') ||
-    u.startsWith('PATTI') ||
-    u.startsWith('LOOM') ||
-    u.startsWith('OVALTUBE')
+    norm.startsWith('ANGLE') ||
+    norm.startsWith('PIPE') ||
+    norm.startsWith('U') ||
+    norm.startsWith('PATTI') ||
+    norm.startsWith('LOOM') ||
+    norm.startsWith('OVALTUBE')
   ) {
     return [12];
   }
@@ -103,14 +105,12 @@ export function barLengthsFor(section: string): number[] {
 }
 
 export function pricingGaugeForSection(section: string, fallbackGauge: string): string {
-  const k = section.toUpperCase().replace(/\s+/g, '');
+  const k = normalizeSectionCode(section);
   if (
     k === 'D29' ||
     k === 'D41' ||
     k === 'D31' ||
-    k === 'DG.29' ||
     k === 'DG29' ||
-    k === 'DG.31' ||
     k === 'DG31'
   ) {
     return '1.2';
@@ -504,25 +504,32 @@ export function computeSlidingWindowPieces(
   }
 
   // Evaluate any custom per-section Height & Width formula boxes added in Window Formulas (skipping core sliding sections already added above)
-  const coreWinSecs = new Set([
-    topSec.toUpperCase(),
-    botSec.toUpperCase(),
-    'DC30C',
-    'DC26C',
-    'DC30F',
-    'DC26F',
-    'M23',
-    'M28',
-    'M24',
-    'M24A',
-    'D29',
-    'D31',
-  ]);
+  const coreWinSecs = new Set(
+    [
+      topSec,
+      botSec,
+      'DC30C',
+      'DC26C',
+      'DC30F',
+      'DC26F',
+      'M23',
+      'M28',
+      'M24',
+      'M24A',
+      'D29',
+      'D31',
+    ].map(normalizeSectionCode)
+  );
   if (formula.customSectionRules && formula.customSectionRules.acc) {
     Object.entries(formula.customSectionRules.acc).forEach(([key, accCfg]) => {
       if (!accCfg.enabled) return;
       const targetSec = accCfg.which && accCfg.which !== 'none' ? accCfg.which : key;
-      if (coreWinSecs.has(key.toUpperCase()) || coreWinSecs.has(targetSec.toUpperCase())) return;
+      if (
+        coreWinSecs.has(normalizeSectionCode(key)) ||
+        coreWinSecs.has(normalizeSectionCode(targetSec))
+      ) {
+        return;
+      }
       const f = formula.customSectionRules?.formulas?.[key] || { h: { inch: 0, sutar: 0 }, w: { inch: 0, sutar: 0 } };
       const qH = accCfg.qtyH ?? accCfg.qty ?? 0;
       const qW = accCfg.qtyW ?? accCfg.qty ?? 0;
@@ -853,21 +860,21 @@ export function computeDgWindowPieces(
   addOptionalWidth('DG.24A', w.dg24aWQty || 0);
 
   // 8. Custom per-section rules attached to dgWindowFormula
-  const coreDgSecs = new Set([
-    'DG.26',
-    'DG.26F',
-    'DG.23',
-    'DG.28',
-    'DG.29',
-    'DG.31',
-    'DG.23A',
-    'DG.24A',
-  ]);
+  const coreDgSecs = new Set(
+    ['DG.26', 'DG.26F', 'DG.23', 'DG.28', 'DG.29', 'DG.31', 'DG.23A', 'DG.24A'].map(
+      normalizeSectionCode
+    )
+  );
   if (formula.customSectionRules && formula.customSectionRules.acc) {
     Object.entries(formula.customSectionRules.acc).forEach(([key, accCfg]) => {
       if (!accCfg.enabled) return;
       const targetSec = accCfg.which && accCfg.which !== 'none' ? accCfg.which : key;
-      if (coreDgSecs.has(key.toUpperCase()) || coreDgSecs.has(targetSec.toUpperCase())) return;
+      if (
+        coreDgSecs.has(normalizeSectionCode(key)) ||
+        coreDgSecs.has(normalizeSectionCode(targetSec))
+      ) {
+        return;
+      }
       const f = formula.customSectionRules?.formulas?.[key] || {
         h: { inch: 0, sutar: 0 },
         w: { inch: 0, sutar: 0 },
@@ -1065,29 +1072,36 @@ export function computeSlidingDoorPieces(
   }
 
   // Evaluate any custom per-section Height & Width formula boxes added in Sliding Door Formulas (skipping core sliding sections already added above)
-  const coreSlidingDoorSecs = new Set([
-    topSec.toUpperCase(),
-    botSec.toUpperCase(),
-    'M30',
-    'M26',
-    'M30F',
-    'M26F',
-    'DC30C',
-    'DC26C',
-    'DC30F',
-    'DC26F',
-    'M23',
-    'M28',
-    'M24',
-    'M24A',
-    'D29',
-    'D31',
-  ]);
+  const coreSlidingDoorSecs = new Set(
+    [
+      topSec,
+      botSec,
+      'M30',
+      'M26',
+      'M30F',
+      'M26F',
+      'DC30C',
+      'DC26C',
+      'DC30F',
+      'DC26F',
+      'M23',
+      'M28',
+      'M24',
+      'M24A',
+      'D29',
+      'D31',
+    ].map(normalizeSectionCode)
+  );
   if (formula.customSectionRules && formula.customSectionRules.acc) {
     Object.entries(formula.customSectionRules.acc).forEach(([key, accCfg]) => {
       if (!accCfg.enabled) return;
       const targetSec = accCfg.which && accCfg.which !== 'none' ? accCfg.which : key;
-      if (coreSlidingDoorSecs.has(key.toUpperCase()) || coreSlidingDoorSecs.has(targetSec.toUpperCase())) return;
+      if (
+        coreSlidingDoorSecs.has(normalizeSectionCode(key)) ||
+        coreSlidingDoorSecs.has(normalizeSectionCode(targetSec))
+      ) {
+        return;
+      }
       const f = formula.customSectionRules?.formulas?.[key] || { h: { inch: 0, sutar: 0 }, w: { inch: 0, sutar: 0 } };
       const qH = accCfg.qtyH ?? accCfg.qty ?? 0;
       const qW = accCfg.qtyW ?? accCfg.qty ?? 0;
@@ -1143,11 +1157,18 @@ export function computeOpenablePieces(
   const q = Math.max(1, qty);
   const pieces: CutPiece[] = [];
   const src = kind === 'door' ? 'Door' : kind === 'fix' ? 'Fix Frame' : 'Openable Window';
-  const isOuterF = outer.toUpperCase().endsWith('F') || outer.toUpperCase().includes('F');
+  const normOuter = normalizeSectionCode(outer);
+  const isOuterF = normOuter.endsWith('F') || normOuter.includes('F');
 
   // Check if a specific formula box exists for this exact outer section (e.g. D54A, D51A, D42)
-  const outerSpecificAcc = categorySettings.acc[outer.toUpperCase()];
-  const outerSpecificForm = categorySettings.formulas[outer.toUpperCase()];
+  const outerAccEntry = Object.entries(categorySettings.acc || {}).find(
+    ([k]) => normalizeSectionCode(k) === normOuter
+  );
+  const outerFormEntry = Object.entries(categorySettings.formulas || {}).find(
+    ([k]) => normalizeSectionCode(k) === normOuter
+  );
+  const outerSpecificAcc = categorySettings.acc[outer.toUpperCase()] ?? outerAccEntry?.[1];
+  const outerSpecificForm = categorySettings.formulas[outer.toUpperCase()] ?? outerFormEntry?.[1];
 
   const baseOuterDedH = outerSpecificForm
     ? dimToInches(outerSpecificForm.h)
@@ -1184,9 +1205,10 @@ export function computeOpenablePieces(
   Object.entries(categorySettings.acc || {}).forEach(([key, accCfg]) => {
     if (!accCfg || !accCfg.enabled) return;
     // Skip only if this exact key is the outer section already added as the main outer frame
-    if (key.toUpperCase() === outer.toUpperCase()) return;
-    if (key === 'D52' && (kind === 'fix' || d52Qty > 0)) return;
-    if (key === 'D59' && (d59Qty > 0 || d59aQty > 0)) return;
+    const normKey = normalizeSectionCode(key);
+    if (normKey === normOuter) return;
+    if (normKey === 'D52' && (kind === 'fix' || d52Qty > 0)) return;
+    if (normKey === 'D59' && (d59Qty > 0 || d59aQty > 0)) return;
 
     const targetSec = (accCfg.which && accCfg.which !== 'none' ? accCfg.which : key).toUpperCase();
     const f = categorySettings.formulas?.[key] || { h: { inch: 0, sutar: 0 }, w: { inch: 0, sutar: 0 } };

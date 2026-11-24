@@ -55,8 +55,10 @@ import {
   getInitialRates,
   getStarterBankAccounts,
   getStarterPackages,
+  isSectionCodeMatch,
   mergeAvailableColorsWithDefaults,
   mergeGlassRatesWithDefaults,
+  normalizeSectionCode,
 } from './utils/bossDefaultRates';
 import bossLionLogoImg from './assets/images/boss_lion_logo_1791741005749.jpg';
 import bossLetterheadCleanImg from './assets/images/boss_letterhead_bg_1791741019302.jpg';
@@ -2921,15 +2923,24 @@ export default function App() {
       ).filter(Boolean);
 
       allSecCodes.forEach((code) => {
-        if (!DEFAULT_SECTIONS.includes(code) && !nextCustomSecs.includes(code)) {
+        const existingMatchedKeys = Object.keys(nextRates[g][col] || {}).filter((k) =>
+          isSectionCodeMatch(k, code)
+        );
+        const alreadyKnown =
+          DEFAULT_SECTIONS.some((s) => isSectionCodeMatch(s, code)) ||
+          nextCustomSecs.some((s) => isSectionCodeMatch(s, code));
+        if (!alreadyKnown) {
           nextCustomSecs.push(code);
         }
-        if (nextRates[g][col][code] !== undefined) {
+        if (nextRates[g][col][code] !== undefined || existingMatchedKeys.length > 0) {
           updated++;
         } else {
           inserted++;
         }
         nextRates[g][col][code] = Math.round(r.rate);
+        existingMatchedKeys.forEach((mk) => {
+          nextRates[g][col][mk] = Math.round(r.rate);
+        });
 
         if (col === 'H23' || col === 'H.23' || col === 'PC-RAL') {
           if (!nextRates[g]['H23/PC-RAL']) nextRates[g]['H23/PC-RAL'] = {};
@@ -3019,18 +3030,24 @@ export default function App() {
     GAUGES.forEach((g) => {
       if (nextRates[g]) {
         availableColors.forEach((c) => {
-          if (nextRates[g][c] && clean in nextRates[g][c]) {
-            delete nextRates[g][c][clean];
+          if (nextRates[g][c]) {
+            Object.keys(nextRates[g][c]).forEach((k) => {
+              if (isSectionCodeMatch(k, clean)) {
+                delete nextRates[g][c][k];
+              }
+            });
           }
         });
       }
     });
     setRates(nextRates);
 
-    const nextCustom = customSections.filter((s) => s !== clean);
+    const nextCustom = customSections.filter((s) => !isSectionCodeMatch(s, clean));
     setCustomSections(nextCustom);
 
-    const nextHidden = !hiddenSections.includes(clean) ? [...hiddenSections, clean] : hiddenSections;
+    const nextHidden = !hiddenSections.some((s) => isSectionCodeMatch(s, clean))
+      ? [...hiddenSections, clean]
+      : hiddenSections;
     setHiddenSections(nextHidden);
 
     const curDeleted = layoutConfig.deletedSections || [];
@@ -3351,7 +3368,8 @@ export default function App() {
           onAddCustomSection={(sec, rate) => {
             const clean = sec.trim().toUpperCase();
             if (!clean) return;
-            if (!customSections.includes(clean)) {
+            const norm = normalizeSectionCode(clean);
+            if (!customSections.some((s) => isSectionCodeMatch(s, clean))) {
               setCustomSections([...customSections, clean]);
             }
             if (rate > 0) {
@@ -3361,6 +3379,13 @@ export default function App() {
                 availableColors.forEach((c) => {
                   if (!next[g][c]) next[g][c] = {};
                   next[g][c][clean] = rate;
+                  if (norm) {
+                    Object.keys(next[g][c]).forEach((k) => {
+                      if (normalizeSectionCode(k) === norm) {
+                        next[g][c][k] = rate;
+                      }
+                    });
+                  }
                 });
               });
               setRates(next);
@@ -3399,12 +3424,21 @@ export default function App() {
           onUpdateProjectExtras={setProjectExtras}
           rates={rates}
           onUpdateSectionRate={(g, c, sec, r) => {
+            const normSec = normalizeSectionCode(sec);
+            const updatedColorMap: Record<string, number> = {
+              ...(rates[g]?.[c] || {}),
+              [sec]: r,
+            };
+            if (normSec) {
+              Object.keys(updatedColorMap).forEach((k) => {
+                if (normalizeSectionCode(k) === normSec) {
+                  updatedColorMap[k] = r;
+                }
+              });
+            }
             const nextG = {
               ...(rates[g] || {}),
-              [c]: {
-                ...(rates[g]?.[c] || {}),
-                [sec]: r,
-              },
+              [c]: updatedColorMap,
             };
             if (c === 'H.23') {
               nextG['H23'] = { ...(nextG['H23'] || {}), [sec]: r };
@@ -3464,8 +3498,8 @@ export default function App() {
           hiddenSections={hiddenSections}
           onToggleHideSection={(sec) => {
             setHiddenSections(
-              hiddenSections.includes(sec)
-                ? hiddenSections.filter((s) => s !== sec)
+              hiddenSections.some((s) => isSectionCodeMatch(s, sec))
+                ? hiddenSections.filter((s) => !isSectionCodeMatch(s, sec))
                 : [...hiddenSections, sec]
             );
           }}

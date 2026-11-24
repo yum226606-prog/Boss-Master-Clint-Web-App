@@ -129,6 +129,10 @@ import {
   DG_SERIES_SCANNED_RATES,
   mergeDgSeriesRates,
   resolveSectionRate,
+  normalizeSectionCode,
+  isSectionCodeMatch,
+  resolveSectionLabel,
+  findMatchingSectionRate,
 } from '../utils/bossDefaultRates';
 import { Capacitor } from '@capacitor/core';
 import {
@@ -1115,14 +1119,15 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     };
     if (targetFrameType) {
       const up = currentOuter.toUpperCase();
+      const norm = normalizeSectionCode(currentOuter);
       if (targetFrameType === 'F') {
-        return pairMapF[up] || (up.endsWith('F') ? currentOuter : `${currentOuter}F`);
+        return pairMapF[up] || pairMapF[norm] || (norm.endsWith('F') ? currentOuter : `${currentOuter}F`);
       }
       if (targetFrameType === 'C') {
-        if (!up.endsWith('F')) {
+        if (!norm.endsWith('F')) {
           return currentOuter;
         }
-        return pairMapC[up] || currentOuter.replace(/f$/i, '');
+        return pairMapC[up] || pairMapC[norm] || currentOuter.replace(/f$/i, '');
       }
       return targetFrameType;
     }
@@ -1151,7 +1156,12 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
       const winWithEff = { ...w, frameType: effFt, sectionGauge: effGauge };
       const src = `Window #${idx + 1} (${w.panelCount} Palay)`;
       computeSlidingWindowPieces(winWithEff, effFt, windowFormula, fSectionFormula).forEach((p) => {
-        all.push({ ...p, source: src, gauge: p.section === 'D29' || p.section === 'D31' ? '1.2' : effGauge });
+        const normSec = normalizeSectionCode(p.section);
+        all.push({
+          ...p,
+          source: src,
+          gauge: normSec === 'D29' || normSec === 'D31' ? '1.2' : effGauge,
+        });
       });
     });
 
@@ -1166,10 +1176,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
       const dwWithEff: DgWindowItem = { ...dw, frameType: effFt, sectionGauge: effGauge };
       const src = `DG.Window #${idx + 1} (${dw.panelCount} Palay)`;
       computeDgWindowPieces(dwWithEff, effFt, dgWindowFormula, fSectionFormula).forEach((p) => {
+        const normSec = normalizeSectionCode(p.section);
         all.push({
           ...p,
           source: src,
-          gauge: p.section === 'DG.29' || p.section === 'DG.31' ? '1.2' : effGauge,
+          gauge: normSec === 'DG29' || normSec === 'DG31' ? '1.2' : effGauge,
         });
       });
     });
@@ -1242,7 +1253,13 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
         { ...sd, outer: effOuter, sectionGauge: effGauge },
         slidingDoorFormula,
         fSectionFormula
-      ).forEach((p) => all.push({ ...p, source: src, gauge: p.section === 'D31' ? '1.2' : effGauge }));
+      ).forEach((p) =>
+        all.push({
+          ...p,
+          source: src,
+          gauge: normalizeSectionCode(p.section) === 'D31' ? '1.2' : effGauge,
+        })
+      );
     });
 
     projectExtras.forEach((ex, idx) => {
@@ -1260,6 +1277,20 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     });
 
     return all;
+  };
+
+  const resolveCanonicalSectionCode = (rawSection: string): string => {
+    const trimmed = String(rawSection || '').trim();
+    if (!trimmed) return '';
+    const norm = normalizeSectionCode(trimmed);
+    if (!norm) return trimmed.toUpperCase();
+    const defaultHit = DEFAULT_SECTIONS.find((s) => normalizeSectionCode(s) === norm);
+    if (defaultHit) return defaultHit;
+    const customHit = customSections.find((s) => normalizeSectionCode(s) === norm);
+    if (customHit) return customHit;
+    const labelHit = Object.keys(SECTION_LABELS).find((s) => normalizeSectionCode(s) === norm);
+    if (labelHit) return labelHit;
+    return trimmed.toUpperCase();
   };
 
   const glassCuts = computeGlassCutsForState({
@@ -1282,22 +1313,30 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
 
   const calculateQuotation = (overrideFt: string = ctxFrameType): QuotationResult => {
     const visiblePieces = getAllCutPieces(overrideFt).filter(
-      (p) => !hiddenSections.includes(p.section) && !deletedSecs.includes(p.section)
+      (p) =>
+        !hiddenSections.some((h) => isSectionCodeMatch(h, p.section)) &&
+        !deletedSecs.some((d) => isSectionCodeMatch(d, p.section))
     );
-    const buckets: Record<string, CutPiece[]> = {};
+    const buckets: Record<string, { displaySec: string; gauge: string; pieces: CutPiece[] }> = {};
     visiblePieces.forEach((p) => {
       const effectiveGauge = p.gauge || ctxGauge;
       const pGauge = pricingGaugeForSection(p.section, effectiveGauge);
-      const key = `${p.section}|${pGauge}`;
-      if (!buckets[key]) buckets[key] = [];
-      buckets[key].push(p);
+      const normSec = normalizeSectionCode(p.section) || p.section.trim().toUpperCase();
+      const key = `${normSec}|${pGauge}`;
+      if (!buckets[key]) {
+        buckets[key] = {
+          displaySec: resolveCanonicalSectionCode(p.section),
+          gauge: pGauge,
+          pieces: [],
+        };
+      }
+      buckets[key].pieces.push(p);
     });
 
     const alumRows: AluminiumCostRow[] = [];
     let alumSubtotal = 0;
 
-    Object.entries(buckets).forEach(([key, pieces]) => {
-      const [sec, g] = key.split('|');
+    Object.values(buckets).forEach(({ displaySec: sec, gauge: g, pieces }) => {
       const packed = packSection(pieces, barLengthsFor(sec));
       let totalBars = 0;
       let totalFt = 0;
@@ -1374,11 +1413,19 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     };
   };
 
-  const allPiecesVisible = getAllCutPieces().filter((p) => !hiddenSections.includes(p.section));
+  const allPiecesVisible = getAllCutPieces().filter(
+    (p) =>
+      !hiddenSections.some((h) => isSectionCodeMatch(h, p.section)) &&
+      !deletedSecs.some((d) => isSectionCodeMatch(d, p.section))
+  );
   const sectionPiecesMap: Record<string, CutPiece[]> = {};
+  const sectionNormDisplayMap: Record<string, string> = {};
   allPiecesVisible.forEach((p) => {
-    if (!sectionPiecesMap[p.section]) sectionPiecesMap[p.section] = [];
-    sectionPiecesMap[p.section].push(p);
+    const norm = normalizeSectionCode(p.section) || p.section.trim().toUpperCase();
+    const displaySec = sectionNormDisplayMap[norm] || resolveCanonicalSectionCode(p.section);
+    sectionNormDisplayMap[norm] = displaySec;
+    if (!sectionPiecesMap[displaySec]) sectionPiecesMap[displaySec] = [];
+    sectionPiecesMap[displaySec].push(p);
   });
 
   const activeQuote = calculateQuotation(ctxFrameType);
@@ -1483,7 +1530,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
       Object.entries(sectionPiecesMap).forEach(([sec, pcs]) => {
         const packed = packSection(pcs, barLengthsFor(sec));
         lines.push({
-          left: `SECTION: ${SECTION_LABELS[sec] || sec} (${sec})`,
+          left: `SECTION: ${resolveSectionLabel(sec)} (${sec})`,
           right: `${packed.bins.length} Bar(s)`,
           highlight: true,
         });
@@ -1519,7 +1566,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
         grandBars += tBars;
         grandFt += tFt;
         lines.push({
-          left: `${SECTION_LABELS[sec] || sec} (${sec})`,
+          left: `${resolveSectionLabel(sec)} (${sec})`,
           mid: bd,
           right: `${tBars} Bars (${tFt} ft)`,
         });
@@ -1554,9 +1601,67 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
       });
     } else {
       title = 'OFFICIAL QUOTATION & COST SUMMARY';
+      const itemEntries: { left: string; mid?: string; right: string; highlight?: boolean }[] = [];
+      windows.forEach((w, idx) => {
+        itemEntries.push({
+          left: `Window #${idx + 1} (${w.panelCount || 2}-Panel ${w.frameType})`,
+          mid: `${formatDim(w.width, measurementUnit)} × ${formatDim(w.height, measurementUnit)} · ${w.sectionGauge}mm`,
+          right: `Qty: ${w.qty || 1}`,
+        });
+      });
+      dgWindows.forEach((w, idx) => {
+        itemEntries.push({
+          left: `DG Window #${idx + 1} (${w.panelCount || 2}-Panel ${w.frameType})`,
+          mid: `${formatDim(w.width, measurementUnit)} × ${formatDim(w.height, measurementUnit)} · ${w.sectionGauge}mm`,
+          right: `Qty: ${w.qty || 1}`,
+        });
+      });
+      doors.forEach((d, idx) => {
+        itemEntries.push({
+          left: `Door #${idx + 1} (${d.outer})`,
+          mid: `${formatDim(d.width, measurementUnit)} × ${formatDim(d.height, measurementUnit)} · ${d.sectionGauge}mm`,
+          right: `Qty: ${d.qty || 1}`,
+        });
+      });
+      fixframes.forEach((f, idx) => {
+        itemEntries.push({
+          left: `Fix Frame #${idx + 1} (${f.outer})`,
+          mid: `${formatDim(f.width, measurementUnit)} × ${formatDim(f.height, measurementUnit)} · ${f.sectionGauge}mm`,
+          right: `Qty: ${f.qty || 1}`,
+        });
+      });
+      openableWindows.forEach((o, idx) => {
+        itemEntries.push({
+          left: `Openable #${idx + 1} (${o.outer})`,
+          mid: `${formatDim(o.width, measurementUnit)} × ${formatDim(o.height, measurementUnit)} · ${o.sectionGauge}mm`,
+          right: `Qty: ${o.qty || 1}`,
+        });
+      });
+      slidingDoors.forEach((s, idx) => {
+        itemEntries.push({
+          left: `Sliding Door #${idx + 1} (${s.panelCount || 2}-Panel ${s.outer})`,
+          mid: `${formatDim(s.width, measurementUnit)} × ${formatDim(s.height, measurementUnit)} · ${s.sectionGauge}mm`,
+          right: `Qty: ${s.qty || 1}`,
+        });
+      });
+      projectExtras.forEach((ex, idx) => {
+        itemEntries.push({
+          left: `Extra #${idx + 1} (${ex.section})`,
+          mid: `${ex.lengthFt} ft · ${ex.gauge}mm`,
+          right: `Qty: ${ex.qty || 1}`,
+        });
+      });
+      if (itemEntries.length > 0) {
+        lines.push({
+          left: `PROJECT ITEMS & MEASUREMENTS (${activeQuote.totalUnits} Units)`,
+          right: `${ctxColor} · ${ctxGauge}mm`,
+          highlight: true,
+        });
+        itemEntries.forEach((entry) => lines.push(entry));
+      }
       activeQuote.aluminiumRows.forEach((row) => {
         lines.push({
-          left: `${SECTION_LABELS[row.section] || row.section} (${row.gauge}mm)`,
+          left: `${resolveSectionLabel(row.section)} (${row.gauge}mm)`,
           mid: `${row.bars} Bars · ${row.totalFt} ft @ Rs ${Math.round(row.ratePerFt)}`,
           right: `Rs ${Math.round(row.cost).toLocaleString()}`,
         });
@@ -2057,22 +2162,25 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
       } else {
         const shareResult = await shareOrDownloadFile({
           file: fileToExport,
-          title: `${companyName} - ${docTitle}`,
+          title: 'BOSS Quotation',
           text:
             target.kind === 'HISTORY'
               ? `${companyName} — Official Quotation for ${target.item.customerName || target.item.label} (Rs ${Math.round(
                   target.item.grandTotal
                 ).toLocaleString()})`
-              : `${companyName} — ${docTitle} for ${customerName || 'Valued Client'}`,
-          alsoDownloadOnFallback: false,
+              : `${companyName} — ${docTitle} for ${customerName || 'Valued Client'} (Net Total: Rs ${Math.round(
+                  activeQuote.grandTotal
+                ).toLocaleString()})`,
+          alsoDownloadOnFallback: true,
           openWhatsAppFallback: getWhatsAppShareUrl(target),
         });
         if (shareResult === 'shared') {
-          showSettingsToast(`✅ ${format === 'PDF' ? 'PDF Document' : 'Picture (PNG)'} share ho gayi!`);
+          showSettingsToast(`✅ ${format === 'PDF' ? 'PDF Document' : 'Picture (PNG)'} shared!`);
           setShareModalTarget(null);
-        } else if (shareResult === 'whatsapp') {
-          showSettingsToast('✅ Direct WhatsApp open ho raha hai!');
-          setShareModalTarget(null);
+        } else if (shareResult === 'fallback_whatsapp') {
+          showSettingsToast('Quotation file saved! Opening WhatsApp...');
+        } else if (shareResult === 'downloaded') {
+          showSettingsToast('Quotation file saved! Tap Open WhatsApp Direct below.');
         }
       }
     } finally {
@@ -2162,7 +2270,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     } else {
       msg += `${target.chartType} Chart for ${customerName || 'Valued Client'} (${ctxColor}, ${ctxGauge}mm, Frame ${ctxFrameType})`;
     }
-    return `https://wa.me/?text=${encodeURIComponent(msg)}`;
+    return `https://api.whatsapp.com/send?text=${encodeURIComponent(msg)}`;
   };
 
   const isTabLocked = (tabId: BossTab): boolean => {
@@ -4569,7 +4677,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
             </h3>
             <div>
               <label className="block text-[11px] text-slate-400 mb-1">
-                Section Code (e.g. D54A, M23, PIPE12, ANGLE1)
+                Section Code (e.g. D54A, M23, DG.23, PIPE12, ANGLE1)
               </label>
               <input
                 type="text"
@@ -4577,6 +4685,25 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                 onChange={(e) => setExtraSec(e.target.value.toUpperCase())}
                 className="w-full px-3 py-1.5 rounded-lg bg-[#0C0F14] border border-slate-700 font-mono text-amber-300"
               />
+              {extraSec.trim() && (() => {
+                const effExtraGauge = pricingGaugeForSection(extraSec, extraGauge);
+                const detectedRate = resolveSectionRate(rates, effExtraGauge, ctxColor, extraSec);
+                const matchedLabel = resolveSectionLabel(extraSec);
+                return (
+                  <div className="mt-1.5 flex items-center justify-between gap-2 text-[10.5px] px-2 py-1 rounded bg-[#0C0F14] border border-slate-800">
+                    <span className="text-slate-400 truncate">
+                      {matchedLabel !== extraSec.trim() ? matchedLabel : `Code: ${normalizeSectionCode(extraSec)}`}
+                    </span>
+                    <span
+                      className={`font-mono font-bold shrink-0 ${
+                        detectedRate > 0 ? 'text-emerald-400' : 'text-slate-400'
+                      }`}
+                    >
+                      Rate: Rs {Math.round(detectedRate).toLocaleString()}/ft
+                    </span>
+                  </div>
+                );
+              })()}
             </div>
             <div className="grid grid-cols-3 gap-2">
               <div>
@@ -4661,6 +4788,12 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
             ) : (
               projectExtras.map((ex, i) => {
                 const isLastExtra = i === projectExtras.length - 1;
+                const exRate = resolveSectionRate(
+                  rates,
+                  pricingGaugeForSection(ex.section, ex.gauge || ctxGauge),
+                  ctxColor,
+                  ex.section
+                );
                 return (
                 <div
                   key={ex.id}
@@ -4672,6 +4805,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                       {ex.lengthFt} ft × {ex.qty} pcs = {(ex.lengthFt * ex.qty).toFixed(1)} ft
                     </span>{' '}
                     <span className="text-slate-400">({ex.gauge}mm)</span>
+                    {exRate > 0 && (
+                      <span className="ml-1.5 text-[10.5px] font-mono text-emerald-400">
+                        · Rs {Math.round(exRate)}/ft
+                      </span>
+                    )}
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0">
                     {isLastExtra && (
@@ -4814,7 +4952,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   >
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-xs sm:text-sm font-extrabold text-[#F5B738] truncate">
-                        {section} - {SECTION_LABELS[section] || section}
+                        {section} - {resolveSectionLabel(section)}
                       </span>
                       <div className="flex items-center gap-2 shrink-0">
                         <span className="text-[11px] font-mono text-slate-400">
@@ -4989,7 +5127,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                         className="flex items-center justify-between gap-2 px-3 py-2.5 rounded-lg bg-[#0C0F14] border border-slate-800"
                       >
                         <span className="text-xs font-bold text-slate-100 truncate min-w-0">
-                          {section} - {SECTION_LABELS[section] || section}
+                          {section} - {resolveSectionLabel(section)}
                         </span>
                         <div className="flex flex-wrap items-center justify-end gap-1 shrink-0">
                           {entries.map(([len, info]) => (
@@ -5039,7 +5177,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                         return (
                           <tr key={section} className="hover:bg-slate-900/50">
                             <td className="py-2 px-3 font-bold text-[#F5B738]">
-                              {section} - {SECTION_LABELS[section] || section}
+                              {section} - {resolveSectionLabel(section)}
                             </td>
                             <td className="py-2 px-3 text-amber-200">{breakdown}</td>
                             <td className="py-2 px-3 text-center text-white font-bold">
@@ -6192,7 +6330,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                         {activeQuote.aluminiumRows.map((row, idx) => (
                           <tr key={idx}>
                             <td className="py-2 px-3 text-white font-sans">
-                              {SECTION_LABELS[row.section] || row.section}{' '}
+                              {resolveSectionLabel(row.section)}{' '}
                               <span className="text-slate-300 font-mono">({row.gauge}mm)</span>
                             </td>
                             <td className="py-2 px-3 text-center text-slate-200">{row.bars}</td>
@@ -7244,15 +7382,17 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                         if (!isDGA && isDGB) return 1;
                         return a.localeCompare(b);
                       })
-                      .filter((sec) => !deletedSecs.includes(sec))
-                      .filter(
-                        (sec) =>
-                          !rateSearch.trim() ||
-                          sec.toLowerCase().includes(rateSearch.trim().toLowerCase()) ||
-                          (SECTION_LABELS[sec] || '')
-                            .toLowerCase()
-                            .includes(rateSearch.trim().toLowerCase())
-                      );
+                      .filter((sec) => !deletedSecs.some((d) => isSectionCodeMatch(d, sec)))
+                      .filter((sec) => {
+                        if (!rateSearch.trim()) return true;
+                        const qLower = rateSearch.trim().toLowerCase();
+                        const qNorm = normalizeSectionCode(rateSearch);
+                        return (
+                          sec.toLowerCase().includes(qLower) ||
+                          (qNorm ? normalizeSectionCode(sec).includes(qNorm) : false) ||
+                          resolveSectionLabel(sec).toLowerCase().includes(qLower)
+                        );
+                      });
 
                     if (rateViewMode === 'TABLE') {
                       return (
@@ -7267,11 +7407,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                             </thead>
                             <tbody className="divide-y divide-slate-800/70">
                               {filteredSections.map((sec) => {
-                                const isHidden = hiddenSections.includes(sec);
+                                const isHidden = hiddenSections.some((h) => isSectionCodeMatch(h, sec));
                                 const val =
-                                  rates[rateGaugeTab]?.[rateColorTab]?.[sec] ??
+                                  findMatchingSectionRate(rates[rateGaugeTab]?.[rateColorTab], sec) ??
                                   resolveSectionRate(rates, rateGaugeTab, rateColorTab, sec);
-                                const barLen = sec.endsWith('F') ? 19 : 18;
+                                const barLen = normalizeSectionCode(sec).endsWith('F') ? 19 : 18;
                                 return (
                                   <tr
                                     key={sec}
@@ -7280,7 +7420,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                                     <td className="py-1.5 px-2.5">
                                       <div className="font-mono font-extrabold text-[#F5B738]">{sec}</div>
                                       <div className="text-[10px] text-slate-400 truncate max-w-[120px]">
-                                        {SECTION_LABELS[sec] || sec}
+                                        {resolveSectionLabel(sec)}
                                       </div>
                                     </td>
                                     <td className="py-1.5 px-2">
@@ -7342,11 +7482,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                     return (
                       <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-1.5 max-h-[420px] overflow-y-auto pr-0.5">
                         {filteredSections.map((sec) => {
-                          const isHidden = hiddenSections.includes(sec);
+                          const isHidden = hiddenSections.some((h) => isSectionCodeMatch(h, sec));
                           const val =
-                            rates[rateGaugeTab]?.[rateColorTab]?.[sec] ??
+                            findMatchingSectionRate(rates[rateGaugeTab]?.[rateColorTab], sec) ??
                             resolveSectionRate(rates, rateGaugeTab, rateColorTab, sec);
-                          const barLen = sec.endsWith('F') ? 19 : 18;
+                          const barLen = normalizeSectionCode(sec).endsWith('F') ? 19 : 18;
                           return (
                             <div
                               key={sec}
@@ -7390,7 +7530,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                               </div>
 
                               <div className="text-[9px] text-slate-400 truncate">
-                                {SECTION_LABELS[sec] || sec}
+                                {resolveSectionLabel(sec)}
                               </div>
 
                               <div className="text-[10px] font-mono font-bold text-emerald-400 truncate">
@@ -8177,7 +8317,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                     <div className="text-xs font-black text-white group-hover:text-black">
                       {shareModalTarget.mode === 'DOWNLOAD'
                         ? 'Download Picture (PNG)'
-                        : 'Share Picture (PNG)'}
+                        : 'Share as Picture (PNG)'}
                     </div>
                     <div className="text-[10px] text-slate-400 group-hover:text-black/80">
                       {isPreparingExport
@@ -8186,7 +8326,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                         ? 'Opening Share...'
                         : shareModalTarget.mode === 'DOWNLOAD'
                         ? 'HD Image mobile gallery / Downloads mein save karein'
-                        : 'Tap karein → WhatsApp / Share apps khulengi'}
+                        : 'WhatsApp / Android Share Sheet par Picture bhejein'}
                     </div>
                   </div>
                 </div>
@@ -8213,7 +8353,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                     <div className="text-xs font-black text-white group-hover:text-black">
                       {shareModalTarget.mode === 'DOWNLOAD'
                         ? 'Download PDF Document'
-                        : 'Share PDF Document'}
+                        : 'Share as PDF'}
                     </div>
                     <div className="text-[10px] text-slate-400 group-hover:text-black/80">
                       {isPreparingExport
@@ -8222,7 +8362,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                         ? 'Opening Share...'
                         : shareModalTarget.mode === 'DOWNLOAD'
                         ? 'A4 Official PDF mobile mein save karein'
-                        : 'Tap karein → WhatsApp / Share apps khulengi'}
+                        : 'WhatsApp / Android Share Sheet par PDF bhejein'}
                     </div>
                   </div>
                 </div>
@@ -8238,10 +8378,10 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   href={getWhatsAppShareUrl(shareModalTarget)}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-[#1C222B] border border-emerald-500/50 hover:bg-emerald-500/15 hover:border-emerald-400 text-emerald-300 text-xs font-black flex items-center justify-center gap-1.5 cursor-pointer"
+                  className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-emerald-600/20 border border-emerald-400/70 hover:bg-emerald-500 hover:text-black text-emerald-300 text-xs font-black flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                 >
                   <Phone className="w-3.5 h-3.5" />
-                  <span>Direct WhatsApp Par Bhejein</span>
+                  <span>Open WhatsApp Direct</span>
                 </a>
               )}
             </div>
@@ -8250,7 +8390,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
       )}
 
       {/* =================================================================== */}
-      {/* MODAL: DIRECT PRINT PAGE PREVIEW (A4 PRINTABLE SHEET)               */}
+      {/* MODAL: PRINT PREVIEW & SAVE PRINT PDF (A4 PRINTABLE SHEET)          */}
       {/* =================================================================== */}
       {printPreviewState && (
         <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-2.5 sm:p-4 overflow-y-auto no-print">
@@ -8262,7 +8402,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                 </div>
                 <div className="min-w-0">
                   <h3 className="text-sm font-black text-[#F5B738] truncate">
-                    Direct Print Page (A4)
+                    Print Preview &amp; Save Print PDF
                   </h3>
                   <p className="text-[10px] text-slate-400 truncate">
                     {printPreviewState.title}
@@ -8299,31 +8439,26 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                     printPreviewState.title
                   );
                   if (!ok) {
+                    let nativeFired = false;
+                    const onBp = () => {
+                      nativeFired = true;
+                    };
                     try {
+                      window.addEventListener('beforeprint', onBp, { once: true });
                       window.print();
                     } catch {
                       // ignore
+                    } finally {
+                      window.removeEventListener('beforeprint', onBp);
                     }
-                    try {
-                      const resp = await fetch(printPreviewState.pdfUrl);
-                      const blob = await resp.blob();
-                      const pdfFile = new File([blob], printPreviewState.fileName, {
-                        type: 'application/pdf',
-                      });
-                      await shareOrDownloadFile({
-                        file: pdfFile,
-                        title: `Print - ${printPreviewState.title}`,
-                        text: printPreviewState.title,
-                        alsoDownloadOnFallback: true,
-                      });
-                    } catch {
+                    if (!nativeFired) {
                       showSettingsToast(
-                        'Direct print dialog unavailable — "Save PDF" dabaa kar print karein!'
+                        'Printer app ke liye "Download Print-Ready A4 PDF" par tap karein!'
                       );
                     }
                   }
                 }}
-                className="boss-flat-btn py-2.5 px-3 rounded-xl bg-[#F5B738] hover:bg-amber-400 text-black font-black text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                className="boss-flat-btn py-3 px-4 rounded-xl bg-[#F5B738] hover:bg-amber-400 text-black font-black text-xs flex items-center justify-center gap-1.5 cursor-pointer shadow-lg"
               >
                 <Printer className="w-4 h-4" />
                 <span>Print Now</span>
@@ -8332,19 +8467,22 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               <a
                 href={printPreviewState.pdfUrl}
                 download={printPreviewState.fileName}
-                className="boss-flat-btn py-2.5 px-3 rounded-xl bg-[#60A5FA] hover:bg-sky-400 text-black font-black text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                onClick={() =>
+                  showSettingsToast('✅ Print-Ready A4 PDF saved! Ab kisi bhi printer app se print karein.')
+                }
+                className="boss-flat-btn py-3 px-3 rounded-xl bg-[#60A5FA] hover:bg-sky-400 text-black font-black text-xs flex items-center justify-center gap-1.5 cursor-pointer"
               >
                 <Download className="w-4 h-4" />
-                <span>Save PDF (For Print)</span>
+                <span>Download Print-Ready A4 PDF</span>
               </a>
 
               <a
                 href={printPreviewState.previewImageUrl}
                 download={printPreviewState.pngFileName}
-                className="boss-flat-btn py-2.5 px-3 rounded-xl bg-[#1C222B] border border-slate-700 hover:border-emerald-400 text-emerald-300 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                className="boss-flat-btn py-3 px-3 rounded-xl bg-[#1C222B] border border-slate-700 hover:border-emerald-400 text-emerald-300 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
               >
                 <ImageIcon className="w-4 h-4" />
-                <span>Save Picture</span>
+                <span>Save Picture (PNG)</span>
               </a>
             </div>
           </div>

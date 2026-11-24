@@ -219,6 +219,72 @@ export const SECTION_LABELS: Record<string, string> = {
   Z2: 'Netting Section 2 (Z-2)',
 };
 
+export function normalizeSectionCode(code: string | number | null | undefined): string {
+  return String(code ?? '')
+    .replace(/[\s.\-_]+/g, '')
+    .trim()
+    .toUpperCase();
+}
+
+export function isSectionCodeMatch(
+  a: string | null | undefined,
+  b: string | null | undefined
+): boolean {
+  const na = normalizeSectionCode(a);
+  const nb = normalizeSectionCode(b);
+  return Boolean(na && nb && na === nb);
+}
+
+const NORMALIZED_SECTION_LABELS: Record<string, string> = Object.entries(SECTION_LABELS).reduce(
+  (acc, [k, v]) => {
+    const norm = normalizeSectionCode(k);
+    if (norm && !acc[norm]) {
+      acc[norm] = v;
+    }
+    return acc;
+  },
+  {} as Record<string, string>
+);
+
+export function resolveSectionLabel(section: string | null | undefined): string {
+  const raw = String(section ?? '').trim();
+  if (!raw) return '';
+  if (SECTION_LABELS[raw]) return SECTION_LABELS[raw];
+  const up = raw.toUpperCase();
+  if (SECTION_LABELS[up]) return SECTION_LABELS[up];
+  const norm = normalizeSectionCode(raw);
+  if (norm && NORMALIZED_SECTION_LABELS[norm]) {
+    return NORMALIZED_SECTION_LABELS[norm];
+  }
+  return raw;
+}
+
+export function findMatchingSectionRate(
+  sectionMap: Record<string, number> | undefined,
+  section: string
+): number | undefined {
+  if (!sectionMap || !section) return undefined;
+  if (typeof sectionMap[section] === 'number' && !Number.isNaN(sectionMap[section])) {
+    return sectionMap[section];
+  }
+  const trimmedUp = section.trim().toUpperCase();
+  if (typeof sectionMap[trimmedUp] === 'number' && !Number.isNaN(sectionMap[trimmedUp])) {
+    return sectionMap[trimmedUp];
+  }
+  const targetNorm = normalizeSectionCode(section);
+  if (!targetNorm) return undefined;
+
+  let zeroMatch: number | undefined = undefined;
+  for (const [rateListCode, val] of Object.entries(sectionMap)) {
+    if (typeof val !== 'number' || Number.isNaN(val)) continue;
+    if (normalizeSectionCode(rateListCode) === targetNorm) {
+      if (val > 0) return val;
+      if (zeroMatch === undefined) zeroMatch = val;
+    }
+  }
+  return zeroMatch;
+}
+
 export function getInitialRates(): Record<string, Record<string, Record<string, number>>> {
   const root: Record<string, Record<string, Record<string, number>>> = {};
 
@@ -534,7 +600,11 @@ export function resolveSectionRate(
   section: string
 ): number {
   if (!rates || !section) return 0;
+  const targetNorm = normalizeSectionCode(section);
+  if (!targetNorm) return 0;
+
   const col = String(color || 'DULL').trim().toUpperCase();
+  const colNorm = normalizeSectionCode(col);
   const colorCandidates = Array.from(
     new Set(
       [
@@ -548,25 +618,42 @@ export function resolveSectionRate(
       ].filter(Boolean)
     )
   );
-  const secCandidates = Array.from(
-    new Set([section, section.replace(/\./g, '')].filter(Boolean))
+  const gaugeCandidates = Array.from(
+    new Set([gauge, '1.6', '1.2', '2', 'Std', ...Object.keys(rates)].filter(Boolean))
   );
-  const gaugeCandidates = Array.from(new Set([gauge, '1.6', '1.2'].filter(Boolean)));
 
+  const lookupInGaugeColor = (gMap: Record<string, Record<string, number>>, cKey: string) => {
+    const directMap = gMap[cKey];
+    if (directMap) {
+      const hit = findMatchingSectionRate(directMap, section);
+      if (typeof hit === 'number') return hit;
+    }
+    const cKeyNorm = normalizeSectionCode(cKey);
+    for (const [actualColor, cMap] of Object.entries(gMap)) {
+      if (normalizeSectionCode(actualColor) === cKeyNorm || normalizeSectionCode(actualColor) === colNorm) {
+        const hit = findMatchingSectionRate(cMap, section);
+        if (typeof hit === 'number') return hit;
+      }
+    }
+    return undefined;
+  };
+
+  let firstZeroSeen: number | undefined = undefined;
+
+  // Pass 1: Prefer positive (> 0) rates matching normalized section code
   for (const g of gaugeCandidates) {
     const gMap = rates[g];
     if (!gMap) continue;
     for (const c of colorCandidates) {
-      const cMap = gMap[c];
-      if (!cMap) continue;
-      for (const s of secCandidates) {
-        if (typeof cMap[s] === 'number') {
-          return cMap[s];
-        }
+      const hit = lookupInGaugeColor(gMap, c);
+      if (typeof hit === 'number') {
+        if (hit > 0) return hit;
+        if (firstZeroSeen === undefined) firstZeroSeen = hit;
       }
     }
   }
-  return 0;
+
+  return firstZeroSeen ?? 0;
 }
 
 export function getDefaultWindowFormula(): WindowFormulaSettings {
