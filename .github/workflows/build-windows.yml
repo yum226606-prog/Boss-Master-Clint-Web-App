@@ -5,6 +5,9 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-exe:
     runs-on: windows-latest
@@ -31,9 +34,21 @@ jobs:
         run: |
           npm install electron electron-builder --save-dev --legacy-peer-deps
           npx electron-builder --win nsis --publish never --config.win.icon=build/icon.ico --config.nsis.installerIcon=build/icon.ico --config.nsis.uninstallerIcon=build/icon.ico
+          $exe = Get-ChildItem -Path "dist-electron" -Filter "*.exe" | Select-Object -First 1
+          Copy-Item $exe.FullName -Destination "BOSS-Aluminium-Client.exe"
 
       - name: Upload BOSS-Aluminium-Setup.exe
         uses: actions/upload-artifact@v4
         with:
           name: BOSS-Aluminium-Windows-Setup
-          path: dist-electron/*.exe
+          path: BOSS-Aluminium-Client.exe
+
+      - name: Auto Release EXE to Latest
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v2.0.0
+          name: BOSS Aluminium Client (Latest Auto-Build)
+          make_latest: true
+          files: BOSS-Aluminium-Client.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
