@@ -2472,11 +2472,13 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
             onClick={() => onSelectTab('WINDOWS')}
             className="flex items-center gap-2 sm:gap-2.5 min-w-0 cursor-pointer flex-1"
           >
-            <img
-              src={mainLogoUrl}
-              alt="Boss Aluminium Lion Emblem"
-              className="w-10 h-10 sm:w-11 sm:h-11 rounded-full object-cover border-2 border-[#F5B738] shrink-0 shadow-sm"
-            />
+            <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-xl bg-[#0C0F14] border-2 border-[#F5B738] p-0.5 sm:p-1 flex items-center justify-center shrink-0 shadow-sm overflow-hidden">
+              <img
+                src={mainLogoUrl}
+                alt="Boss Aluminium Lion Emblem"
+                className="w-full h-full object-contain rounded-lg"
+              />
+            </div>
             <div className="min-w-0 flex-1 space-y-0.5">
               <div className="text-[13px] sm:text-base font-black text-[#F5B738] tracking-wide truncate leading-tight">
                 {companyName || 'BOSS ALUMINIUM & GLASS'}
