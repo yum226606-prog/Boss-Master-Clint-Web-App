@@ -139,7 +139,7 @@ import {
   canvasToPdfBlob,
   downloadBlobFile,
   shareOrDownloadFile,
-  triggerIframePrint,
+  triggerNativeOrIframePrint,
 } from '../utils/bossPdfExporter';
 
 interface AppLayoutCalculatorScreenProps {
@@ -2172,15 +2172,13 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   activeQuote.grandTotal
                 ).toLocaleString()})`,
           alsoDownloadOnFallback: true,
-          openWhatsAppFallback: getWhatsAppShareUrl(target),
         });
         if (shareResult === 'shared') {
           showSettingsToast(`✅ ${format === 'PDF' ? 'PDF Document' : 'Picture (PNG)'} shared!`);
           setShareModalTarget(null);
-        } else if (shareResult === 'fallback_whatsapp') {
-          showSettingsToast('Quotation file saved! Opening WhatsApp...');
         } else if (shareResult === 'downloaded') {
-          showSettingsToast('Quotation file saved! Tap Open WhatsApp Direct below.');
+          showSettingsToast('File saved to Downloads — ready to attach in WhatsApp');
+          setShareModalTarget(null);
         }
       }
     } finally {
@@ -2188,34 +2186,12 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     }
   };
 
-  // Direct Print Handler: opens interactive A4 Print Page directly and triggers native print dialog when supported
+  // Chrome-Style 2-Column Split Print Preview Handler (Quotation, Glass, Cutting, Length & History)
   const handlePrintDocument = async (
     target:
       | { kind: 'CHART'; chartType: 'CUTTING' | 'LENGTH' | 'GLASS' | 'QUOTATION' }
       | { kind: 'HISTORY'; item: SavedQuotation }
   ) => {
-    const isIframe = typeof window !== 'undefined' && window.self !== window.top;
-    const isNative = Capacitor.isNativePlatform();
-
-    if (!isIframe && !isNative && target.kind === 'CHART') {
-      let beforePrintFired = false;
-      const onBeforePrint = () => {
-        beforePrintFired = true;
-      };
-      let printErrored = false;
-      try {
-        window.addEventListener('beforeprint', onBeforePrint, { once: true });
-        window.print();
-      } catch {
-        printErrored = true;
-      } finally {
-        window.removeEventListener('beforeprint', onBeforePrint);
-      }
-      if (!printErrored && beforePrintFired) {
-        return;
-      }
-    }
-
     try {
       const built =
         target.kind === 'HISTORY'
@@ -2245,32 +2221,9 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
           pngFileName: `${baseSlug}.png`,
         };
       });
-
-      if (!isNative && !isIframe) {
-        await triggerIframePrint(previewImageUrl, title);
-      }
     } catch {
       showSettingsToast('Print page tayyar karne mein masla aaya — dobara koshish karein.');
     }
-  };
-
-  const getWhatsAppShareUrl = (
-    target:
-      | { kind: 'CHART'; chartType: 'CUTTING' | 'LENGTH' | 'GLASS' | 'QUOTATION' }
-      | { kind: 'HISTORY'; item: SavedQuotation }
-  ): string => {
-    let msg = `*${companyName || 'BOSS ALUMINIUM & GLASS'}*\n`;
-    if (target.kind === 'HISTORY') {
-      const it = target.item;
-      msg += `Saved Quotation: *${it.customerName || it.label}*\nColor: ${it.color} | Gauge: ${it.gauge}mm | Frame: ${it.frameType}\nItems: ${it.itemsSummary}\n*Net Grand Total: Rs ${Math.round(it.grandTotal).toLocaleString()}*`;
-    } else if (target.chartType === 'QUOTATION') {
-      msg += `Customer: *${customerName || 'Valued Client'}*${customerPhone ? ` (${customerPhone})` : ''}\nColor: ${ctxColor} | Gauge: ${ctxGauge}mm | Frame: ${ctxFrameType}\nAluminium (After ${markupPct}% Discount): Rs ${Math.round(activeQuote.alumWithMarkup).toLocaleString()}\nHardware: Rs ${Math.round(activeQuote.hardwareTotal).toLocaleString()}\nGlass: Rs ${Math.round(activeQuote.glassTotal).toLocaleString()}\n*NET GRAND TOTAL: Rs ${Math.round(activeQuote.grandTotal).toLocaleString()}*`;
-    } else if (target.chartType === 'GLASS') {
-      msg += `Glass Schedule (${totalGlassPieces} Pcs · ${totalGlassSqFt.toFixed(2)} Sq.Ft)\n*Total Glass Bill: Rs ${Math.round(activeQuote.glassTotal).toLocaleString()}*`;
-    } else {
-      msg += `${target.chartType} Chart for ${customerName || 'Valued Client'} (${ctxColor}, ${ctxGauge}mm, Frame ${ctxFrameType})`;
-    }
-    return `https://api.whatsapp.com/send?text=${encodeURIComponent(msg)}`;
   };
 
   const isTabLocked = (tabId: BossTab): boolean => {
@@ -8373,117 +8326,157 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                 )}
               </button>
 
-              {shareModalTarget.mode === 'SHARE' && (
-                <a
-                  href={getWhatsAppShareUrl(shareModalTarget)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="boss-flat-btn w-full py-2.5 px-3 rounded-xl bg-emerald-600/20 border border-emerald-400/70 hover:bg-emerald-500 hover:text-black text-emerald-300 text-xs font-black flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                >
-                  <Phone className="w-3.5 h-3.5" />
-                  <span>Open WhatsApp Direct</span>
-                </a>
-              )}
             </div>
           </div>
         </div>
       )}
 
       {/* =================================================================== */}
-      {/* MODAL: PRINT PREVIEW & SAVE PRINT PDF (A4 PRINTABLE SHEET)          */}
+      {/* MODAL: CHROME-STYLE 2-COLUMN SPLIT PRINT PREVIEW & SYSTEM PRINT     */}
       {/* =================================================================== */}
       {printPreviewState && (
-        <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-2.5 sm:p-4 overflow-y-auto no-print">
-          <div className="bg-[#0C1017] border-2 border-[#F5B738] rounded-2xl max-w-2xl w-full p-3.5 sm:p-4 space-y-3 shadow-2xl my-2">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-              <div className="flex items-center gap-2 min-w-0">
-                <div className="w-8 h-8 rounded-xl bg-[#F5B738] text-black flex items-center justify-center shrink-0">
-                  <Printer className="w-4 h-4" />
+        <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-sm flex items-center justify-center p-0 sm:p-3 no-print">
+          <div className="bg-[#202124] border border-slate-700/80 sm:rounded-2xl w-full max-w-6xl h-full sm:h-[90vh] flex flex-col md:flex-row overflow-hidden shadow-2xl">
+            {/* LEFT COLUMN (~70%): Crisp Single-Page A4 Paper Preview Area */}
+            <div className="w-full md:w-[68%] lg:w-[70%] flex-1 md:flex-none bg-[#323639] flex flex-col items-center justify-center p-3 sm:p-6 overflow-auto relative min-h-[42vh]">
+              <div className="w-full flex items-center justify-between gap-2 mb-2.5 sm:mb-3 md:hidden">
+                <span className="text-[11px] font-bold text-slate-300 truncate">
+                  {printPreviewState.title}
+                </span>
+                <span className="px-2 py-0.5 rounded bg-black/40 text-[10px] font-semibold text-slate-200 shrink-0">
+                  A4 · 1 sheet
+                </span>
+              </div>
+
+              {/* A4 Sheet Surface (210:297 Portrait Fit) */}
+              <div className="bg-[#0D1118] rounded shadow-[0_14px_45px_rgba(0,0,0,0.65)] ring-1 ring-white/15 p-1.5 sm:p-2 max-w-full max-h-[54vh] md:max-h-[80vh] aspect-[210/297] flex items-center justify-center overflow-hidden">
+                <img
+                  src={printPreviewState.previewImageUrl}
+                  alt="A4 Print Preview"
+                  className="w-full h-full object-contain rounded-sm"
+                />
+              </div>
+
+              <div className="mt-2.5 flex items-center gap-2 text-[11px] font-medium text-slate-300 bg-[#202124]/90 px-3 py-1 rounded-full border border-slate-700/70">
+                <span>Page 1 of 1</span>
+                <span className="text-slate-500">·</span>
+                <span>Single-Page A4 Fit</span>
+              </div>
+            </div>
+
+            {/* RIGHT COLUMN (~30%): Chrome Print Settings & Actions Sidebar */}
+            <div className="w-full md:w-[32%] lg:w-[30%] bg-[#202124] border-t md:border-t-0 md:border-l border-slate-700/80 flex flex-col justify-between shrink-0">
+              <div className="p-4 sm:p-5 space-y-4 overflow-y-auto">
+                <div className="flex items-start justify-between gap-3 border-b border-slate-700/80 pb-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <Printer className="w-4 h-4 text-[#8AB4F8] shrink-0" />
+                      <h3 className="text-base font-bold text-white tracking-tight">Print</h3>
+                    </div>
+                    <p className="text-xs text-slate-400 mt-0.5 truncate">
+                      1 sheet of paper · {printPreviewState.title}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (printPreviewState.pdfUrl) URL.revokeObjectURL(printPreviewState.pdfUrl);
+                      setPrintPreviewState(null);
+                    }}
+                    className="boss-flat-btn w-8 h-8 rounded-full bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white flex items-center justify-center cursor-pointer shrink-0"
+                    aria-label="Close print preview"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
                 </div>
-                <div className="min-w-0">
-                  <h3 className="text-sm font-black text-[#F5B738] truncate">
-                    Print Preview &amp; Save Print PDF
-                  </h3>
-                  <p className="text-[10px] text-slate-400 truncate">
-                    {printPreviewState.title}
-                  </p>
+
+                {/* Chrome-style Settings Summary Rows */}
+                <div className="space-y-2.5 text-xs">
+                  <div className="grid grid-cols-3 items-center gap-2">
+                    <span className="text-slate-400 font-medium">Destination</span>
+                    <div className="col-span-2 px-2.5 py-2 rounded-lg bg-[#292A2D] border border-slate-700 text-slate-100 font-semibold truncate">
+                      {Capacitor.isNativePlatform()
+                        ? 'Android System Printer'
+                        : 'System Printer / Save as PDF'}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-3 items-center gap-2">
+                    <span className="text-slate-400 font-medium">Pages</span>
+                    <div className="col-span-2 px-2.5 py-2 rounded-lg bg-[#292A2D] border border-slate-700 text-slate-100 font-medium">
+                      All (1 page)
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-3 items-center gap-2">
+                    <span className="text-slate-400 font-medium">Paper size</span>
+                    <div className="col-span-2 px-2.5 py-2 rounded-lg bg-[#292A2D] border border-slate-700 text-slate-100 font-medium">
+                      A4 (210 × 297 mm)
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-3 items-center gap-2">
+                    <span className="text-slate-400 font-medium">Layout</span>
+                    <div className="col-span-2 px-2.5 py-2 rounded-lg bg-[#292A2D] border border-slate-700 text-slate-100 font-medium">
+                      Portrait · Fit to 1 page
+                    </div>
+                  </div>
+                </div>
+
+                {/* Offline Save Options */}
+                <div className="pt-2 border-t border-slate-700/80 space-y-2">
+                  <a
+                    href={printPreviewState.pdfUrl}
+                    download={printPreviewState.fileName}
+                    onClick={() =>
+                      showSettingsToast(
+                        '✅ Print-Ready A4 PDF saved! Ab kisi bhi printer app se print karein.'
+                      )
+                    }
+                    className="boss-flat-btn w-full py-2.5 px-3 rounded-lg bg-[#292A2D] hover:bg-[#35373B] border border-slate-600/80 text-[#8AB4F8] font-bold text-xs flex items-center justify-center gap-2 cursor-pointer transition-colors"
+                  >
+                    <Download className="w-4 h-4 shrink-0" />
+                    <span>Save Print-Ready A4 PDF</span>
+                  </a>
+                  <a
+                    href={printPreviewState.previewImageUrl}
+                    download={printPreviewState.pngFileName}
+                    className="boss-flat-btn w-full py-2 px-3 rounded-lg bg-[#292A2D] hover:bg-[#35373B] border border-slate-700 text-slate-200 font-semibold text-xs flex items-center justify-center gap-2 cursor-pointer transition-colors"
+                  >
+                    <ImageIcon className="w-3.5 h-3.5 shrink-0" />
+                    <span>Save Picture (PNG)</span>
+                  </a>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => {
-                  if (printPreviewState.pdfUrl) URL.revokeObjectURL(printPreviewState.pdfUrl);
-                  setPrintPreviewState(null);
-                }}
-                className="boss-flat-btn w-7 h-7 rounded-lg bg-slate-800/80 text-slate-300 hover:text-white flex items-center justify-center cursor-pointer"
-                aria-label="Close print preview"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
 
-            <div className="max-h-[58vh] overflow-y-auto rounded-xl bg-[#070A0F] border border-slate-800 p-2 flex justify-center">
-              <img
-                src={printPreviewState.previewImageUrl}
-                alt="A4 Print Preview"
-                className="w-full max-w-[460px] h-auto rounded-lg shadow-lg border border-[#F5B738]/40"
-              />
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-              <button
-                type="button"
-                onClick={async () => {
-                  const ok = await triggerIframePrint(
-                    printPreviewState.previewImageUrl,
-                    printPreviewState.title
-                  );
-                  if (!ok) {
-                    let nativeFired = false;
-                    const onBp = () => {
-                      nativeFired = true;
-                    };
-                    try {
-                      window.addEventListener('beforeprint', onBp, { once: true });
-                      window.print();
-                    } catch {
-                      // ignore
-                    } finally {
-                      window.removeEventListener('beforeprint', onBp);
-                    }
-                    if (!nativeFired) {
+              {/* Bottom Chrome Action Bar */}
+              <div className="p-4 border-t border-slate-700/80 bg-[#202124] flex items-center justify-end gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (printPreviewState.pdfUrl) URL.revokeObjectURL(printPreviewState.pdfUrl);
+                    setPrintPreviewState(null);
+                  }}
+                  className="boss-flat-btn px-4 py-2 rounded-lg border border-slate-600 hover:bg-slate-800 text-[#8AB4F8] font-semibold text-xs cursor-pointer transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const result = await triggerNativeOrIframePrint(
+                      printPreviewState.previewImageUrl,
+                      printPreviewState.title
+                    );
+                    if (result === 'fallback_needed') {
                       showSettingsToast(
-                        'Printer app ke liye "Download Print-Ready A4 PDF" par tap karein!'
+                        'Printer app ke liye "Save Print-Ready A4 PDF" par tap karein!'
                       );
                     }
-                  }
-                }}
-                className="boss-flat-btn py-3 px-4 rounded-xl bg-[#F5B738] hover:bg-amber-400 text-black font-black text-xs flex items-center justify-center gap-1.5 cursor-pointer shadow-lg"
-              >
-                <Printer className="w-4 h-4" />
-                <span>Print Now</span>
-              </button>
-
-              <a
-                href={printPreviewState.pdfUrl}
-                download={printPreviewState.fileName}
-                onClick={() =>
-                  showSettingsToast('✅ Print-Ready A4 PDF saved! Ab kisi bhi printer app se print karein.')
-                }
-                className="boss-flat-btn py-3 px-3 rounded-xl bg-[#60A5FA] hover:bg-sky-400 text-black font-black text-xs flex items-center justify-center gap-1.5 cursor-pointer"
-              >
-                <Download className="w-4 h-4" />
-                <span>Download Print-Ready A4 PDF</span>
-              </a>
-
-              <a
-                href={printPreviewState.previewImageUrl}
-                download={printPreviewState.pngFileName}
-                className="boss-flat-btn py-3 px-3 rounded-xl bg-[#1C222B] border border-slate-700 hover:border-emerald-400 text-emerald-300 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
-              >
-                <ImageIcon className="w-4 h-4" />
-                <span>Save Picture (PNG)</span>
-              </a>
+                  }}
+                  className="boss-flat-btn px-5 py-2 rounded-lg bg-[#1A73E8] hover:bg-[#1B66C9] text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer shadow-md transition-colors"
+                >
+                  <Printer className="w-4 h-4" />
+                  <span>Print</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>

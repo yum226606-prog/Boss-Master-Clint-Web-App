@@ -8,6 +8,7 @@
 import { Capacitor } from '@capacitor/core';
 import { Share } from '@capacitor/share';
 import { Filesystem, Directory } from '@capacitor/filesystem';
+import { Printer } from '@bcyesil/capacitor-plugin-printer';
 
 const asciiToBytes = (str: string): Uint8Array => {
   const bytes = new Uint8Array(str.length);
@@ -206,32 +207,24 @@ export const downloadBlobFile = (blob: Blob, filename: string): void => {
   setTimeout(() => URL.revokeObjectURL(url), 20000);
 };
 
-export const openExternalShareUrl = (url: string): void => {
-  if (!url || typeof document === 'undefined') return;
-  const a = document.createElement('a');
-  a.href = url;
-  a.target = '_blank';
-  a.rel = 'noopener noreferrer';
-  a.style.display = 'none';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-};
-
+/**
+ * Shares actual PNG or PDF files via native Android Share Sheet (Capacitor Filesystem + Share)
+ * or Windows 10/11 / Browser native navigator.share({ files: [file] }) WITHOUT blocking on strict canShare checks.
+ * Never falls back to text-only WhatsApp URLs — saves to Downloads if OS share is unavailable.
+ */
 export const shareOrDownloadFile = async ({
   file,
   title,
-  text,
   alsoDownloadOnFallback = true,
-  openWhatsAppFallback,
 }: {
   file: File;
-  title: string;
-  text: string;
+  title?: string;
+  text?: string;
   alsoDownloadOnFallback?: boolean;
-  openWhatsAppFallback?: string;
-}): Promise<'shared' | 'fallback_whatsapp' | 'downloaded' | 'cancelled'> => {
-  // Step A1: Native Android / iOS Capacitor Share Sheet (when running inside Capacitor APK)
+}): Promise<'shared' | 'downloaded' | 'cancelled'> => {
+  const shareTitle = file.name || title || 'BOSS Quotation';
+
+  // Step 1: Native Android / iOS Capacitor Share Sheet (when running inside Capacitor APK)
   if (Capacitor.isNativePlatform()) {
     try {
       const base64Data = await blobToBase64(file);
@@ -241,11 +234,15 @@ export const shareOrDownloadFile = async ({
         data: base64Data,
         directory: Directory.Cache,
       });
+      const fileUri = await Filesystem.getUri({
+        path: safeName,
+        directory: Directory.Cache,
+      });
+      const resolvedUri = fileUri?.uri || written.uri;
       await Share.share({
-        title: title || 'BOSS Quotation',
-        text,
-        files: [written.uri],
-        dialogTitle: 'Share via WhatsApp or App',
+        title: shareTitle,
+        url: resolvedUri,
+        dialogTitle: 'Share Quotation via',
       });
       return 'shared';
     } catch (err: unknown) {
@@ -253,40 +250,33 @@ export const shareOrDownloadFile = async ({
       if (msg.includes('cancel') || msg.includes('abort')) {
         return 'cancelled';
       }
-      // Fall through to Web Share API / Step B Android WebView fallback
+      // Fall through cleanly to Web Share API / file download
     }
   }
 
-  // Step A2: Web Share API with files (Android Chrome / modern WebView -> OS bottom Share Sheet)
-  if (
-    typeof navigator !== 'undefined' &&
-    typeof navigator.share === 'function' &&
-    (typeof navigator.canShare !== 'function' || navigator.canShare({ files: [file] }))
-  ) {
+  // Step 2: Windows .exe & Web Browser — call navigator.share directly with File object (no canShare pre-block)
+  if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
     try {
       await navigator.share({
         files: [file],
-        title: title || 'BOSS Quotation',
-        text,
+        title: shareTitle,
       });
       return 'shared';
     } catch (err: unknown) {
       if (err instanceof Error && err.name === 'AbortError') {
         return 'cancelled';
       }
-      // File share rejected or failed in Android APK WebView -> proceed cleanly to Step B
+      const msg = err instanceof Error ? err.message.toLowerCase() : String(err || '').toLowerCase();
+      if (msg.includes('cancel') || msg.includes('abort')) {
+        return 'cancelled';
+      }
+      // Older OS / WebView without file share support -> fall through cleanly to auto-download
     }
   }
 
-  // Step B (Android APK WebView Fallback): Auto-download/save file + launch WhatsApp Direct
+  // Step 3: Clean file download fallback (never opens text-only WhatsApp link)
   if (alsoDownloadOnFallback) {
     downloadBlobFile(file, file.name);
-  }
-  if (openWhatsAppFallback) {
-    openExternalShareUrl(openWhatsAppFallback);
-    return 'fallback_whatsapp';
-  }
-  if (alsoDownloadOnFallback) {
     return 'downloaded';
   }
 
@@ -294,7 +284,53 @@ export const shareOrDownloadFile = async ({
 };
 
 /**
- * Triggers a clean A4 print dialog via a dedicated hidden iframe containing the exact rendered A4 image.
+ * Generates strict single-page A4 Portrait print HTML so documents never split onto 2 pages.
+ */
+export const buildSinglePageA4PrintHtml = (imageDataUrl: string, title: string): string => {
+  const safeTitle = String(title || 'Boss Aluminium & Glass')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>${safeTitle}</title>
+<style>
+  @page { size: A4 portrait; margin: 0; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: #fff;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  img {
+    max-width: 210mm;
+    max-height: 296mm;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+    display: block;
+    margin: 0 auto;
+    page-break-inside: avoid;
+    break-inside: avoid;
+    page-break-after: avoid;
+  }
+</style>
+</head>
+<body>
+  <img src="${imageDataUrl}" alt="${safeTitle}" />
+</body>
+</html>`;
+};
+
+/**
+ * Triggers a clean single-page A4 print dialog via a dedicated hidden iframe containing the exact rendered A4 image.
  * Returns true if the browser actually opened the print dialog (`beforeprint` fired), false otherwise.
  */
 export const triggerIframePrint = (imageDataUrl: string, title: string): Promise<boolean> =>
@@ -325,10 +361,6 @@ export const triggerIframePrint = (imageDataUrl: string, title: string): Promise
       resolve(didPrint);
     };
 
-    const safeTitle = String(title || 'Boss Aluminium & Glass')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
-
     iframe.onload = () => {
       const win = iframe.contentWindow;
       if (!win) {
@@ -352,22 +384,58 @@ export const triggerIframePrint = (imageDataUrl: string, title: string): Promise
       }, 350);
     };
 
-    iframe.srcdoc = `<!doctype html>
-<html>
-<head>
-<meta charset="utf-8" />
-<title>${safeTitle}</title>
-<style>
-  @page { size: A4 portrait; margin: 0; }
-  html, body { margin: 0; padding: 0; background: #fff; }
-  img { width: 100%; max-width: 210mm; height: auto; display: block; margin: 0 auto; }
-</style>
-</head>
-<body>
-  <img src="${imageDataUrl}" alt="${safeTitle}" />
-</body>
-</html>`;
+    iframe.srcdoc = buildSinglePageA4PrintHtml(imageDataUrl, title);
 
     document.body.appendChild(iframe);
     setTimeout(() => cleanup(false), 3000);
   });
+
+/**
+ * Executes real OS Print dialog from the Chrome-Style Print Preview modal:
+ * - Android APK: uses @bcyesil/capacitor-plugin-printer native Android PrintManager dialog.
+ * - Windows .exe / Web: uses dedicated single-page A4 hidden iframe print, falling back to window.print().
+ */
+export const triggerNativeOrIframePrint = async (
+  imageDataUrl: string,
+  title: string
+): Promise<'printed' | 'fallback_needed'> => {
+  if (!imageDataUrl) return 'fallback_needed';
+
+  if (Capacitor.isNativePlatform()) {
+    try {
+      await Printer.print({
+        content: buildSinglePageA4PrintHtml(imageDataUrl, title),
+        name: title || 'BOSS Quotation',
+        orientation: 'portrait',
+      });
+      return 'printed';
+    } catch {
+      // Fall back to iframe / window print below
+    }
+  }
+
+  const iframePrinted = await triggerIframePrint(imageDataUrl, title);
+  if (iframePrinted) {
+    return 'printed';
+  }
+
+  if (typeof window !== 'undefined' && typeof window.print === 'function') {
+    let nativeFired = false;
+    const onBeforePrint = () => {
+      nativeFired = true;
+    };
+    try {
+      window.addEventListener('beforeprint', onBeforePrint, { once: true });
+      window.print();
+    } catch {
+      // ignore
+    } finally {
+      window.removeEventListener('beforeprint', onBeforePrint);
+    }
+    if (nativeFired) {
+      return 'printed';
+    }
+  }
+
+  return 'fallback_needed';
+};
