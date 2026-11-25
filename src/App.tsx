@@ -79,11 +79,13 @@ import {
   BossUserRole,
   buildScopedUserQuery,
   clearActiveSessionToken,
+  clearAppConfigCache,
   clearAuthSession,
   clearLastActiveAtMs,
   ClientAuthSession,
   collectAndSyncUserTelemetryToSupabase,
   evaluateClientAccessState,
+  fetchAppConfigsSmart,
   fetchMultiKeyUserRecords,
   getClientPublicIpAddress,
   getOrCreateClientDeviceId,
@@ -599,13 +601,22 @@ export default function App() {
 
   const normalizePhoneDigits = (p: string = '') => p.replace(/[^0-9]/g, '').slice(-10);
 
+  const syncInFlightRef = useRef<{
+    promise: Promise<boolean>;
+    forceRates: boolean;
+  } | null>(null);
+  const hasHydratedCloudConfigsInSessionRef = useRef(false);
+  const lastCloudSyncStartedAtRef = useRef(0);
+
   const syncFromSupabase = async (options?: {
     forceRates?: boolean;
     silent?: boolean;
     sessionOverride?: ClientAuthSession | null;
-  }) => {
+    bypassSingleFlight?: boolean;
+  }): Promise<boolean> => {
     const forceRates = Boolean(options?.forceRates);
     const silent = Boolean(options?.silent);
+    const bypassSingleFlight = Boolean(options?.bypassSingleFlight);
     const activeSession =
       options?.sessionOverride !== undefined ? options.sessionOverride : authSession;
 
@@ -616,97 +627,121 @@ export default function App() {
       return false;
     }
 
+    if (!bypassSingleFlight && syncInFlightRef.current) {
+      const existingFlight = syncInFlightRef.current;
+      if (!forceRates || existingFlight.forceRates) {
+        return existingFlight.promise;
+      }
+      await existingFlight.promise.catch(() => false);
+    }
+
+    lastCloudSyncStartedAtRef.current = Date.now();
     setIsSyncingCloud(true);
-    try {
-      const [cfgRes, multiKeyRes, clientIpAddress, serverNowMs] = await Promise.all([
-        callSupabaseProxy({
-          table: 'app_configs',
-          method: 'GET',
-          query: 'select=id,value',
-        }),
-        fetchMultiKeyUserRecords({
-          deviceId: activeSession?.deviceId || clientDeviceId,
-          userId: activeSession?.userId,
-          email: activeSession?.email,
-          phone: activeSession?.phone,
-          cnic: activeSession?.cnic,
-        }),
-        getClientPublicIpAddress(),
-        fetchSupabaseServerTimeMs(),
-      ]);
 
-      const { usersRes, clientUsersRes, subsRes } = multiKeyRes;
+    const runPromise: Promise<boolean> = (async (): Promise<boolean> => {
+      try {
+        const [cfgRes, multiKeyRes, clientIpAddress, serverNowMs] = await Promise.all([
+          fetchAppConfigsSmart({ forceRefresh: forceRates }),
+          fetchMultiKeyUserRecords({
+            deviceId: activeSession?.deviceId || clientDeviceId,
+            userId: activeSession?.userId,
+            email: activeSession?.email,
+            phone: activeSession?.phone,
+            cnic: activeSession?.cnic,
+          }),
+          getClientPublicIpAddress(),
+          fetchSupabaseServerTimeMs(),
+        ]);
 
-      // Offline / unreachable network guard: NEVER overwrite cached access, offers, packages, or rates when offline!
-      const anyCloudSuccess =
-        cfgRes.ok || usersRes.ok || subsRes.ok || clientUsersRes.ok;
-      if (!anyCloudSuccess) {
-        if (!silent) {
-          triggerGlobalToast('📴 Offline / Cloud unreachable — Using saved device data.');
-        }
-        return false;
-      }
+        const { usersRes, clientUsersRes, subsRes } = multiKeyRes;
 
-      const cfgMap: Record<string, any> = {};
-      if (cfgRes.ok && Array.isArray(cfgRes.data)) {
-        cfgRes.data.forEach((row: any) => {
-          if (row?.id && row?.value !== undefined) {
-            cfgMap[row.id] = row.value;
+        // Offline / unreachable network guard: NEVER overwrite cached access, offers, packages, or rates when offline!
+        const anyCloudSuccess =
+          cfgRes.ok || usersRes.ok || subsRes.ok || clientUsersRes.ok;
+        if (!anyCloudSuccess) {
+          if (!silent) {
+            triggerGlobalToast('📴 Offline / Cloud unreachable — Using saved device data.');
           }
-        });
-      }
-
-      const globalCfg = {
-        ...(cfgMap.global_config || {}),
-        ...(cfgMap.master_engine_config || {}),
-      };
-      if (Object.keys(globalCfg).length > 0) {
-        saveCachedMasterEngineConfig(globalCfg);
-      }
-      const ratesCfg = cfgMap.aluminium_rates_v1 || {};
-      const sectionsCfg = cfgMap.custom_sections_v1 || {};
-      const formulasCfg = cfgMap.formulas_v1 || {};
-      const layoutCfg = cfgMap.layout_config_v1 || {};
-      const brandingCfg = cfgMap.company_branding_v1 || {};
-      const sbMigrationCfg =
-        cfgMap.supabase_config_v1 ||
-        globalCfg.supabaseMigration ||
-        globalCfg.supabaseConfig ||
-        {};
-
-      // 0. Auto-Migrate Supabase Database if Admin publishes a new Supabase URL + Key
-      const candidateNewUrl = String(
-        sbMigrationCfg.url ||
-          sbMigrationCfg.supabaseUrl ||
-          globalCfg.newSupabaseUrl ||
-          ''
-      ).trim();
-      const candidateNewKey = String(
-        sbMigrationCfg.publishableKey ||
-          sbMigrationCfg.anonKey ||
-          sbMigrationCfg.key ||
-          globalCfg.newSupabaseKey ||
-          globalCfg.newSupabasePublishableKey ||
-          ''
-      ).trim();
-      if (
-        !hasMigratedDbInSessionRef.current &&
-        candidateNewUrl.startsWith('https://') &&
-        candidateNewKey.length > 16
-      ) {
-        const switched = reinitializeSupabaseClient(candidateNewUrl, candidateNewKey);
-        if (switched) {
-          hasMigratedDbInSessionRef.current = true;
-          triggerGlobalToast('🔄 Switched to updated Admin Supabase Cloud!');
-          setIsSyncingCloud(false);
-          return syncFromSupabase({ ...options, silent: true });
+          return false;
         }
-      }
 
-      // 1. Packages, Bank Accounts, Broadcasts, Offers, Main Logo, Mobile APK/iOS & Themes
-      if (Array.isArray(globalCfg.bankAccounts) && globalCfg.bankAccounts.length > 0) {
-        setBankAccounts(globalCfg.bankAccounts);
-      }
+        const cfgMap: Record<string, any> =
+          cfgRes.cfgMap && typeof cfgRes.cfgMap === 'object' ? cfgRes.cfgMap : {};
+
+        const cachedMaster = loadCachedMasterEngineConfig();
+        const globalCfg = {
+          ...cachedMaster,
+          ...(cfgMap.global_config || {}),
+          ...(cfgMap.master_engine_config || {}),
+        };
+        if (
+          Object.keys(globalCfg).length > 0 &&
+          (cfgRes.changed || Object.keys(cachedMaster).length === 0)
+        ) {
+          saveCachedMasterEngineConfig(globalCfg);
+        }
+        const ratesCfg = cfgMap.aluminium_rates_v1 || {};
+        const sectionsCfg = cfgMap.custom_sections_v1 || {};
+        const formulasCfg = cfgMap.formulas_v1 || {};
+        const layoutCfg = cfgMap.layout_config_v1 || {};
+        const brandingCfg = cfgMap.company_branding_v1 || {};
+        const sbMigrationCfg =
+          cfgMap.supabase_config_v1 ||
+          globalCfg.supabaseMigration ||
+          globalCfg.supabaseConfig ||
+          {};
+
+        // 0. Auto-Migrate Supabase Database if Admin publishes a new Supabase URL + Key
+        const candidateNewUrl = String(
+          sbMigrationCfg.url ||
+            sbMigrationCfg.supabaseUrl ||
+            globalCfg.newSupabaseUrl ||
+            ''
+        ).trim();
+        const candidateNewKey = String(
+          sbMigrationCfg.publishableKey ||
+            sbMigrationCfg.anonKey ||
+            sbMigrationCfg.key ||
+            globalCfg.newSupabaseKey ||
+            globalCfg.newSupabasePublishableKey ||
+            ''
+        ).trim();
+        if (
+          !hasMigratedDbInSessionRef.current &&
+          candidateNewUrl.startsWith('https://') &&
+          candidateNewKey.length > 16
+        ) {
+          const switched = reinitializeSupabaseClient(candidateNewUrl, candidateNewKey);
+          if (switched) {
+            clearAppConfigCache();
+            hasHydratedCloudConfigsInSessionRef.current = false;
+            hasMigratedDbInSessionRef.current = true;
+            triggerGlobalToast('🔄 Switched to updated Admin Supabase Cloud!');
+            if (syncInFlightRef.current?.promise === runPromise) {
+              syncInFlightRef.current = null;
+            }
+            setIsSyncingCloud(false);
+            return syncFromSupabase({
+              ...options,
+              silent: true,
+              bypassSingleFlight: true,
+            });
+          }
+        }
+
+        const shouldApplyAppConfigSections =
+          cfgRes.ok &&
+          (cfgRes.changed ||
+            forceRates ||
+            !hasHydratedCloudConfigsInSessionRef.current);
+
+        if (shouldApplyAppConfigSections) {
+          hasHydratedCloudConfigsInSessionRef.current = true;
+
+          // 1. Packages, Bank Accounts, Broadcasts, Offers, Main Logo, Mobile APK/iOS & Themes
+          if (Array.isArray(globalCfg.bankAccounts) && globalCfg.bankAccounts.length > 0) {
+            setBankAccounts(globalCfg.bankAccounts);
+          }
 
       // Normalize Admin Discount Offer & Broadcast Banners (supporting all Admin field/key variants)
       const cloudOfferUpdateTs = Number(
@@ -1166,6 +1201,7 @@ export default function App() {
           persistRatesSnapshotToDevice(rates, nextMergedGlassRates);
         }
       }
+        }
 
       // 6. Live Admin Access Control (Block Account/Device/IP/MAC/CNIC/Email, Remote force_logout_at & RESET_, VIP, Trial/Subscription Expiry)
       const usersList = Array.isArray(usersRes.data) ? usersRes.data : [];
@@ -1322,14 +1358,21 @@ export default function App() {
         );
       }
       return true;
-    } catch {
-      if (!silent) {
-        triggerGlobalToast('⚠️ Offline Mode — Running on saved device data.');
+      } catch {
+        if (!silent) {
+          triggerGlobalToast('⚠️ Offline Mode — Running on saved device data.');
+        }
+        return false;
+      } finally {
+        if (syncInFlightRef.current?.promise === runPromise) {
+          syncInFlightRef.current = null;
+        }
+        setIsSyncingCloud(false);
       }
-      return false;
-    } finally {
-      setIsSyncingCloud(false);
-    }
+    })();
+
+    syncInFlightRef.current = { promise: runPromise, forceRates };
+    return runPromise;
   };
 
   const triggerSessionConflictLogout = async () => {
@@ -1883,8 +1926,14 @@ export default function App() {
       shopPhotoUrl: session.shopPhotoUrl,
       isOnline: true,
     });
-    await syncFromSupabase({ forceRates: false, silent: true, sessionOverride: session });
-    loadSupportRequests(undefined, session);
+    const syncedOk = await syncFromSupabase({
+      forceRates: false,
+      silent: true,
+      sessionOverride: session,
+    });
+    if (!syncedOk) {
+      loadSupportRequests(undefined, session);
+    }
     markInitialSyncCompletedForDevice(session.deviceId);
   };
 
@@ -2320,26 +2369,27 @@ export default function App() {
         existingSession?.deviceId,
         existingSession ? { email: existingSession.email, phone: existingSession.phone } : undefined
       );
-      // Lightweight branding/letterhead check when online so Admin Panel's synced letterhead_bg_url always shows
+      // Lightweight branding/letterhead check using updated_at cache when online so Admin Panel's synced letterhead_bg_url always shows
       if (typeof navigator === 'undefined' || navigator.onLine !== false) {
-        callSupabaseProxy({
-          table: 'app_configs',
-          method: 'GET',
-          query:
-            'id=in.(master_engine_config,global_config,company_branding_v1,company_branding,layout_config_v1,letterhead_bg_url)&select=id,value',
+        fetchAppConfigsSmart({
+          idsFilter: [
+            'master_engine_config',
+            'global_config',
+            'company_branding_v1',
+            'company_branding',
+            'layout_config_v1',
+            'letterhead_bg_url',
+          ],
           timeoutMs: 6000,
         })
           .then((cfgOnlyRes) => {
-            if (!cfgOnlyRes.ok || !Array.isArray(cfgOnlyRes.data)) return;
-            const mapOnly: Record<string, any> = {};
-            cfgOnlyRes.data.forEach((row: any) => {
-              if (row?.id && row?.value !== undefined) mapOnly[row.id] = row.value;
-            });
+            if (!cfgOnlyRes.ok) return;
+            const mapOnly = cfgOnlyRes.cfgMap || {};
             const mergedCfg = {
               ...(mapOnly.global_config || {}),
               ...(mapOnly.master_engine_config || {}),
             };
-            if (Object.keys(mergedCfg).length > 0) {
+            if (Object.keys(mergedCfg).length > 0 && cfgOnlyRes.changed) {
               saveCachedMasterEngineConfig(mergedCfg);
             }
             const foundLh = extractAdminLetterheadBgUrl(
@@ -2473,7 +2523,13 @@ export default function App() {
 
     const handleVisibleOrFocus = () => {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
-      if (Date.now() - lastAutoSyncMs < 10_000) return;
+      const now = Date.now();
+      if (
+        now - lastAutoSyncMs < 30_000 ||
+        now - lastCloudSyncStartedAtRef.current < 30_000
+      ) {
+        return;
+      }
       triggerDebouncedSync(250);
     };
 
@@ -2485,7 +2541,7 @@ export default function App() {
       if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
       lastAutoSyncMs = Date.now();
       syncFromSupabaseRef.current?.({ forceRates: false, silent: true });
-    }, 45_000);
+    }, 60_000);
 
     return () => {
       if (debounceTimer) clearTimeout(debounceTimer);

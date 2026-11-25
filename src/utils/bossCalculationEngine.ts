@@ -80,7 +80,7 @@ export function billFeet(decIn: number): number {
 }
 
 export function barLengthsFor(section: string): number[] {
-  const u = section.toUpperCase().trim();
+  const u = String(section || '').toUpperCase().trim();
   const norm = normalizeSectionCode(section);
   const isF =
     /(?:^|[^A-Z0-9])(?:M26F|M30F|DC26F|DC30F|D42F|D51F|D54F|E60F|EC26F|EC30F|DG26F|CW1F)/.test(u) ||
@@ -1161,14 +1161,14 @@ export function computeOpenablePieces(
   const isOuterF = normOuter.endsWith('F') || normOuter.includes('F');
 
   // Check if a specific formula box exists for this exact outer section (e.g. D54A, D51A, D42)
-  const outerAccEntry = Object.entries(categorySettings.acc || {}).find(
+  const outerAccEntry = Object.entries(categorySettings?.acc || {}).find(
     ([k]) => normalizeSectionCode(k) === normOuter
   );
-  const outerFormEntry = Object.entries(categorySettings.formulas || {}).find(
+  const outerFormEntry = Object.entries(categorySettings?.formulas || {}).find(
     ([k]) => normalizeSectionCode(k) === normOuter
   );
-  const outerSpecificAcc = categorySettings.acc[outer.toUpperCase()] ?? outerAccEntry?.[1];
-  const outerSpecificForm = categorySettings.formulas[outer.toUpperCase()] ?? outerFormEntry?.[1];
+  const outerSpecificAcc = categorySettings?.acc?.[outer.toUpperCase()] ?? outerAccEntry?.[1];
+  const outerSpecificForm = categorySettings?.formulas?.[outer.toUpperCase()] ?? outerFormEntry?.[1];
 
   const baseOuterDedH = outerSpecificForm
     ? dimToInches(outerSpecificForm.h)
@@ -1234,17 +1234,17 @@ export function computeOpenablePieces(
   });
 
   if (d59Qty > 0) {
-    const f = categorySettings.formulas['D59'];
+    const f = categorySettings?.formulas?.['D59'];
     const len = f && dimToInches(f.w) > 0 ? Math.max(0, width - dimToInches(f.w)) : width;
     pieces.push({ section: 'D59', length: len, qty: d59Qty * q, source: src, label: 'D59 width', gauge });
   }
   if (d59aQty > 0) {
-    const f = categorySettings.formulas['D59'];
+    const f = categorySettings?.formulas?.['D59'];
     const len = f && dimToInches(f.w) > 0 ? Math.max(0, width - dimToInches(f.w)) : width;
     pieces.push({ section: 'D59A', length: len, qty: d59aQty * q, source: src, label: 'D59A width', gauge });
   }
   if (d52Qty > 0) {
-    const f = categorySettings.formulas['D52'];
+    const f = categorySettings?.formulas?.['D52'];
     const len = f && dimToInches(f.w) > 0 ? Math.max(0, width - dimToInches(f.w)) : width;
     pieces.push({ section: 'D52', length: len, qty: d52Qty * q, source: src, label: 'D52 width', gauge });
   }

@@ -1360,18 +1360,20 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     });
 
     // Discount (%) deduction from Aluminium Subtotal (Replaces Markup %)
-    const discountAmount = alumSubtotal * (Math.max(0, markupPct) / 100.0);
+    const safeMarkup = Number(markupPct) || 0;
+    const safeHwRate = Number(hardwareRate) || 0;
+    const discountAmount = alumSubtotal * (Math.max(0, safeMarkup) / 100.0);
     const alumWithMarkup = Math.max(0, alumSubtotal - discountAmount);
 
     const totalUnits =
-      windows.reduce((s, i) => s + i.qty, 0) +
-      dgWindows.reduce((s, i) => s + i.qty, 0) +
-      doors.reduce((s, i) => s + i.qty, 0) +
-      fixframes.reduce((s, i) => s + i.qty, 0) +
-      openableWindows.reduce((s, i) => s + i.qty, 0) +
-      slidingDoors.reduce((s, i) => s + i.qty, 0);
+      windows.reduce((s, i) => s + (Number(i.qty) || 0), 0) +
+      dgWindows.reduce((s, i) => s + (Number(i.qty) || 0), 0) +
+      doors.reduce((s, i) => s + (Number(i.qty) || 0), 0) +
+      fixframes.reduce((s, i) => s + (Number(i.qty) || 0), 0) +
+      openableWindows.reduce((s, i) => s + (Number(i.qty) || 0), 0) +
+      slidingDoors.reduce((s, i) => s + (Number(i.qty) || 0), 0);
 
-    const hardwareTotal = layoutConfig.showHardwareRow ? totalUnits * hardwareRate : 0;
+    const hardwareTotal = layoutConfig.showHardwareRow ? totalUnits * safeHwRate : 0;
 
     const glassGroupMap: Record<string, { sqft: number; rate: number }> = {};
     glassCuts.forEach((cut) => {
@@ -1380,10 +1382,12 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
           ? `DG Glass ${cut.glassColor}`
           : `${cut.glassGauge}mm ${cut.glassColor}`;
       const rate =
-        glassRates[cut.glassGauge]?.[cut.glassColor] ??
-        (cut.glassGauge === 'DG' ? glassRates['DG']?.['CLEAR'] ?? 450 : 240);
+        Number(
+          glassRates[cut.glassGauge]?.[cut.glassColor] ??
+            (cut.glassGauge === 'DG' ? glassRates['DG']?.['CLEAR'] ?? 450 : 240)
+        ) || 0;
       const cur = glassGroupMap[key] || { sqft: 0, rate };
-      glassGroupMap[key] = { sqft: cur.sqft + cut.sqft, rate };
+      glassGroupMap[key] = { sqft: cur.sqft + (Number(cut.sqft) || 0), rate };
     });
 
     const glassLines: GlassCostLine[] = Object.entries(glassGroupMap).map(([key, val]) => ({
@@ -1393,9 +1397,9 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
       total: val.sqft * val.rate,
     }));
 
-    const glassTotal = glassLines.reduce((s, l) => s + l.total, 0);
-    const effTransport = layoutConfig.showTransportRow ? transportRent : 0;
-    const effLabour = layoutConfig.showLabourRow ? labourCost : 0;
+    const glassTotal = glassLines.reduce((s, l) => s + (Number(l.total) || 0), 0);
+    const effTransport = layoutConfig.showTransportRow ? Number(transportRent) || 0 : 0;
+    const effLabour = layoutConfig.showLabourRow ? Number(labourCost) || 0 : 0;
     const grandTotal = alumWithMarkup + hardwareTotal + glassTotal + effTransport + effLabour;
 
     return {
@@ -1432,8 +1436,8 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   const quoteC = calculateQuotation('C');
   const quoteF = calculateQuotation('F');
 
-  const totalGlassPieces = glassCuts.reduce((sum, g) => sum + g.pieces, 0);
-  const totalGlassSqFt = glassCuts.reduce((sum, g) => sum + g.sqft, 0);
+  const totalGlassPieces = glassCuts.reduce((sum, g) => sum + (Number(g.pieces) || 0), 0);
+  const totalGlassSqFt = glassCuts.reduce((sum, g) => sum + (Number(g.sqft) || 0), 0);
 
   const drawTruncatedText = (
     ctx: CanvasRenderingContext2D,
@@ -2472,7 +2476,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
             onClick={() => onSelectTab('WINDOWS')}
             className="flex items-center gap-2 sm:gap-2.5 min-w-0 cursor-pointer flex-1"
           >
-            <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-xl bg-[#0C0F14] border-2 border-[#F5B738] p-0.5 sm:p-1 flex items-center justify-center shrink-0 shadow-sm overflow-hidden">
+            <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-xl bg-[#0C0F14] border-2 border-[#F5B738] p-1 flex items-center justify-center shrink-0 shadow-sm overflow-hidden">
               <img
                 src={mainLogoUrl}
                 alt="Boss Aluminium Lion Emblem"
@@ -4757,7 +4761,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   <div className="min-w-0 truncate">
                     <span className="font-bold text-[#F5B738] font-mono">{ex.section}</span> ·{' '}
                     <span className="text-white font-mono">
-                      {ex.lengthFt} ft × {ex.qty} pcs = {(ex.lengthFt * ex.qty).toFixed(1)} ft
+                      {ex.lengthFt} ft × {ex.qty} pcs = {((Number(ex.lengthFt) || 0) * (Number(ex.qty) || 0)).toFixed(1)} ft
                     </span>{' '}
                     <span className="text-slate-400">({ex.gauge}mm)</span>
                     {exRate > 0 && (

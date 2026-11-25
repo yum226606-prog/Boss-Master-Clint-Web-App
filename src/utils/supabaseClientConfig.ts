@@ -190,87 +190,153 @@ function captureDateHeaderFromResponse(resp: Response): number {
  * with automatic fallback to Supabase HTTP response 'Date' header.
  * Never trusts mobile/desktop local clock for Trial or Subscription verification.
  */
+let serverTimeInFlightPromise: Promise<number> | null = null;
+
 export async function fetchSupabaseServerTimeMs(): Promise<number> {
-  const { url: urlBase, key: apiKey } = getActiveSupabaseCredentials();
-  let headerServerMs = 0;
+  const perfNow = typeof performance !== 'undefined' ? performance.now() : 0;
+  if (
+    lastObservedServerMs > 0 &&
+    lastObservedPerfMs > 0 &&
+    perfNow - lastObservedPerfMs < 30_000
+  ) {
+    return getEffectiveServerNowMs();
+  }
 
-  // 1. Primary: Supabase RPC get_server_time_ms
-  try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 5000);
-    const rpcResp = await fetch(`${urlBase}/rest/v1/rpc/get_server_time_ms`, {
-      method: 'POST',
-      headers: {
-        apikey: apiKey,
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: '{}',
-      signal: ctrl.signal,
-    });
-    clearTimeout(timer);
-    headerServerMs = captureDateHeaderFromResponse(rpcResp);
-    if (rpcResp.ok) {
-      const txt = await rpcResp.text().catch(() => '');
-      let parsedBody: any = txt;
-      try {
-        parsedBody = txt ? JSON.parse(txt) : null;
-      } catch {
-        // raw string/number
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return getEffectiveServerNowMs();
+  }
+
+  if (serverTimeInFlightPromise) {
+    return serverTimeInFlightPromise;
+  }
+
+  serverTimeInFlightPromise = (async (): Promise<number> => {
+    const { url: urlBase, key: apiKey } = getActiveSupabaseCredentials();
+    let headerServerMs = 0;
+
+    // 1. Primary: Supabase RPC get_server_time_ms
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 3000);
+      const rpcResp = await fetch(`${urlBase}/rest/v1/rpc/get_server_time_ms`, {
+        method: 'POST',
+        headers: {
+          apikey: apiKey,
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: '{}',
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      headerServerMs = captureDateHeaderFromResponse(rpcResp);
+      if (rpcResp.ok) {
+        const txt = await rpcResp.text().catch(() => '');
+        let parsedBody: any = txt;
+        try {
+          parsedBody = txt ? JSON.parse(txt) : null;
+        } catch {
+          // raw string/number
+        }
+        const rpcMs = parseServerEpochMs(parsedBody);
+        if (rpcMs > 1_600_000_000_000) {
+          return recordObservedServerTimeMs(rpcMs);
+        }
       }
-      const rpcMs = parseServerEpochMs(parsedBody);
-      if (rpcMs > 1_600_000_000_000) {
-        return recordObservedServerTimeMs(rpcMs);
+    } catch {
+      // fallback below
+    }
+
+    if (headerServerMs > 1_600_000_000_000) {
+      return headerServerMs;
+    }
+
+    // 2. Fallback: Lightweight Supabase REST GET HTTP 'Date' header
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 2200);
+      const restResp = await fetch(`${urlBase}/rest/v1/app_configs?select=id&limit=1`, {
+        method: 'GET',
+        cache: 'no-store',
+        headers: {
+          apikey: apiKey,
+          Authorization: `Bearer ${apiKey}`,
+          Accept: 'application/json',
+        },
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      const restDateMs = captureDateHeaderFromResponse(restResp);
+      if (restDateMs > 1_600_000_000_000) {
+        return restDateMs;
       }
+    } catch {
+      // fallback below
     }
-  } catch {
-    // fallback below
-  }
 
-  if (headerServerMs > 1_600_000_000_000) {
-    return headerServerMs;
-  }
+    return getEffectiveServerNowMs();
+  })().finally(() => {
+    serverTimeInFlightPromise = null;
+  });
 
-  // 2. Fallback: Lightweight Supabase REST GET HTTP 'Date' header
-  try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 4500);
-    const restResp = await fetch(`${urlBase}/rest/v1/app_configs?select=id&limit=1`, {
-      method: 'GET',
-      cache: 'no-store',
-      headers: {
-        apikey: apiKey,
-        Authorization: `Bearer ${apiKey}`,
-        Accept: 'application/json',
-      },
-      signal: ctrl.signal,
-    });
-    clearTimeout(timer);
-    const restDateMs = captureDateHeaderFromResponse(restResp);
-    if (restDateMs > 1_600_000_000_000) {
-      return restDateMs;
-    }
-  } catch {
-    // fallback below
-  }
-
-  return getEffectiveServerNowMs();
+  return serverTimeInFlightPromise;
 }
 
 const TRANSIENT_SUPABASE_STATUSES = new Set([521, 522, 525, 502, 503, 504]);
 const KNOWN_MISSING_COLUMNS: Record<string, Set<string>> = {};
 
-function stripKnownMissingColumns(table: string, payload: Record<string, any> | undefined) {
-  if (!payload || typeof payload !== 'object') return payload;
+function stripKnownMissingColumnsFromObj(table: string, obj: Record<string, any>) {
   const known = KNOWN_MISSING_COLUMNS[table];
-  if (!known || known.size === 0) return payload;
+  if (!known || known.size === 0) return obj;
   for (const col of known) {
-    if (col in payload) {
-      delete payload[col];
+    if (col in obj) {
+      delete obj[col];
     }
   }
-  return payload;
+  return obj;
+}
+
+function cloneAndStripPayload(table: string, payload: any): any {
+  if (!payload || typeof payload !== 'object') return payload;
+  if (Array.isArray(payload)) {
+    return payload.map((item) =>
+      item && typeof item === 'object' ? stripKnownMissingColumnsFromObj(table, { ...item }) : item
+    );
+  }
+  return stripKnownMissingColumnsFromObj(table, { ...payload });
+}
+
+function extractMissingColumnName(errorText: string): string | null {
+  if (!errorText) return null;
+  const pgrstMatch = errorText.match(/Could not find the '([^']+)' column/i);
+  if (pgrstMatch?.[1]) return pgrstMatch[1];
+  const pgColMatch = errorText.match(/column\s+["']?([a-zA-Z0-9_]+)["']?(?:\s+of\s+relation\s+[^\s]+)?\s+does not exist/i);
+  if (pgColMatch?.[1]) return pgColMatch[1];
+  return null;
+}
+
+function payloadHasColumn(payload: any, col: string): boolean {
+  if (!payload || typeof payload !== 'object' || !col) return false;
+  if (Array.isArray(payload)) {
+    return payload.some((item) => item && typeof item === 'object' && col in item);
+  }
+  return col in payload;
+}
+
+function removeColumnFromPayload(payload: any, col: string): void {
+  if (!payload || typeof payload !== 'object' || !col) return;
+  if (Array.isArray(payload)) {
+    payload.forEach((item) => {
+      if (item && typeof item === 'object' && col in item) {
+        delete item[col];
+      }
+    });
+    return;
+  }
+  if (col in payload) {
+    delete payload[col];
+  }
 }
 
 function recordKnownMissingColumn(table: string, col: string) {
@@ -293,6 +359,18 @@ export async function callSupabaseProxy(params: {
   upsert?: boolean;
   timeoutMs?: number;
 }) {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return {
+      ok: false,
+      status: 0,
+      data: null,
+      mirrorData: null,
+      latencyMs: 0,
+      source: 'client_offline',
+      error: 'Offline',
+    };
+  }
+
   const urlBase = (
     (typeof window !== 'undefined' ? localStorage.getItem('boss_custom_supabase_url') : null) ||
     DEFAULT_SUPABASE_URL
@@ -320,8 +398,8 @@ export async function callSupabaseProxy(params: {
   }
 
   const startTime = Date.now();
-  const perAttemptTimeoutMs = params.timeoutMs ?? 10000;
-  const maxRetries = 2; // 1 initial try + 2 retries (1s gap) on 521/522/525/502/503/504
+  const perAttemptTimeoutMs = params.timeoutMs ?? 6000;
+  const maxRetries = 1; // At most 1 fast retry on transient 5xx (never retry AbortError timeout)
 
   const fetchWithTimeout = async (url: string, init: RequestInit): Promise<Response> => {
     const controller = new AbortController();
@@ -336,9 +414,43 @@ export async function callSupabaseProxy(params: {
     }
   };
 
+  const runWithPgrst204AutoRetry = async (
+    targetEndpoint: string,
+    targetMethod: string,
+    reqHeaders: Record<string, string>,
+    initialResp: Response,
+    payloadObj: any
+  ): Promise<Response> => {
+    let curResp = initialResp;
+    let stripRetries = 0;
+    while (
+      !curResp.ok &&
+      curResp.status === 400 &&
+      payloadObj &&
+      (targetMethod === 'POST' || targetMethod === 'PATCH') &&
+      stripRetries < 25
+    ) {
+      const clonedText = await curResp.clone().text().catch(() => '');
+      const missingCol = extractMissingColumnName(clonedText);
+      if (!missingCol || !payloadHasColumn(payloadObj, missingCol)) {
+        break;
+      }
+      recordKnownMissingColumn(params.table, missingCol);
+      removeColumnFromPayload(payloadObj, missingCol);
+      stripRetries++;
+      curResp = await fetchWithTimeout(targetEndpoint, {
+        method: targetMethod,
+        headers: reqHeaders,
+        body: JSON.stringify(payloadObj),
+      });
+      captureDateHeaderFromResponse(curResp);
+    }
+    return curResp;
+  };
+
   try {
-    let activePayload = params.payload
-      ? stripKnownMissingColumns(params.table, { ...params.payload })
+    const activePayload = params.payload
+      ? cloneAndStripPayload(params.table, params.payload)
       : undefined;
     let resp: Response | null = null;
     let lastNetworkErr: any = null;
@@ -353,14 +465,16 @@ export async function callSupabaseProxy(params: {
         captureDateHeaderFromResponse(resp);
 
         if (TRANSIENT_SUPABASE_STATUSES.has(resp.status) && attempt < maxRetries) {
-          await sleepMs(1000);
+          await sleepMs(400);
           continue;
         }
         break;
       } catch (err: any) {
         lastNetworkErr = err;
-        if (attempt < maxRetries) {
-          await sleepMs(1000);
+        const isAbort = err?.name === 'AbortError';
+        const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+        if (!isAbort && !isOffline && attempt < maxRetries) {
+          await sleepMs(400);
           continue;
         }
         throw err;
@@ -372,22 +486,8 @@ export async function callSupabaseProxy(params: {
     }
 
     // If PostgREST reports PGRST204 ("Could not find the '<col>' column"), cache & strip that column and retry cleanly
-    let stripRetries = 0;
-    while (!resp.ok && resp.status === 400 && activePayload && method !== 'GET' && stripRetries < 25) {
-      const clonedText = await resp.clone().text().catch(() => '');
-      const colMatch = clonedText.match(/Could not find the '([^']+)' column/i);
-      if (!colMatch || !(colMatch[1] in activePayload)) {
-        break;
-      }
-      recordKnownMissingColumn(params.table, colMatch[1]);
-      delete activePayload[colMatch[1]];
-      stripRetries++;
-      resp = await fetchWithTimeout(targetUrl, {
-        method,
-        headers,
-        body: JSON.stringify(activePayload),
-      });
-      captureDateHeaderFromResponse(resp);
+    if (!resp.ok && resp.status === 400 && activePayload && (method === 'POST' || method === 'PATCH')) {
+      resp = await runWithPgrst204AutoRetry(targetUrl, method, headers, resp, activePayload);
     }
 
     // If POST upsert times out (500 statement timeout on huge JSON) or conflicts (409), fallback to direct PATCH by primary key
@@ -395,6 +495,7 @@ export async function callSupabaseProxy(params: {
       !resp.ok &&
       (resp.status === 500 || resp.status === 409 || resp.status === 400) &&
       activePayload &&
+      !Array.isArray(activePayload) &&
       method === 'POST'
     ) {
       const idVal = activePayload.id || activePayload.device_id || activePayload.key;
@@ -404,12 +505,21 @@ export async function callSupabaseProxy(params: {
           const patchUrl = `${urlBase}/rest/v1/${params.table}?${idKey}=eq.${encodeURIComponent(idVal)}`;
           const patchHeaders = { ...headers };
           delete patchHeaders['Prefer'];
-          const patchResp = await fetchWithTimeout(patchUrl, {
+          let patchResp = await fetchWithTimeout(patchUrl, {
             method: 'PATCH',
             headers: patchHeaders,
             body: JSON.stringify(activePayload),
           });
           captureDateHeaderFromResponse(patchResp);
+          if (!patchResp.ok && patchResp.status === 400) {
+            patchResp = await runWithPgrst204AutoRetry(
+              patchUrl,
+              'PATCH',
+              patchHeaders,
+              patchResp,
+              activePayload
+            );
+          }
           if (patchResp.ok) {
             resp = patchResp;
           }

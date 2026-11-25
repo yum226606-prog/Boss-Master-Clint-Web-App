@@ -843,11 +843,13 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
         {/* Modal Header (Strictly NO Device ID / IP / MAC / UUID shown) */}
         <div className="px-4 py-3 bg-gradient-to-r from-[#121822] via-[#171E2B] to-[#121822] border-b border-[#F5B738]/40 flex items-center justify-between gap-2.5 shrink-0">
           <div className="flex items-center gap-2.5 min-w-0">
-            <img
-              src={activeShopLogo}
-              alt="Shop Logo"
-              className="w-10 h-10 rounded-full object-cover border-2 border-[#F5B738] shrink-0"
-            />
+            <div className="w-10 h-10 rounded-xl bg-[#0C0F14] border-2 border-[#F5B738] p-0.5 flex items-center justify-center shrink-0 overflow-hidden">
+              <img
+                src={activeShopLogo}
+                alt="Shop Logo"
+                className="w-full h-full object-contain rounded-lg"
+              />
+            </div>
             <div className="min-w-0">
               <h2 className="text-sm sm:text-base font-black text-[#F5B738] truncate">
                 Client Profile &amp; Account Settings

@@ -4109,11 +4109,13 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         {/* Modal Header (Locked Brand & Non-Dismissible Gate) */}
         <div className="px-4 py-3.5 bg-gradient-to-r from-[#121822] via-[#171E2B] to-[#121822] border-b border-[#F5B738]/40 flex items-center justify-between gap-2.5">
           <div className="flex items-center gap-2.5 min-w-0">
-            <img
-              src={mainLogoUrl || bossLionLogoImg}
-              alt="Boss Aluminium & Glass"
-              className="w-10 h-10 rounded-full object-cover border-2 border-[#F5B738] shrink-0"
-            />
+            <div className="w-10 h-10 rounded-xl bg-[#0C0F14] border-2 border-[#F5B738] p-0.5 flex items-center justify-center shrink-0 overflow-hidden">
+              <img
+                src={mainLogoUrl || bossLionLogoImg}
+                alt="Boss Aluminium & Glass"
+                className="w-full h-full object-contain rounded-lg"
+              />
+            </div>
             <div className="min-w-0">
               <h1 className="text-sm sm:text-base font-black text-[#F5B738] tracking-wide truncate">
                 BOSS ALUMINIUM &amp; GLASS

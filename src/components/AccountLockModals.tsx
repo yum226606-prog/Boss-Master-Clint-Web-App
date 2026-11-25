@@ -322,11 +322,13 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
         {/* Header */}
         <div className="flex items-center justify-between gap-2 border-b border-slate-800 pb-3 flex-wrap">
           <div className="flex items-center gap-2.5 min-w-0">
-            <img
-              src={mainLogoUrl || bossLionLogoImg}
-              alt="Boss Aluminium"
-              className="w-10 h-10 rounded-full object-cover border-2 border-[#F5B738] shrink-0"
-            />
+            <div className="w-10 h-10 rounded-xl bg-[#0C0F14] border-2 border-[#F5B738] p-0.5 flex items-center justify-center shrink-0 overflow-hidden">
+              <img
+                src={mainLogoUrl || bossLionLogoImg}
+                alt="Boss Aluminium"
+                className="w-full h-full object-contain rounded-lg"
+              />
+            </div>
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
                 <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0" />

@@ -15,6 +15,8 @@ export const ADMIN_SERVER_DEV =
 export const AUTH_SESSION_STORAGE_KEY = 'boss_client_auth_session_v1';
 export const DEVICE_ID_STORAGE_KEY = 'boss_client_device_id';
 export const MASTER_ENGINE_CACHE_KEY = 'boss_cached_master_engine_config_v1';
+export const APP_CONFIGS_CACHE_KEY = 'boss_cached_app_configs_map_v1';
+export const APP_CONFIGS_META_KEY = 'boss_app_configs_meta_v1';
 export const ACTIVE_SESSION_TOKEN_KEY = 'boss_active_session_token_v1';
 export const LAST_ACTIVE_AT_KEY = 'boss_last_active_at_v1';
 export const MANUAL_LOGGED_OUT_KEY = 'manual_logged_out';
@@ -625,6 +627,329 @@ export function saveCachedMasterEngineConfig(cfg: Record<string, any>): void {
   }
 }
 
+let inMemoryAppConfigsMap: Record<string, any> = {};
+
+export function loadCachedAppConfigsMap(): Record<string, any> {
+  if (typeof window === 'undefined') return { ...inMemoryAppConfigsMap };
+  try {
+    const raw = localStorage.getItem(APP_CONFIGS_CACHE_KEY);
+    if (!raw) return { ...inMemoryAppConfigsMap };
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return { ...parsed, ...inMemoryAppConfigsMap };
+    }
+  } catch {
+    // ignore parse errors
+  }
+  return { ...inMemoryAppConfigsMap };
+}
+
+export function saveCachedAppConfigsMap(cfgMap: Record<string, any>): boolean {
+  if (!cfgMap || typeof cfgMap !== 'object') return false;
+  inMemoryAppConfigsMap = { ...cfgMap };
+  if (typeof window === 'undefined') return true;
+  try {
+    localStorage.setItem(APP_CONFIGS_CACHE_KEY, JSON.stringify(cfgMap));
+    return true;
+  } catch {
+    // Quota exceeded on large letterhead/branding payloads; keep compact copy without oversized images
+    try {
+      const compacted: Record<string, any> = {};
+      Object.entries(cfgMap).forEach(([k, v]) => {
+        const serialized = JSON.stringify(v);
+        if (serialized && serialized.length < 450_000) {
+          compacted[k] = v;
+        }
+      });
+      if (Object.keys(compacted).length > 0) {
+        localStorage.setItem(APP_CONFIGS_CACHE_KEY, JSON.stringify(compacted));
+      }
+    } catch {
+      // ignore storage quota errors; inMemoryAppConfigsMap + STORAGE_KEY still preserve data
+    }
+    return false;
+  }
+}
+
+export function loadAppConfigsMeta(): {
+  timestamps: Record<string, string>;
+  lastCheckedAt: number;
+} {
+  if (typeof window === 'undefined') return { timestamps: {}, lastCheckedAt: 0 };
+  try {
+    const raw = localStorage.getItem(APP_CONFIGS_META_KEY);
+    if (!raw) return { timestamps: {}, lastCheckedAt: 0 };
+    const parsed = JSON.parse(raw);
+    return {
+      timestamps:
+        parsed?.timestamps && typeof parsed.timestamps === 'object'
+          ? parsed.timestamps
+          : {},
+      lastCheckedAt: Number(parsed?.lastCheckedAt || 0) || 0,
+    };
+  } catch {
+    return { timestamps: {}, lastCheckedAt: 0 };
+  }
+}
+
+export function saveAppConfigsMeta(
+  timestamps: Record<string, string>,
+  lastCheckedAt = Date.now()
+): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(
+      APP_CONFIGS_META_KEY,
+      JSON.stringify({ timestamps, lastCheckedAt })
+    );
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function clearAppConfigCache(): void {
+  inMemoryAppConfigsMap = {};
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.removeItem(APP_CONFIGS_CACHE_KEY);
+    localStorage.removeItem(APP_CONFIGS_META_KEY);
+    localStorage.removeItem(MASTER_ENGINE_CACHE_KEY);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export interface SmartAppConfigsResult {
+  ok: boolean;
+  changed: boolean;
+  fromCache: boolean;
+  cfgMap: Record<string, any>;
+  changedIds: string[];
+  error?: string;
+}
+
+const appConfigsInFlightRequests = new Map<string, Promise<SmartAppConfigsResult>>();
+
+/**
+ * Zero-Egress-Waste smart fetcher for Supabase `app_configs`:
+ * 1) Runs a tiny `select=id,updated_at` query first to compare timestamps against local cache.
+ * 2) Skips downloading heavy rates/formulas/letterhead JSON unless Admin actually pushed a newer `updated_at` (or cache is missing / forceRefresh is requested).
+ * 3) When only specific rows changed, downloads ONLY those changed `id` rows and merges into local cache.
+ * 4) Uses single-flight promise deduplication so concurrent callers share one request.
+ */
+export async function fetchAppConfigsSmart(options?: {
+  forceRefresh?: boolean;
+  idsFilter?: string[];
+  timeoutMs?: number;
+}): Promise<SmartAppConfigsResult> {
+  const forceRefresh = Boolean(options?.forceRefresh);
+  const cleanIds = Array.isArray(options?.idsFilter)
+    ? Array.from(new Set(options.idsFilter.map((id) => String(id || '').trim()).filter(Boolean)))
+    : [];
+  const timeoutMs = Number(options?.timeoutMs || 6000);
+  const flightKey = `${cleanIds.join(',') || 'ALL'}:${forceRefresh ? 'force' : 'smart'}`;
+
+  const existingPromise = appConfigsInFlightRequests.get(flightKey);
+  if (existingPromise) {
+    return existingPromise;
+  }
+
+  const runPromise = (async (): Promise<SmartAppConfigsResult> => {
+    const cachedMap = loadCachedAppConfigsMap();
+    const cachedMeta = loadAppConfigsMeta();
+    const idPrefix =
+      cleanIds.length > 0
+        ? `id=in.(${cleanIds.map((id) => encodeURIComponent(id)).join(',')})&`
+        : '';
+
+    const persistMergedConfigs = (
+      nextMap: Record<string, any>,
+      nextTimestamps: Record<string, string>
+    ) => {
+      saveCachedAppConfigsMap(nextMap);
+      saveAppConfigsMeta(nextTimestamps, Date.now());
+      const mergedGlobal = {
+        ...(nextMap.global_config || {}),
+        ...(nextMap.master_engine_config || {}),
+      };
+      if (Object.keys(mergedGlobal).length > 0) {
+        saveCachedMasterEngineConfig(mergedGlobal);
+      }
+    };
+
+    // Fast fallback helper when `updated_at` column is absent or full refresh is forced
+    const fetchRowsFull = async (
+      targetIds?: string[]
+    ): Promise<SmartAppConfigsResult> => {
+      const targetPrefix =
+        targetIds && targetIds.length > 0
+          ? `id=in.(${targetIds.map((id) => encodeURIComponent(id)).join(',')})&`
+          : idPrefix;
+
+      let res = await callSupabaseProxy({
+        table: 'app_configs',
+        method: 'GET',
+        query: `${targetPrefix}select=id,value,updated_at`,
+        timeoutMs,
+      });
+
+      if (!res.ok && res.status === 400) {
+        res = await callSupabaseProxy({
+          table: 'app_configs',
+          method: 'GET',
+          query: `${targetPrefix}select=id,value`,
+          timeoutMs,
+        });
+      }
+
+      if (!res.ok || !Array.isArray(res.data)) {
+        return {
+          ok: false,
+          changed: false,
+          fromCache: Object.keys(cachedMap).length > 0,
+          cfgMap: cachedMap,
+          changedIds: [],
+          error: res.error,
+        };
+      }
+
+      const nextMap: Record<string, any> =
+        !targetIds && cleanIds.length === 0 ? {} : { ...cachedMap };
+      const nextTimestamps: Record<string, string> = { ...cachedMeta.timestamps };
+      const fetchedIds: string[] = [];
+
+      res.data.forEach((row: any) => {
+        const rid = String(row?.id || '').trim();
+        if (!rid || row?.value === undefined) return;
+        nextMap[rid] = row.value;
+        fetchedIds.push(rid);
+        if (row.updated_at !== undefined && row.updated_at !== null) {
+          nextTimestamps[rid] = String(row.updated_at).trim();
+        }
+      });
+
+      persistMergedConfigs(nextMap, nextTimestamps);
+      return {
+        ok: true,
+        changed: true,
+        fromCache: false,
+        cfgMap: nextMap,
+        changedIds: fetchedIds,
+      };
+    };
+
+    if (forceRefresh) {
+      return fetchRowsFull();
+    }
+
+    // Step 1: Lightweight metadata-only check (`id,updated_at`)
+    const metaRes = await callSupabaseProxy({
+      table: 'app_configs',
+      method: 'GET',
+      query: `${idPrefix}select=id,updated_at`,
+      timeoutMs,
+    });
+
+    if (!metaRes.ok) {
+      if (metaRes.status === 400) {
+        // Older table without updated_at column -> graceful fallback
+        return fetchRowsFull();
+      }
+      return {
+        ok: false,
+        changed: false,
+        fromCache: Object.keys(cachedMap).length > 0,
+        cfgMap: cachedMap,
+        changedIds: [],
+        error: metaRes.error,
+      };
+    }
+
+    const metaRows = Array.isArray(metaRes.data) ? metaRes.data : [];
+    const nextTimestamps: Record<string, string> = { ...cachedMeta.timestamps };
+    const changedIds: string[] = [];
+    const remoteIdSet = new Set<string>();
+
+    metaRows.forEach((row: any) => {
+      const rid = String(row?.id || '').trim();
+      if (!rid) return;
+      remoteIdSet.add(rid);
+      const remoteTs =
+        row.updated_at !== undefined && row.updated_at !== null
+          ? String(row.updated_at).trim()
+          : '';
+      const localTs = cachedMeta.timestamps[rid] || '';
+      const hasCachedValue = cachedMap[rid] !== undefined;
+
+      if (!hasCachedValue || !remoteTs || remoteTs !== localTs) {
+        changedIds.push(rid);
+      }
+      if (remoteTs) {
+        nextTimestamps[rid] = remoteTs;
+      }
+    });
+
+    // Clean up stale cached entries if querying ALL configs and Admin deleted a key
+    let removedAnyStale = false;
+    const prunedMap: Record<string, any> = { ...cachedMap };
+    if (cleanIds.length === 0) {
+      Object.keys(prunedMap).forEach((k) => {
+        if (!remoteIdSet.has(k)) {
+          delete prunedMap[k];
+          delete nextTimestamps[k];
+          removedAnyStale = true;
+        }
+      });
+    }
+
+    if (changedIds.length === 0) {
+      if (removedAnyStale) {
+        persistMergedConfigs(prunedMap, nextTimestamps);
+      } else {
+        saveAppConfigsMeta(nextTimestamps, Date.now());
+      }
+      return {
+        ok: true,
+        changed: removedAnyStale,
+        fromCache: true,
+        cfgMap: prunedMap,
+        changedIds: [],
+      };
+    }
+
+    // Step 2: Fetch ONLY the changed config rows (or full filtered set if all changed)
+    const targetToFetch =
+      changedIds.length < metaRows.length ? changedIds : undefined;
+    const fetchedRes = await fetchRowsFull(targetToFetch);
+    if (!fetchedRes.ok) {
+      return fetchedRes;
+    }
+
+    if (removedAnyStale && cleanIds.length === 0) {
+      const finalMap = { ...fetchedRes.cfgMap };
+      Object.keys(finalMap).forEach((k) => {
+        if (!remoteIdSet.has(k)) {
+          delete finalMap[k];
+        }
+      });
+      persistMergedConfigs(finalMap, nextTimestamps);
+      return {
+        ...fetchedRes,
+        cfgMap: finalMap,
+      };
+    }
+
+    return fetchedRes;
+  })().finally(() => {
+    if (appConfigsInFlightRequests.get(flightKey) === runPromise) {
+      appConfigsInFlightRequests.delete(flightKey);
+    }
+  });
+
+  appConfigsInFlightRequests.set(flightKey, runPromise);
+  return runPromise;
+}
+
 export function extractOwnerCredentialsFromMaster(masterCfg: Record<string, any> = {}): {
   emails: string[];
   phones: string[];
@@ -928,24 +1253,22 @@ export function resolveUserRole(params: {
 }
 
 export async function fetchMasterEngineConfigFromSupabase(): Promise<Record<string, any>> {
-  const res = await callSupabaseProxy({
-    table: 'app_configs',
-    method: 'GET',
-    query: 'id=in.(master_engine_config,global_config)&select=id,value',
+  const smartRes = await fetchAppConfigsSmart({
+    idsFilter: ['master_engine_config', 'global_config'],
     timeoutMs: 8000,
   });
-  if (!res.ok || !Array.isArray(res.data)) {
+  if (!smartRes.ok) {
     return loadCachedMasterEngineConfig();
   }
-  const map: Record<string, any> = {};
-  res.data.forEach((row: any) => {
-    if (row?.id && row?.value) map[row.id] = row.value;
-  });
-  const merged = { ...(map.global_config || {}), ...(map.master_engine_config || {}) };
+  const merged = {
+    ...(smartRes.cfgMap.global_config || {}),
+    ...(smartRes.cfgMap.master_engine_config || {}),
+  };
   if (Object.keys(merged).length > 0) {
     saveCachedMasterEngineConfig(merged);
+    return merged;
   }
-  return merged;
+  return loadCachedMasterEngineConfig();
 }
 
 export function extractSmsGatewayConfig(masterCfg: Record<string, any>): SmsOtpGatewayConfig {
@@ -2258,6 +2581,8 @@ export function getCachedPublicIpAddress(): string {
   }
 }
 
+let publicIpInFlightPromise: Promise<string> | null = null;
+
 export async function getClientPublicIpAddress(): Promise<string> {
   if (typeof window === 'undefined') return '';
   try {
@@ -2272,32 +2597,46 @@ export async function getClientPublicIpAddress(): Promise<string> {
     // ignore cache error
   }
 
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 4000);
-    const resp = await fetch('https://api.ipify.org?format=json', {
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
-    if (resp.ok) {
-      const data = await resp.json().catch(() => ({}));
-      if (data?.ip) {
-        const ip = String(data.ip).trim();
-        try {
-          localStorage.setItem(
-            CLIENT_IP_STORAGE_KEY,
-            JSON.stringify({ ip, fetchedAt: Date.now() })
-          );
-        } catch {
-          // ignore storage error
-        }
-        return ip;
-      }
-    }
-  } catch {
-    // non-fatal network fallback
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return getCachedPublicIpAddress();
   }
-  return getCachedPublicIpAddress();
+
+  if (publicIpInFlightPromise) {
+    return publicIpInFlightPromise;
+  }
+
+  publicIpInFlightPromise = (async (): Promise<string> => {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 2500);
+      const resp = await fetch('https://api.ipify.org?format=json', {
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        if (data?.ip) {
+          const ip = String(data.ip).trim();
+          try {
+            localStorage.setItem(
+              CLIENT_IP_STORAGE_KEY,
+              JSON.stringify({ ip, fetchedAt: Date.now() })
+            );
+          } catch {
+            // ignore storage error
+          }
+          return ip;
+        }
+      }
+    } catch {
+      // non-fatal network fallback
+    }
+    return getCachedPublicIpAddress();
+  })().finally(() => {
+    publicIpInFlightPromise = null;
+  });
+
+  return publicIpInFlightPromise;
 }
 
 export async function collectAndSyncUserTelemetryToSupabase(params: {
@@ -2565,7 +2904,7 @@ export async function fetchMultiKeyUserRecords(params: {
       table,
       method: 'GET',
       query: primaryQuery,
-      timeoutMs: 8000,
+      timeoutMs: 5000,
     });
     if (res.ok && Array.isArray(res.data)) {
       return { ok: true, status: res.status, data: sortRowsByLatestTimestamp(res.data) };
@@ -2575,7 +2914,7 @@ export async function fetchMultiKeyUserRecords(params: {
         table,
         method: 'GET',
         query: fallbackQuery,
-        timeoutMs: 8000,
+        timeoutMs: 5000,
       });
       if (fb.ok && Array.isArray(fb.data)) {
         return { ok: true, status: fb.status, data: sortRowsByLatestTimestamp(fb.data) };
