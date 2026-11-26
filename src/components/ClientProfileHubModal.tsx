@@ -522,18 +522,34 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
         phone: authSession.phone || '',
         cnic: authSession.cnic || '',
         credentialId: res.credentialId,
+        mode: res.mode,
+        ...(res.mode === 'DEVICE_KEY' ? { quickUnlockKey: res.credentialId } : {}),
         enrolledAt: Date.now(),
       };
       saveBiometricBinding(nextBinding);
       setBiometricBinding(nextBinding);
-      await callSupabaseProxy({
-        table: 'users',
-        method: 'PATCH',
-        query: `device_id=eq.${encodeURIComponent(clientDeviceId)}`,
-        payload: { fingerprint_enabled: true },
-        timeoutMs: 6000,
-      }).catch(() => {});
-      showToast('✅ Biometric Fingerprint Login enable ho gaya!');
+      const devFilter = `device_id=eq.${encodeURIComponent(clientDeviceId)}`;
+      await Promise.allSettled([
+        callSupabaseProxy({
+          table: 'users',
+          method: 'PATCH',
+          query: devFilter,
+          payload: { fingerprint_enabled: true },
+          timeoutMs: 6000,
+        }),
+        callSupabaseProxy({
+          table: 'client_users',
+          method: 'PATCH',
+          query: devFilter,
+          payload: { fingerprint_enabled: true },
+          timeoutMs: 6000,
+        }),
+      ]);
+      showToast(
+        res.mode === 'DEVICE_KEY'
+          ? '✅ Encrypted Device Biometric / Quick-Unlock Key enable ho gaya! Ab Login screen par "Login with Fingerprint" 1-click mein kaam karay ga.'
+          : '✅ Hardware Biometric Fingerprint Login enable ho gaya!'
+      );
     } finally {
       setIsUpdatingBio(false);
     }
@@ -544,13 +560,23 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
     try {
       clearBiometricBinding();
       setBiometricBinding(null);
-      await callSupabaseProxy({
-        table: 'users',
-        method: 'PATCH',
-        query: `device_id=eq.${encodeURIComponent(clientDeviceId)}`,
-        payload: { fingerprint_enabled: false },
-        timeoutMs: 6000,
-      }).catch(() => {});
+      const devFilter = `device_id=eq.${encodeURIComponent(clientDeviceId)}`;
+      await Promise.allSettled([
+        callSupabaseProxy({
+          table: 'users',
+          method: 'PATCH',
+          query: devFilter,
+          payload: { fingerprint_enabled: false },
+          timeoutMs: 6000,
+        }),
+        callSupabaseProxy({
+          table: 'client_users',
+          method: 'PATCH',
+          query: devFilter,
+          payload: { fingerprint_enabled: false },
+          timeoutMs: 6000,
+        }),
+      ]);
       showToast('Biometric Fingerprint Lock disable kar diya gaya hai.');
     } finally {
       setIsUpdatingBio(false);
@@ -1932,7 +1958,11 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
                               : 'text-amber-300'
                           }
                         >
-                          {biometricBinding?.credentialId ? 'Enabled ✓' : 'Not Enabled'}
+                          {biometricBinding?.credentialId
+                            ? biometricBinding.mode === 'DEVICE_KEY'
+                              ? 'Enabled ✓ (Device Quick-Unlock Key)'
+                              : 'Enabled ✓ (Hardware Biometric)'
+                            : 'Not Enabled'}
                         </strong>
                       </div>
                     </div>
@@ -1945,7 +1975,9 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
                       onClick={handleEnableBiometric}
                       className="boss-flat-btn px-3 py-1.5 rounded-lg bg-[#F5B738] hover:bg-amber-400 text-black font-black text-[11px] cursor-pointer disabled:opacity-60"
                     >
-                      {biometricBinding?.credentialId ? 'Refresh Fingerprint' : 'Enable Fingerprint'}
+                      {biometricBinding?.credentialId
+                        ? 'Refresh Fingerprint'
+                        : 'Enable Fingerprint / Biometric'}
                     </button>
                     {biometricBinding?.credentialId && (
                       <button

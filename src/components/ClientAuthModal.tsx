@@ -602,6 +602,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     const shouldRebindDevice = Boolean(isUnboundOrReset && (!isOwner || resetDevId || !cloudDevId));
 
     // Mark trial_used = true, refresh telemetry, bind current device_id if reset/empty, & save active_session_token
+    const networkTelemetry = {
+      ...(publicIp ? { ip_address: publicIp, last_ip: publicIp } : {}),
+      mac_address: macAddress,
+    };
+
     const telemetryPatch: Record<string, any> = {
       trial_used: true,
       is_registered: true,
@@ -611,12 +616,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       forced_logout_at: null,
       last_seen: nowIso,
       last_cloud_sync: now,
-      mac_address: macAddress,
+      ...networkTelemetry,
       device_model: deviceModel,
       fingerprint_enabled: true,
       ...ownerVipFields,
       ...(shouldRebindDevice ? { device_id: effectiveDeviceId, user_id: effectiveDeviceId } : {}),
-      ...(publicIp ? { ip_address: publicIp } : {}),
       ...(gps
         ? { latitude: gps.latitude, longitude: gps.longitude, location_url: gps.locationUrl }
         : {}),
@@ -624,6 +628,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
 
     const subPatch: Record<string, any> = {
       trial_used: true,
+      ...networkTelemetry,
       ...ownerVipFields,
       ...(shouldRebindDevice ? { device_id: effectiveDeviceId } : {}),
       updated_at: nowIso,
@@ -654,6 +659,9 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
               forced_logout_at: null,
               is_online: true,
               last_seen: nowIso,
+              ...networkTelemetry,
+              device_model: deviceModel,
+              fingerprint_enabled: true,
               ...(shouldRebindDevice ? { device_id: effectiveDeviceId } : {}),
             },
             timeoutMs: 7000,
@@ -787,6 +795,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     });
     const finalCredId = bioEnrolled.credentialId || biometricBinding?.credentialId;
     if (finalCredId) {
+      const resolvedMode =
+        bioEnrolled.credentialId ? bioEnrolled.mode : biometricBinding?.mode || 'DEVICE_KEY';
       const binding: BiometricBinding = {
         deviceId: session.deviceId,
         identifier: resolvedEmail || resolvedPhone || resolvedCnic || effectiveDeviceId,
@@ -795,6 +805,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         phone: session.phone,
         cnic: session.cnic,
         credentialId: finalCredId,
+        mode: resolvedMode,
+        ...(resolvedMode === 'DEVICE_KEY' ? { quickUnlockKey: finalCredId } : {}),
         enrolledAt: now,
       };
       saveBiometricBinding(binding);
@@ -1135,6 +1147,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         cnic: '',
         shop_address: resolvedGpsAddress,
         ip_address: publicIp || '',
+        last_ip: publicIp || '',
         mac_address: macAddress,
         device_model: deviceModel,
         fingerprint_enabled: true,
@@ -1175,6 +1188,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         email: gEmail,
         phone: '',
         cnic: '',
+        ...(publicIp ? { ip_address: publicIp, last_ip: publicIp } : {}),
+        mac_address: macAddress,
         trial_used: true,
         status: 'ACTIVE',
         is_activated: true,
@@ -1211,6 +1226,10 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
             cnic: '',
             shop_address: resolvedGpsAddress,
             role: userRole,
+            ...(publicIp ? { ip_address: publicIp, last_ip: publicIp } : {}),
+            mac_address: macAddress,
+            device_model: deviceModel,
+            fingerprint_enabled: true,
             active_session_token: sessionToken,
             is_online: true,
             last_seen: nowIso,
@@ -1273,6 +1292,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           phone: '',
           cnic: '',
           credentialId: bioEnrolled.credentialId,
+          mode: bioEnrolled.mode,
+          ...(bioEnrolled.mode === 'DEVICE_KEY' ? { quickUnlockKey: bioEnrolled.credentialId } : {}),
           enrolledAt: now,
         };
         saveBiometricBinding(binding);
@@ -1492,6 +1513,12 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         );
 
         setManualLoggedOut(false);
+        const resolvedStepIp = publicIp || googleProfileStep.publicIp || '';
+        const resolvedStepMac = googleProfileStep.macAddress || getOrCreateDeviceMacFingerprint();
+        const stepNetTelemetry = {
+          ...(resolvedStepIp ? { ip_address: resolvedStepIp, last_ip: resolvedStepIp } : {}),
+          mac_address: resolvedStepMac,
+        };
 
         const [uPatchRes, cuPatchRes] = await Promise.all([
           matchedUser
@@ -1513,6 +1540,9 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                   cnic_back_url: gpCnicBack,
                   otp_verified: true,
                   email_verified: true,
+                  ...stepNetTelemetry,
+                  device_model: googleProfileStep.deviceModel,
+                  fingerprint_enabled: true,
                   ...(gps
                     ? {
                         latitude: gps.latitude,
@@ -1547,6 +1577,9 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                   cnic_back_url: gpCnicBack,
                   otp_verified: true,
                   email_verified: true,
+                  ...stepNetTelemetry,
+                  device_model: googleProfileStep.deviceModel,
+                  fingerprint_enabled: true,
                   trial_used: true,
                   is_registered: true,
                   created_at: nowIso,
@@ -1573,6 +1606,9 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
               cnic_back_url: gpCnicBack,
               otp_verified: true,
               email_verified: true,
+              ...stepNetTelemetry,
+              device_model: googleProfileStep.deviceModel,
+              fingerprint_enabled: true,
               last_seen: nowIso,
             },
             timeoutMs: 10000,
@@ -1591,6 +1627,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                   cnic_back: gpCnicBack,
                   cnic_front_url: gpCnicFront,
                   cnic_back_url: gpCnicBack,
+                  ...stepNetTelemetry,
                   updated_at: nowIso,
                   last_updated: now,
                 },
@@ -1688,6 +1725,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         otp_verified: true,
         email_verified: true,
         ip_address: publicIp || googleProfileStep.publicIp || '',
+        last_ip: publicIp || googleProfileStep.publicIp || '',
         mac_address: googleProfileStep.macAddress,
         device_model: googleProfileStep.deviceModel,
         fingerprint_enabled: true,
@@ -1722,6 +1760,14 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           : {}),
       };
 
+      const resolvedNewGoogleIp = publicIp || googleProfileStep.publicIp || '';
+      const newGoogleNetTelemetry = {
+        ...(resolvedNewGoogleIp
+          ? { ip_address: resolvedNewGoogleIp, last_ip: resolvedNewGoogleIp }
+          : {}),
+        mac_address: googleProfileStep.macAddress,
+      };
+
       const newSubPayload = {
         device_id: activeDeviceId,
         user_name: cleanName,
@@ -1732,6 +1778,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         cnic_back: gpCnicBack,
         cnic_front_url: gpCnicFront,
         cnic_back_url: gpCnicBack,
+        ...newGoogleNetTelemetry,
         trial_used: true,
         status: 'TRIAL',
         is_activated: false,
@@ -1773,6 +1820,9 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
             otp_verified: true,
             email_verified: true,
             role: userRole,
+            ...newGoogleNetTelemetry,
+            device_model: googleProfileStep.deviceModel,
+            fingerprint_enabled: true,
             active_session_token: sessionToken,
             is_online: true,
             last_seen: nowIso,
@@ -1812,6 +1862,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
             cnic_back: gpCnicBack,
             cnic_front_url: gpCnicFront,
             cnic_back_url: gpCnicBack,
+            ...newGoogleNetTelemetry,
             trial_used: true,
             status: 'TRIAL',
             is_activated: false,
@@ -1858,6 +1909,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           phone: cleanPhone,
           cnic: cleanCnic,
           credentialId: bioEnrolled.credentialId,
+          mode: bioEnrolled.mode,
+          ...(bioEnrolled.mode === 'DEVICE_KEY' ? { quickUnlockKey: bioEnrolled.credentialId } : {}),
           enrolledAt: now,
         };
         saveBiometricBinding(binding);
@@ -2161,6 +2214,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     password: string;
     skipPasswordCheck?: boolean;
     enrollBiometric?: boolean;
+    bindOnlyStayOnLogin?: boolean;
   }): Promise<boolean> => {
     const rawId = opts.identifier.trim();
     const phoneDigits = normalizePhoneDigits(rawId);
@@ -2483,6 +2537,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         }
       : {};
 
+    const loginNetTelemetry = {
+      ...(publicIp ? { ip_address: publicIp, last_ip: publicIp } : {}),
+      mac_address: macAddress,
+    };
+
     const commonTelemetryPayload: Record<string, any> = {
       trial_used: true,
       is_registered: true,
@@ -2492,11 +2551,10 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       forced_logout_at: null,
       last_seen: nowIso,
       last_cloud_sync: now,
-      mac_address: macAddress,
+      ...loginNetTelemetry,
       device_model: deviceModel,
       fingerprint_enabled: true,
       ...ownerVipFields,
-      ...(publicIp ? { ip_address: publicIp } : {}),
       ...(newPasswordHashToSave
         ? {
             password_hash: newPasswordHashToSave,
@@ -2561,6 +2619,9 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
             phone: targetPhoneCheck,
             cnic: targetCnicCheck,
             role: 'OWNER',
+            ...loginNetTelemetry,
+            device_model: deviceModel,
+            fingerprint_enabled: true,
             active_session_token: sessionToken,
             is_online: true,
             last_seen: nowIso,
@@ -2578,6 +2639,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
             email: targetEmailCheck,
             phone: targetPhoneCheck,
             cnic: targetCnicCheck,
+            ...loginNetTelemetry,
             ...ownerVipFields,
             last_updated: now,
             updated_at: nowIso,
@@ -2614,6 +2676,9 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                 forced_logout_at: null,
                 is_online: true,
                 last_seen: nowIso,
+                ...loginNetTelemetry,
+                device_model: deviceModel,
+                fingerprint_enabled: true,
               },
               timeoutMs: 7000,
             }).catch(() => null)
@@ -2625,6 +2690,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
               query: loginSubFilter,
               payload: {
                 device_id: activeDeviceId,
+                ...loginNetTelemetry,
                 ...ownerVipFields,
                 last_updated: now,
                 updated_at: nowIso,
@@ -2663,7 +2729,24 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                 forced_logout_at: null,
                 is_online: true,
                 last_seen: nowIso,
+                ...loginNetTelemetry,
+                device_model: deviceModel,
+                fingerprint_enabled: true,
                 ...(!cloudDeviceId ? { device_id: activeDeviceId } : {}),
+              },
+              timeoutMs: 6000,
+            }).catch(() => {})
+          : Promise.resolve(null),
+        loginSubFilter
+          ? callSupabaseProxy({
+              table: 'subscriptions',
+              method: 'PATCH',
+              query: loginSubFilter,
+              payload: {
+                ...loginNetTelemetry,
+                ...(!cloudDeviceId ? { device_id: activeDeviceId } : {}),
+                last_updated: now,
+                updated_at: nowIso,
               },
               timeoutMs: 6000,
             }).catch(() => {})
@@ -2792,7 +2875,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         : {}),
     };
 
-    // Save real biometric binding ONLY if WebAuthn credential actually succeeded
+    // Save biometric binding (WebAuthn or encrypted DEVICE_KEY fallback)
     const bioRes = await enrollBiometricPasskey({
       deviceId: session.deviceId,
       identifier: session.email || session.phone || session.cnic || rawId,
@@ -2800,6 +2883,9 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     });
     const finalCredId = bioRes.credentialId || biometricBinding?.credentialId;
     if (finalCredId) {
+      const resolvedBioMode = bioRes.credentialId
+        ? bioRes.mode
+        : biometricBinding?.mode || 'DEVICE_KEY';
       const nextBinding: BiometricBinding = {
         deviceId: session.deviceId,
         identifier: session.email || session.phone || session.cnic || rawId,
@@ -2808,10 +2894,21 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         phone: session.phone,
         cnic: session.cnic,
         credentialId: finalCredId,
+        mode: resolvedBioMode,
+        ...(resolvedBioMode === 'DEVICE_KEY' ? { quickUnlockKey: finalCredId } : {}),
         enrolledAt: now,
       };
       saveBiometricBinding(nextBinding);
       setBiometricBinding(nextBinding);
+    }
+
+    if (opts.bindOnlyStayOnLogin) {
+      setInfoMsg(
+        bioRes.mode === 'DEVICE_KEY'
+          ? '✅ Encrypted Device Biometric / Quick-Unlock Key enable ho gaya! Ab "Login with Fingerprint" 1-click mein kaam karay ga.'
+          : '✅ Hardware Biometric Fingerprint enable ho gaya! Ab "Login with Fingerprint" 1-click mein kaam karay ga.'
+      );
+      return true;
     }
 
     saveAuthSession(session);
@@ -2848,6 +2945,39 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     }
   };
 
+  const handleEnableBiometricOnLoginScreen = async () => {
+    setErrorMsg(null);
+    setInfoMsg(null);
+    setShowSwitchToRegisterHint(false);
+    setShowSwitchToLoginHint(false);
+
+    if (!loginIdentifier.trim()) {
+      setErrorMsg(
+        'Biometric / Fingerprint enable karne ke liye pehle apna Email, Mobile Number ya CNIC aur Password darj karein.'
+      );
+      return;
+    }
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      setErrorMsg('Biometric account verify karne ke liye internet ON karein.');
+      return;
+    }
+
+    setIsBiometricLoggingIn(true);
+    try {
+      await performUniversalLogin({
+        identifier: loginIdentifier,
+        password: loginPassword,
+        skipPasswordCheck: false,
+        enrollBiometric: true,
+        bindOnlyStayOnLogin: true,
+      });
+    } catch {
+      setErrorMsg('Biometric enable karte waqt cloud connection error aaya.');
+    } finally {
+      setIsBiometricLoggingIn(false);
+    }
+  };
+
   const handleFingerprintLogin = async () => {
     setErrorMsg(null);
     setInfoMsg(null);
@@ -2860,7 +2990,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
 
     if (!saved || !saved.credentialId) {
       setErrorMsg(
-        'Fingerprint / Biometric is device par registered nahi hai. Pehle Password ya Google se Login karein (taakay real Biometric passkey link ho sakay).'
+        'Is device par Fingerprint / Quick-Unlock abhi bind nahi hai. Neeche "Enable Fingerprint / Biometric" dabayein ya Password/Google se ek baar Login karein.'
       );
       return;
     }
@@ -3885,6 +4015,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           ? { otp_code: verifiedOtpDigits, email_otp: verifiedOtpDigits }
           : {}),
         ip_address: publicIp || '',
+        last_ip: publicIp || '',
         mac_address: macAddress,
         device_model: deviceModel,
         fingerprint_enabled: true,
@@ -3920,6 +4051,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           : {}),
       };
 
+      const signupNetTelemetry = {
+        ...(publicIp ? { ip_address: publicIp, last_ip: publicIp } : {}),
+        mac_address: macAddress,
+      };
+
       const subscriptionPayload = {
         device_id: activeDeviceId,
         user_name: cleanName,
@@ -3930,6 +4066,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         cnic_back: cnicBackPhoto,
         cnic_front_url: cnicFrontPhoto,
         cnic_back_url: cnicBackPhoto,
+        ...signupNetTelemetry,
         password_hash: effectivePasswordHash,
         ...(effectivePlainPassword
           ? { password: regPassword, plain_password: regPassword }
@@ -3980,6 +4117,9 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
             otp_verified: true,
             email_verified: true,
             role: userRole,
+            ...signupNetTelemetry,
+            device_model: deviceModel,
+            fingerprint_enabled: true,
             password_hash: effectivePasswordHash,
             ...(effectivePlainPassword
               ? { password: regPassword, plain_password: regPassword }
@@ -4028,6 +4168,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
             cnic_back: cnicBackPhoto,
             cnic_front_url: cnicFrontPhoto,
             cnic_back_url: cnicBackPhoto,
+            ...signupNetTelemetry,
             trial_used: true,
             status: isOwner ? 'ACTIVE' : 'TRIAL',
             is_activated: isOwner,
@@ -4070,7 +4211,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           : {}),
       };
 
-      // Enroll real WebAuthn passkey if supported (only bind when genuine credentialId exists)
+      // Enroll biometric passkey (WebAuthn first, graceful DEVICE_KEY fallback)
       const bioRes = await enrollBiometricPasskey({
         deviceId: clientDeviceId,
         identifier: cleanEmail || cleanPhone,
@@ -4085,6 +4226,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           phone: cleanPhone,
           cnic: cleanCnic,
           credentialId: bioRes.credentialId,
+          mode: bioRes.mode,
+          ...(bioRes.mode === 'DEVICE_KEY' ? { quickUnlockKey: bioRes.credentialId } : {}),
           enrolledAt: trialStart,
         };
         saveBiometricBinding(binding);
@@ -4551,18 +4694,29 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                   ) : (
                     <>
                       <Fingerprint className="w-4 h-4 shrink-0" />
-                      <span>Fingerprint Login</span>
+                      <span>Login with Fingerprint</span>
                     </>
                   )}
                 </button>
               </div>
 
-              {biometricBinding && biometricBinding.credentialId && (
+              {!biometricBinding?.credentialId ? (
+                <button
+                  type="button"
+                  onClick={handleEnableBiometricOnLoginScreen}
+                  disabled={isLoggingIn || isBiometricLoggingIn || isGoogleAuthenticating}
+                  className="boss-flat-btn w-full py-2 px-3 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 text-emerald-300 font-bold text-[11px] flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+                >
+                  <Fingerprint className="w-3.5 h-3.5 shrink-0" />
+                  <span>Enable Fingerprint / Biometric (1-Click Quick Unlock)</span>
+                </button>
+              ) : (
                 <div className="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-[10.5px] text-emerald-300 flex items-center justify-between gap-2">
                   <span className="flex items-center gap-1.5 truncate">
                     <Fingerprint className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
                     <span className="truncate">
-                      Linked Biometric: <strong>{biometricBinding.userName}</strong> ({biometricBinding.identifier})
+                      Linked Biometric ({biometricBinding.mode === 'DEVICE_KEY' ? 'Device Key' : 'Hardware'}):{' '}
+                      <strong>{biometricBinding.userName}</strong> ({biometricBinding.identifier})
                     </span>
                   </span>
                 </div>

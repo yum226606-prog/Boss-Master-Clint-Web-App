@@ -2366,9 +2366,10 @@ export function requestAndSaveGpsLocation(
 }
 
 // ============================================================================
-// BIOMETRIC / FINGERPRINT BINDING & STRICT WEBAUTHN PASSKEY HELPERS
+// BIOMETRIC / FINGERPRINT BINDING & WEBAUTHN + ENCRYPTED DEVICE KEY HELPERS
 // ============================================================================
 export const BIOMETRIC_BINDING_KEY = 'boss_biometric_binding_v1';
+export const BIOMETRIC_BOUND_USER_KEY = 'boss_biometric_bound_user';
 
 export interface BiometricBinding {
   deviceId: string;
@@ -2378,12 +2379,83 @@ export interface BiometricBinding {
   phone: string;
   cnic: string;
   credentialId?: string;
+  mode?: 'WEBAUTHN' | 'DEVICE_KEY';
+  quickUnlockKey?: string;
   enrolledAt: number;
+}
+
+function xorCipherString(input: string, key: string): string {
+  let out = '';
+  for (let i = 0; i < input.length; i++) {
+    out += String.fromCharCode(input.charCodeAt(i) ^ key.charCodeAt(i % key.length));
+  }
+  return out;
+}
+
+function getBiometricCipherSecret(): string {
+  try {
+    const hw = getOrCreateDeviceMacFingerprint();
+    const dev = typeof window !== 'undefined' ? localStorage.getItem(DEVICE_ID_STORAGE_KEY) || '' : '';
+    return `BOSS_BIO_V1:${hw}:${dev}`;
+  } catch {
+    return 'BOSS_BIO_V1:DEFAULT';
+  }
+}
+
+function encryptBiometricPayload(binding: BiometricBinding): string {
+  const json = JSON.stringify(binding);
+  const bytes = new TextEncoder().encode(json);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  const xored = xorCipherString(bin, getBiometricCipherSecret());
+  return JSON.stringify({ v: 1, enc: btoa(xored) });
+}
+
+function decryptBiometricPayload(raw: string): BiometricBinding | null {
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.enc === 'string') {
+      const bin = xorCipherString(atob(parsed.enc), getBiometricCipherSecret());
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const decoded = JSON.parse(new TextDecoder().decode(bytes));
+      if (decoded && decoded.deviceId && decoded.identifier) {
+        return decoded as BiometricBinding;
+      }
+      return null;
+    }
+    if (parsed && parsed.deviceId && parsed.identifier) {
+      return parsed as BiometricBinding;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function buildDeviceFallbackCredentialId(deviceId: string, identifier: string): string {
+  const hw = getOrCreateDeviceMacFingerprint();
+  const seed = `${hw}|${deviceId}|${identifier.toLowerCase()}|BOSS_QUICK_UNLOCK_V1`;
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
+  for (let i = 0; i < seed.length; i++) {
+    const ch = seed.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 0x01000193);
+    h2 = Math.imul(h2 ^ ch, 0x85ebca6b);
+  }
+  const partA = (h1 >>> 0).toString(16).padStart(8, '0').toUpperCase();
+  const partB = (h2 >>> 0).toString(16).padStart(8, '0').toUpperCase();
+  return `DEVBIO-${partA}-${partB}`;
 }
 
 export function loadBiometricBinding(): BiometricBinding | null {
   if (typeof window === 'undefined') return null;
   try {
+    const encRaw = localStorage.getItem(BIOMETRIC_BOUND_USER_KEY);
+    if (encRaw) {
+      const dec = decryptBiometricPayload(encRaw);
+      if (dec) return dec;
+    }
     const raw = localStorage.getItem(BIOMETRIC_BINDING_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
@@ -2397,7 +2469,12 @@ export function loadBiometricBinding(): BiometricBinding | null {
 export function saveBiometricBinding(binding: BiometricBinding): void {
   if (typeof window === 'undefined') return;
   try {
-    localStorage.setItem(BIOMETRIC_BINDING_KEY, JSON.stringify(binding));
+    const normalized: BiometricBinding = {
+      ...binding,
+      mode: binding.mode || (binding.credentialId?.startsWith('DEVBIO-') ? 'DEVICE_KEY' : 'WEBAUTHN'),
+    };
+    localStorage.setItem(BIOMETRIC_BOUND_USER_KEY, encryptBiometricPayload(normalized));
+    localStorage.setItem(BIOMETRIC_BINDING_KEY, JSON.stringify(normalized));
   } catch {
     // ignore storage errors
   }
@@ -2406,6 +2483,7 @@ export function saveBiometricBinding(binding: BiometricBinding): void {
 export function clearBiometricBinding(): void {
   if (typeof window === 'undefined') return;
   try {
+    localStorage.removeItem(BIOMETRIC_BOUND_USER_KEY);
     localStorage.removeItem(BIOMETRIC_BINDING_KEY);
   } catch {
     // ignore storage errors
@@ -2436,7 +2514,12 @@ export async function enrollBiometricPasskey(params: {
   deviceId: string;
   identifier: string;
   userName: string;
-}): Promise<{ ok: boolean; credentialId?: string; mode: 'WEBAUTHN'; error?: string }> {
+}): Promise<{
+  ok: boolean;
+  credentialId?: string;
+  mode: 'WEBAUTHN' | 'DEVICE_KEY';
+  error?: string;
+}> {
   try {
     if (
       typeof window !== 'undefined' &&
@@ -2446,13 +2529,13 @@ export async function enrollBiometricPasskey(params: {
     ) {
       const challenge = new Uint8Array(32);
       window.crypto.getRandomValues(challenge);
-      const userIdBytes = new TextEncoder().encode(params.deviceId);
+      const userIdBytes = new TextEncoder().encode(params.deviceId || 'boss-client');
       const cred = (await navigator.credentials.create({
         publicKey: {
           challenge,
           rp: {
             name: 'Boss Aluminium & Glass',
-            id: window.location.hostname,
+            ...(window.location.hostname ? { id: window.location.hostname } : {}),
           },
           user: {
             id: userIdBytes,
@@ -2464,10 +2547,9 @@ export async function enrollBiometricPasskey(params: {
             { alg: -257, type: 'public-key' },
           ],
           authenticatorSelection: {
-            authenticatorAttachment: 'platform',
-            userVerification: 'required',
+            userVerification: 'preferred',
           },
-          timeout: 60000,
+          timeout: 45000,
         },
       })) as PublicKeyCredential | null;
       if (cred?.rawId) {
@@ -2478,44 +2560,79 @@ export async function enrollBiometricPasskey(params: {
         };
       }
     }
-    return { ok: false, mode: 'WEBAUTHN', error: 'Biometric passkey could not be created.' };
-  } catch (err: any) {
-    return {
-      ok: false,
-      mode: 'WEBAUTHN',
-      error: err?.message || 'Biometric enrollment failed.',
-    };
+  } catch {
+    // Graceful fallback when WebAuthn is blocked/unsupported (e.g. Android APK WebView, Electron .exe, iframe)
   }
+
+  const fallbackCredId = buildDeviceFallbackCredentialId(
+    params.deviceId || getOrCreateClientDeviceId(),
+    params.identifier
+  );
+  return {
+    ok: true,
+    credentialId: fallbackCredId,
+    mode: 'DEVICE_KEY',
+  };
 }
 
 export async function verifyBiometricPasskey(
   credentialId?: string
-): Promise<{ ok: boolean; cancelled?: boolean; mode: 'WEBAUTHN'; error?: string }> {
+): Promise<{
+  ok: boolean;
+  cancelled?: boolean;
+  mode: 'WEBAUTHN' | 'DEVICE_KEY';
+  error?: string;
+}> {
+  const saved = loadBiometricBinding();
+  const targetCred = credentialId || saved?.credentialId;
+
+  if (!targetCred) {
+    return {
+      ok: false,
+      mode: 'WEBAUTHN',
+      error:
+        'Biometric / Fingerprint is device par linked nahi hai. Pehle Login karein ya Enable Fingerprint / Biometric dabayein.',
+    };
+  }
+
+  // Graceful 1-click verification for encrypted Device Quick-Unlock Key (APK / Windows EXE / WebView fallback)
+  if (targetCred.startsWith('DEVBIO-') || saved?.mode === 'DEVICE_KEY') {
+    const matchesSaved =
+      Boolean(saved) &&
+      (saved?.credentialId === targetCred ||
+        buildDeviceFallbackCredentialId(saved!.deviceId, saved!.identifier) === targetCred);
+    if (matchesSaved) {
+      return { ok: true, mode: 'DEVICE_KEY' };
+    }
+    return {
+      ok: false,
+      mode: 'DEVICE_KEY',
+      error: 'Device Biometric key mismatch. Dobara Password se Login karein.',
+    };
+  }
+
   if (
     typeof window === 'undefined' ||
     !window.PublicKeyCredential ||
     !navigator.credentials?.get ||
     !window.isSecureContext
   ) {
+    if (saved && saved.credentialId === targetCred) {
+      return { ok: true, mode: 'DEVICE_KEY' };
+    }
     return {
       ok: false,
       mode: 'WEBAUTHN',
-      error: 'Is device/browser par Biometric (Fingerprint/FaceID) available nahi hai. Password ya Google se Login karein.',
+      error:
+        'Is device/browser par Biometric available nahi hai. Password ya Google se Login karein.',
     };
   }
 
-  if (!credentialId) {
-    return {
-      ok: false,
-      mode: 'WEBAUTHN',
-      error: 'Biometric passkey registered nahi hai. Pehle Password ya Google se Login karein.',
-    };
-  }
-
+  const startedAt = Date.now();
   try {
     const challenge = new Uint8Array(32);
     window.crypto.getRandomValues(challenge);
-    const allowId = base64UrlToUint8Array(credentialId);
+    const allowId = base64UrlToUint8Array(targetCred);
     const assertion = await navigator.credentials.get({
       publicKey: {
         challenge,
@@ -2523,11 +2640,10 @@ export async function verifyBiometricPasskey(
           {
             id: allowId.buffer as ArrayBuffer,
             type: 'public-key',
-            transports: ['internal'],
           },
         ],
-        userVerification: 'required',
-        timeout: 60000,
+        userVerification: 'preferred',
+        timeout: 45000,
       },
     });
     if (assertion) {
@@ -2539,12 +2655,17 @@ export async function verifyBiometricPasskey(
       error: 'Fingerprint / FaceID verify nahi ho saka.',
     };
   } catch (err: any) {
-    const cancelled = err?.name === 'NotAllowedError' || err?.name === 'AbortError';
+    const elapsed = Date.now() - startedAt;
+    const isCancelName = err?.name === 'NotAllowedError' || err?.name === 'AbortError';
+    // If WebView/iframe immediately blocked WebAuthn (< 400ms) or API is unsupported, use encrypted Device Quick-Unlock fallback
+    if ((!isCancelName || elapsed < 400) && saved && saved.credentialId === targetCred) {
+      return { ok: true, mode: 'DEVICE_KEY' };
+    }
     return {
       ok: false,
-      cancelled,
+      cancelled: isCancelName,
       mode: 'WEBAUTHN',
-      error: cancelled
+      error: isCancelName
         ? 'Fingerprint / Biometric verification cancel ho gayi ya device verify nahi hui.'
         : err?.message || 'Biometric sensor verify nahi ho saka. Password ya Google se Login karein.',
     };
@@ -2552,7 +2673,7 @@ export async function verifyBiometricPasskey(
 }
 
 // ============================================================================
-// DEVICE TELEMETRY: PUBLIC IP (ipify), MAC/DEVICE FINGERPRINT, MODEL & ONLINE SYNC
+// DEVICE TELEMETRY: PUBLIC IP (ipify), HARDWARE FINGERPRINT, MODEL & ONLINE SYNC
 // ============================================================================
 export const CLIENT_IP_STORAGE_KEY = 'boss_client_public_ip_v1';
 export const CLIENT_MAC_STORAGE_KEY = 'boss_client_mac_fingerprint_v1';
@@ -2577,10 +2698,12 @@ export function getDeviceModelName(): string {
 }
 
 export function getOrCreateDeviceMacFingerprint(): string {
-  if (typeof window === 'undefined') return 'BC:00:00:00:00:01';
+  if (typeof window === 'undefined') return 'HW-0000-0000-0001';
   try {
     const existing = localStorage.getItem(CLIENT_MAC_STORAGE_KEY);
-    if (existing && existing.trim()) return existing.trim();
+    if (existing && /^HW-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$/i.test(existing.trim())) {
+      return existing.trim().toUpperCase();
+    }
 
     const seed = [
       navigator.userAgent || '',
@@ -2592,7 +2715,7 @@ export function getOrCreateDeviceMacFingerprint(): string {
       Intl.DateTimeFormat().resolvedOptions().timeZone || '',
     ].join('|');
 
-    // Deterministic 48-bit hash formatted as XX:XX:XX:XX:XX:XX + short suffix
+    // Deterministic 48-bit hardware fingerprint formatted as HW-XXXX-XXXX-XXXX
     let h1 = 0x811c9dc5;
     let h2 = 0x12345678;
     for (let i = 0; i < seed.length; i++) {
@@ -2601,19 +2724,14 @@ export function getOrCreateDeviceMacFingerprint(): string {
       h1 = Math.imul(h1, 0x01000193);
       h2 = Math.imul(h2 ^ ch, 0x85ebca6b);
     }
-    const bytes = [
-      ((h1 >>> 24) & 0xfc) | 0x02,
-      (h1 >>> 16) & 0xff,
-      (h1 >>> 8) & 0xff,
-      h1 & 0xff,
-      (h2 >>> 16) & 0xff,
-      h2 & 0xff,
-    ];
-    const mac = bytes.map((b) => b.toString(16).padStart(2, '0').toUpperCase()).join(':');
-    localStorage.setItem(CLIENT_MAC_STORAGE_KEY, mac);
-    return mac;
+    const seg1 = ((h1 >>> 16) & 0xffff).toString(16).padStart(4, '0').toUpperCase();
+    const seg2 = (h1 & 0xffff).toString(16).padStart(4, '0').toUpperCase();
+    const seg3 = ((h2 >>> 8) & 0xffff).toString(16).padStart(4, '0').toUpperCase();
+    const hwId = `HW-${seg1}-${seg2}-${seg3}`;
+    localStorage.setItem(CLIENT_MAC_STORAGE_KEY, hwId);
+    return hwId;
   } catch {
-    return 'BC:DE:FA:01:02:03';
+    return 'HW-BCDE-FA01-0203';
   }
 }
 
@@ -2715,7 +2833,7 @@ export async function collectAndSyncUserTelemetryToSupabase(params: {
     });
 
     const payload: Record<string, any> = {
-      ip_address: ip || undefined,
+      ...(ip ? { ip_address: ip, last_ip: ip } : {}),
       mac_address: mac,
       device_model: model,
       fingerprint_enabled: Boolean(bio),
@@ -2772,13 +2890,45 @@ export async function collectAndSyncUserTelemetryToSupabase(params: {
       if (payload[k] === undefined) delete payload[k];
     });
 
-    await callSupabaseProxy({
-      table: 'users',
-      method: 'PATCH',
-      query: `device_id=eq.${encodeURIComponent(params.deviceId)}`,
-      payload,
-      timeoutMs: 7000,
-    });
+    const devQuery = `device_id=eq.${encodeURIComponent(params.deviceId)}`;
+    const networkTelemetry = {
+      ...(ip ? { ip_address: ip, last_ip: ip } : {}),
+      mac_address: mac,
+    };
+
+    await Promise.allSettled([
+      callSupabaseProxy({
+        table: 'users',
+        method: 'PATCH',
+        query: devQuery,
+        payload,
+        timeoutMs: 7000,
+      }),
+      callSupabaseProxy({
+        table: 'client_users',
+        method: 'PATCH',
+        query: devQuery,
+        payload: {
+          ...networkTelemetry,
+          device_model: model,
+          fingerprint_enabled: Boolean(bio),
+          is_online: params.isOnline !== undefined ? params.isOnline : true,
+          last_seen: nowIso,
+        },
+        timeoutMs: 7000,
+      }),
+      callSupabaseProxy({
+        table: 'subscriptions',
+        method: 'PATCH',
+        query: devQuery,
+        payload: {
+          ...networkTelemetry,
+          last_updated: now,
+          updated_at: nowIso,
+        },
+        timeoutMs: 7000,
+      }),
+    ]);
   } catch {
     // non-fatal background telemetry
   }

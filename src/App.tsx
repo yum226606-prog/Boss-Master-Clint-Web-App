@@ -1624,6 +1624,38 @@ export default function App() {
       await loadSupportRequests(globalCfg, activeSession);
       markInitialSyncCompletedForDevice(activeSession?.deviceId || clientDeviceId);
 
+      // Keep Public IP (ip_address / last_ip) & Hardware Fingerprint (mac_address) synced across users, client_users & subscriptions
+      if (
+        activeSession?.verified &&
+        !activeSession.deviceId.startsWith('RESET_') &&
+        typeof navigator !== 'undefined' &&
+        navigator.onLine !== false
+      ) {
+        const needsTelemetrySync =
+          (clientIpAddress &&
+            (evaluated.matchedUser?.ip_address !== clientIpAddress ||
+              evaluated.matchedUser?.last_ip !== clientIpAddress ||
+              evaluated.matchedClientUser?.ip_address !== clientIpAddress ||
+              evaluated.matchedClientUser?.last_ip !== clientIpAddress ||
+              evaluated.matchedSub?.ip_address !== clientIpAddress ||
+              evaluated.matchedSub?.last_ip !== clientIpAddress)) ||
+          (clientMacAddress &&
+            (evaluated.matchedUser?.mac_address !== clientMacAddress ||
+              evaluated.matchedClientUser?.mac_address !== clientMacAddress ||
+              evaluated.matchedSub?.mac_address !== clientMacAddress));
+
+        if (needsTelemetrySync || !clientIpAddress) {
+          collectAndSyncUserTelemetryToSupabase({
+            deviceId: activeSession.deviceId,
+            session: activeSession,
+            companyName: activeSession.companyName || companyName,
+            selfieUrl: activeSession.selfieUrl,
+            shopPhotoUrl: activeSession.shopPhotoUrl,
+            isOnline: true,
+          }).catch(() => {});
+        }
+      }
+
       if (!silent) {
         triggerGlobalToast(
           forceRates
@@ -4063,7 +4095,7 @@ export default function App() {
 
               return (
                 <div className="space-y-2">
-                  {/* Android APK Download Button */}
+                  {/* Android APK Download Button + 2-Step Install Guide */}
                   {androidDownloadUrl ? (
                     <a
                       href={androidDownloadUrl}
@@ -4089,8 +4121,15 @@ export default function App() {
                       <span className="text-[10px] text-slate-400">Admin Sync Pending</span>
                     </div>
                   )}
+                  <div className="px-3 py-2 rounded-xl bg-emerald-950/35 border border-emerald-500/25 text-[10.5px] leading-snug text-emerald-100/90 space-y-0.5">
+                    <div className="font-bold text-emerald-300">Android APK 2-Step Install Guide:</div>
+                    <div>1. APK download kar ke open karein &bull; Agar Play Protect aaye to:</div>
+                    <div>
+                      2. <strong className="text-white">More details &rarr; Install anyway</strong> par tap karein.
+                    </div>
+                  </div>
 
-                  {/* Windows Setup (.exe) Download Button */}
+                  {/* Windows Setup (.exe) Download Button + 2-Step Install Guide */}
                   {windowsDownloadUrl ? (
                     <a
                       href={windowsDownloadUrl}
@@ -4116,6 +4155,13 @@ export default function App() {
                       <span className="text-[10px] text-slate-400">Admin Sync Pending</span>
                     </div>
                   )}
+                  <div className="px-3 py-2 rounded-xl bg-indigo-950/35 border border-indigo-500/25 text-[10.5px] leading-snug text-indigo-100/90 space-y-0.5">
+                    <div className="font-bold text-indigo-300">Windows Setup (.exe) 2-Step Guide:</div>
+                    <div>1. Setup (.exe) run karein &bull; Agar Windows SmartScreen aaye to:</div>
+                    <div>
+                      2. <strong className="text-white">More info &rarr; Run anyway</strong> par click karein.
+                    </div>
+                  </div>
 
                   {/* Apple iPhone / iPad (iOS) Inline Visual Guide Button (Never opens new tab) */}
                   <button
