@@ -456,6 +456,9 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   const openProfileHub = (tab: ProfileHubTab, pkg?: SubscriptionPackageConfig | null) => {
     if (pkg !== undefined) setProfilePreselectedPkg(pkg);
     setProfileHubTab(tab);
+    if (tab === 'PACKAGE') {
+      onSyncFromSupabase?.({ forceRates: false, silent: true });
+    }
     if (tab === 'SUPPORT') {
       onMarkSupportMessagesRead?.();
       if (onRefreshSupportRequests) {

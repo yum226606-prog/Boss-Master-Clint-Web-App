@@ -738,6 +738,7 @@ export interface SmartAppConfigsResult {
   fromCache: boolean;
   cfgMap: Record<string, any>;
   changedIds: string[];
+  timestamps?: Record<string, string>;
   error?: string;
 }
 
@@ -747,20 +748,26 @@ const appConfigsInFlightRequests = new Map<string, Promise<SmartAppConfigsResult
  * Zero-Egress-Waste smart fetcher for Supabase `app_configs`:
  * 1) Runs a tiny `select=id,updated_at` query first to compare timestamps against local cache.
  * 2) Skips downloading heavy rates/formulas/letterhead JSON unless Admin actually pushed a newer `updated_at` (or cache is missing / forceRefresh is requested).
- * 3) When only specific rows changed, downloads ONLY those changed `id` rows and merges into local cache.
+ * 3) Always pulls `alwaysRefreshIds` (e.g. `packages_v1`, `global_config`) fresh when requested and overwrites local cache.
  * 4) Uses single-flight promise deduplication so concurrent callers share one request.
  */
 export async function fetchAppConfigsSmart(options?: {
   forceRefresh?: boolean;
   idsFilter?: string[];
+  alwaysRefreshIds?: string[];
   timeoutMs?: number;
 }): Promise<SmartAppConfigsResult> {
   const forceRefresh = Boolean(options?.forceRefresh);
   const cleanIds = Array.isArray(options?.idsFilter)
     ? Array.from(new Set(options.idsFilter.map((id) => String(id || '').trim()).filter(Boolean)))
     : [];
+  const alwaysIds = Array.isArray(options?.alwaysRefreshIds)
+    ? Array.from(
+        new Set(options.alwaysRefreshIds.map((id) => String(id || '').trim()).filter(Boolean))
+      )
+    : [];
   const timeoutMs = Number(options?.timeoutMs || 6000);
-  const flightKey = `${cleanIds.join(',') || 'ALL'}:${forceRefresh ? 'force' : 'smart'}`;
+  const flightKey = `${cleanIds.join(',') || 'ALL'}:${forceRefresh ? 'force' : 'smart'}:${alwaysIds.join(',')}`;
 
   const existingPromise = appConfigsInFlightRequests.get(flightKey);
   if (existingPromise) {
@@ -781,10 +788,18 @@ export async function fetchAppConfigsSmart(options?: {
     ) => {
       saveCachedAppConfigsMap(nextMap);
       saveAppConfigsMeta(nextTimestamps, Date.now());
-      const mergedGlobal = {
-        ...(nextMap.global_config || {}),
-        ...(nextMap.master_engine_config || {}),
-      };
+      const globalTs = Date.parse(nextTimestamps.global_config || '') || 0;
+      const masterTs = Date.parse(nextTimestamps.master_engine_config || '') || 0;
+      const mergedGlobal =
+        globalTs > masterTs
+          ? {
+              ...(nextMap.master_engine_config || {}),
+              ...(nextMap.global_config || {}),
+            }
+          : {
+              ...(nextMap.global_config || {}),
+              ...(nextMap.master_engine_config || {}),
+            };
       if (Object.keys(mergedGlobal).length > 0) {
         saveCachedMasterEngineConfig(mergedGlobal);
       }
@@ -848,6 +863,7 @@ export async function fetchAppConfigsSmart(options?: {
         fromCache: false,
         cfgMap: nextMap,
         changedIds: fetchedIds,
+        timestamps: nextTimestamps,
       };
     };
 
@@ -902,6 +918,16 @@ export async function fetchAppConfigsSmart(options?: {
       }
     });
 
+    alwaysIds.forEach((aid) => {
+      if (
+        (cleanIds.length === 0 || cleanIds.includes(aid)) &&
+        remoteIdSet.has(aid) &&
+        !changedIds.includes(aid)
+      ) {
+        changedIds.push(aid);
+      }
+    });
+
     // Clean up stale cached entries if querying ALL configs and Admin deleted a key
     let removedAnyStale = false;
     const prunedMap: Record<string, any> = { ...cachedMap };
@@ -927,10 +953,11 @@ export async function fetchAppConfigsSmart(options?: {
         fromCache: true,
         cfgMap: prunedMap,
         changedIds: [],
+        timestamps: nextTimestamps,
       };
     }
 
-    // Step 2: Fetch ONLY the changed config rows (or full filtered set if all changed)
+    // Step 2: Fetch ONLY the changed (or alwaysRefreshIds) config rows
     const targetToFetch =
       changedIds.length < metaRows.length ? changedIds : undefined;
     const fetchedRes = await fetchRowsFull(targetToFetch);
@@ -949,10 +976,14 @@ export async function fetchAppConfigsSmart(options?: {
       return {
         ...fetchedRes,
         cfgMap: finalMap,
+        timestamps: nextTimestamps,
       };
     }
 
-    return fetchedRes;
+    return {
+      ...fetchedRes,
+      timestamps: fetchedRes.timestamps || nextTimestamps,
+    };
   })().finally(() => {
     if (appConfigsInFlightRequests.get(flightKey) === runPromise) {
       appConfigsInFlightRequests.delete(flightKey);

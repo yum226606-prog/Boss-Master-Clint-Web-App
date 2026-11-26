@@ -136,6 +136,7 @@ interface SubscriptionExpiredLockModalProps {
   expiresAt: number | null;
   isSyncing: boolean;
   onRefreshCloudStatus: () => Promise<boolean>;
+  onRefreshPackagesOnOpen?: () => Promise<boolean> | void;
   onLogout: () => void;
   mainLogoUrl?: string;
 }
@@ -149,6 +150,7 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
   expiresAt,
   isSyncing,
   onRefreshCloudStatus,
+  onRefreshPackagesOnOpen,
   onLogout,
   mainLogoUrl,
 }) => {
@@ -176,10 +178,26 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
       setSelectedPkg(packages[0]);
       setAmountInput(String(packages[0].priceRs ?? packages[0].price ?? 3000));
     } else {
-      const updatedMatch = packages.find((p) => p.id === selectedPkg.id);
-      if (updatedMatch && (updatedMatch.priceRs ?? updatedMatch.price) !== (selectedPkg.priceRs ?? selectedPkg.price)) {
+      const updatedMatch = packages.find(
+        (p) =>
+          (selectedPkg.id && p.id === selectedPkg.id) ||
+          (selectedPkg.planCode && p.planCode === selectedPkg.planCode)
+      );
+      if (!updatedMatch) {
+        setSelectedPkg(packages[0]);
+        setAmountInput(String(packages[0].priceRs ?? packages[0].price ?? 3000));
+        return;
+      }
+      const nextPrice = updatedMatch.priceRs ?? updatedMatch.price ?? 3000;
+      const prevPrice = selectedPkg.priceRs ?? selectedPkg.price ?? 3000;
+      if (
+        nextPrice !== prevPrice ||
+        (updatedMatch.originalPriceRs ?? 0) !== (selectedPkg.originalPriceRs ?? 0) ||
+        (updatedMatch.discountPct ?? 0) !== (selectedPkg.discountPct ?? 0) ||
+        updatedMatch.name !== selectedPkg.name
+      ) {
         setSelectedPkg(updatedMatch);
-        setAmountInput(String(updatedMatch.priceRs ?? updatedMatch.price ?? 3000));
+        setAmountInput(String(nextPrice));
       }
     }
   }, [packages, selectedPkg]);
@@ -240,6 +258,7 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
 
   useEffect(() => {
     checkOrder();
+    onRefreshPackagesOnOpen?.();
   }, [clientDeviceId]);
 
   const handleReceiptUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {

@@ -234,12 +234,43 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
   const [copiedBankId, setCopiedBankId] = useState<string | null>(null);
 
   useEffect(() => {
+    if (packages.length === 0) return;
     if (preselectedPackage) {
-      setSelectedPkg(preselectedPackage);
-      setAmountInput(String(preselectedPackage.priceRs ?? preselectedPackage.price ?? 3000));
-    } else if (!selectedPkg && packages.length > 0) {
+      const liveMatch =
+        packages.find(
+          (p) =>
+            (preselectedPackage.id && p.id === preselectedPackage.id) ||
+            (preselectedPackage.planCode && p.planCode === preselectedPackage.planCode)
+        ) || preselectedPackage;
+      setSelectedPkg(liveMatch);
+      setAmountInput(String(liveMatch.priceRs ?? liveMatch.price ?? 3000));
+      return;
+    }
+    if (!selectedPkg) {
       setSelectedPkg(packages[0]);
       setAmountInput(String(packages[0].priceRs ?? packages[0].price ?? 3000));
+      return;
+    }
+    const updatedMatch = packages.find(
+      (p) =>
+        (selectedPkg.id && p.id === selectedPkg.id) ||
+        (selectedPkg.planCode && p.planCode === selectedPkg.planCode)
+    );
+    if (!updatedMatch) {
+      setSelectedPkg(packages[0]);
+      setAmountInput(String(packages[0].priceRs ?? packages[0].price ?? 3000));
+      return;
+    }
+    const prevPrice = selectedPkg.priceRs ?? selectedPkg.price ?? 0;
+    const nextPrice = updatedMatch.priceRs ?? updatedMatch.price ?? 0;
+    if (
+      nextPrice !== prevPrice ||
+      (updatedMatch.originalPriceRs ?? 0) !== (selectedPkg.originalPriceRs ?? 0) ||
+      (updatedMatch.discountPct ?? 0) !== (selectedPkg.discountPct ?? 0) ||
+      updatedMatch.name !== selectedPkg.name
+    ) {
+      setSelectedPkg(updatedMatch);
+      setAmountInput(String(nextPrice));
     }
   }, [preselectedPackage, packages, selectedPkg]);
 
@@ -286,6 +317,7 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
   useEffect(() => {
     if (activeTab === 'PACKAGE') {
       checkOrderStatus();
+      onSyncFromSupabase?.({ forceRates: false, silent: true });
     }
   }, [activeTab]);
 

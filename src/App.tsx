@@ -325,6 +325,347 @@ function extractAdminLetterheadBgUrl(
   return '';
 }
 
+function resolveLivePackagesAndOfferFromConfigs(
+  cfgMap: Record<string, any>,
+  timestamps?: Record<string, string>,
+  globalCfgMerged?: Record<string, any>
+): {
+  activeOffer: AppOfferBanner | null;
+  hasOfferKeyInCloud: boolean;
+  packages: SubscriptionPackage[] | null;
+  applyOfferDiscountToPackages: (pkgList: SubscriptionPackage[]) => SubscriptionPackage[];
+} {
+  const globalConfigOnly =
+    cfgMap.global_config && typeof cfgMap.global_config === 'object' ? cfgMap.global_config : {};
+  const masterEngineOnly =
+    cfgMap.master_engine_config && typeof cfgMap.master_engine_config === 'object'
+      ? cfgMap.master_engine_config
+      : {};
+  const globalTs = Date.parse(timestamps?.global_config || '') || 0;
+  const masterTs = Date.parse(timestamps?.master_engine_config || '') || 0;
+  const packagesTs = Date.parse(timestamps?.packages_v1 || '') || 0;
+
+  const globalCfg =
+    globalCfgMerged ||
+    (globalTs > masterTs
+      ? { ...masterEngineOnly, ...globalConfigOnly }
+      : { ...globalConfigOnly, ...masterEngineOnly });
+
+  const packagesV1Obj =
+    cfgMap.packages_v1 && !Array.isArray(cfgMap.packages_v1) && typeof cfgMap.packages_v1 === 'object'
+      ? cfgMap.packages_v1
+      : null;
+  const packagesV1List: any[] | null = Array.isArray(cfgMap.packages_v1)
+    ? cfgMap.packages_v1
+    : Array.isArray(packagesV1Obj?.packages)
+    ? packagesV1Obj.packages
+    : Array.isArray(packagesV1Obj?.items)
+    ? packagesV1Obj.items
+    : Array.isArray(packagesV1Obj?.list)
+    ? packagesV1Obj.list
+    : null;
+
+  const pricingMetaBase =
+    globalTs >= masterTs
+      ? {
+          ...(masterEngineOnly?.pricingMeta && typeof masterEngineOnly.pricingMeta === 'object'
+            ? masterEngineOnly.pricingMeta
+            : {}),
+          ...(globalConfigOnly?.pricingMeta && typeof globalConfigOnly.pricingMeta === 'object'
+            ? globalConfigOnly.pricingMeta
+            : {}),
+        }
+      : {
+          ...(globalConfigOnly?.pricingMeta && typeof globalConfigOnly.pricingMeta === 'object'
+            ? globalConfigOnly.pricingMeta
+            : {}),
+          ...(masterEngineOnly?.pricingMeta && typeof masterEngineOnly.pricingMeta === 'object'
+            ? masterEngineOnly.pricingMeta
+            : {}),
+        };
+  const pricingMeta: Record<string, any> = {
+    ...pricingMetaBase,
+    ...(cfgMap.pricing_meta_v1 && typeof cfgMap.pricing_meta_v1 === 'object'
+      ? cfgMap.pricing_meta_v1
+      : {}),
+    ...(packagesV1Obj?.pricingMeta && typeof packagesV1Obj.pricingMeta === 'object'
+      ? packagesV1Obj.pricingMeta
+      : {}),
+  };
+
+  const rawGlobalDiscountPct = Number(
+    (pricingMeta.isDiscountActive !== false && pricingMeta.discountEnabled !== false
+      ? pricingMeta.discountPct ??
+        pricingMeta.globalDiscountPct ??
+        pricingMeta.discount_pct ??
+        pricingMeta.discountPercent ??
+        pricingMeta.discount
+      : undefined) ??
+      packagesV1Obj?.discountPct ??
+      packagesV1Obj?.globalDiscountPct ??
+      packagesV1Obj?.discount_pct ??
+      (globalTs >= masterTs
+        ? globalConfigOnly.discountPct ??
+          globalConfigOnly.globalDiscountPct ??
+          globalConfigOnly.discount_pct ??
+          globalConfigOnly.offerDiscountPct ??
+          masterEngineOnly.discountPct ??
+          masterEngineOnly.globalDiscountPct ??
+          masterEngineOnly.discount_pct
+        : masterEngineOnly.discountPct ??
+          masterEngineOnly.globalDiscountPct ??
+          masterEngineOnly.discount_pct ??
+          globalConfigOnly.discountPct ??
+          globalConfigOnly.globalDiscountPct ??
+          globalConfigOnly.discount_pct ??
+          globalConfigOnly.offerDiscountPct) ??
+      globalCfg.discountPct ??
+      globalCfg.globalDiscountPct ??
+      0
+  );
+  const cleanGlobalDiscountPct =
+    Number.isFinite(rawGlobalDiscountPct) && rawGlobalDiscountPct > 0 ? rawGlobalDiscountPct : 0;
+
+  const cloudOfferUpdateTs = Number(
+    globalCfg.lastUpdated || globalCfg.lastCloudSyncAt || Date.now()
+  );
+  const rawOffersList = [
+    ...(Array.isArray(globalCfg.offers) ? globalCfg.offers : []),
+    ...(Array.isArray(globalCfg.activeOffers) ? globalCfg.activeOffers : []),
+    ...(Array.isArray(cfgMap.offers_v1) ? cfgMap.offers_v1 : []),
+  ];
+  const activeFromList =
+    rawOffersList.find(
+      (o: any) => o && o.isActive !== false && o.isVisible !== false && o.showBanner !== false
+    ) || rawOffersList[0];
+
+  const rawCandidateOffer =
+    globalCfg.activeOffer ||
+    globalCfg.discountOffer ||
+    globalCfg.specialOffer ||
+    globalCfg.promoOffer ||
+    globalCfg.offerBanner ||
+    globalCfg.activeBanner ||
+    globalCfg.bannerConfig ||
+    globalCfg.offer ||
+    pricingMeta.activeOffer ||
+    pricingMeta.offer ||
+    cfgMap.offer_banner_v1 ||
+    cfgMap.active_offer_v1 ||
+    cfgMap.discount_offer_v1 ||
+    activeFromList ||
+    null;
+
+  const normalizeOfferObj = (raw: any): AppOfferBanner | null => {
+    if (!raw || typeof raw !== 'object') return null;
+    const rawTitle = String(raw.title || raw.name || raw.heading || '').trim();
+    const rawMsg = String(raw.message || raw.description || raw.text || '').trim();
+    const rawBadge = String(raw.badgeText || raw.badge || 'SPECIAL OFFER').trim();
+    let parsedPct = Number(
+      raw.discountPct ??
+        raw.discount_pct ??
+        raw.discountPercent ??
+        raw.discount ??
+        raw.percentage ??
+        cleanGlobalDiscountPct ??
+        0
+    );
+    if (!Number.isFinite(parsedPct) || parsedPct < 0) parsedPct = 0;
+    if (parsedPct === 0) {
+      const pctMatch = `${rawBadge} ${rawTitle} ${rawMsg}`.match(/(\d{1,2})\s*%/);
+      if (pctMatch) parsedPct = Number(pctMatch[1]) || 0;
+    }
+    return {
+      id: String(raw.id || 'admin-offer-1'),
+      title: rawTitle || (parsedPct > 0 ? `${parsedPct}% Special Discount Offer` : 'Special Offer'),
+      message: rawMsg,
+      badgeText: rawBadge,
+      isActive: raw.isActive !== false && raw.enabled !== false,
+      isVisible: raw.isVisible !== false,
+      showBanner: raw.showBanner !== false,
+      createdAt: Number(raw.createdAt || raw.created_at || Date.now()),
+      updatedAt: Number(
+        raw.updatedAt || raw.updated_at || cloudOfferUpdateTs || raw.createdAt || Date.now()
+      ),
+      createdBy: String(raw.createdBy || 'Admin'),
+      discountPct: parsedPct,
+      discountCode: raw.discountCode ? String(raw.discountCode) : undefined,
+      applyToAllPackages: raw.applyToAllPackages !== false && raw.applyToPackages !== false,
+      expiresAt: raw.expiresAt ? Number(raw.expiresAt) : undefined,
+      imageUrl: raw.imageUrl ? String(raw.imageUrl) : undefined,
+    };
+  };
+
+  let normalizedOffer = normalizeOfferObj(rawCandidateOffer);
+  if (!normalizedOffer && cleanGlobalDiscountPct > 0 && pricingMeta.showBanner !== false) {
+    normalizedOffer = {
+      id: 'pricing-meta-offer',
+      title: String(
+        pricingMeta.offerTitle ||
+          pricingMeta.title ||
+          `${cleanGlobalDiscountPct}% Special Discount Offer`
+      ),
+      message: String(pricingMeta.offerMessage || pricingMeta.message || ''),
+      badgeText: String(pricingMeta.badgeText || `${cleanGlobalDiscountPct}% OFF`),
+      isActive: true,
+      isVisible: true,
+      showBanner: true,
+      createdAt: Date.now(),
+      updatedAt: cloudOfferUpdateTs,
+      createdBy: 'Admin',
+      discountPct: cleanGlobalDiscountPct,
+      applyToAllPackages: true,
+    };
+  }
+
+  const hasOfferKeyInCloud = Boolean(
+    globalCfg.activeOffer !== undefined ||
+      globalCfg.discountOffer !== undefined ||
+      globalCfg.specialOffer !== undefined ||
+      globalCfg.promoOffer !== undefined ||
+      globalCfg.offerBanner !== undefined ||
+      globalCfg.activeBanner !== undefined ||
+      globalCfg.bannerConfig !== undefined ||
+      globalCfg.offer !== undefined ||
+      globalCfg.discountPct !== undefined ||
+      globalCfg.globalDiscountPct !== undefined ||
+      globalCfg.pricingMeta !== undefined ||
+      packagesV1Obj?.discountPct !== undefined ||
+      packagesV1Obj?.pricingMeta !== undefined ||
+      cfgMap.offer_banner_v1 !== undefined ||
+      cfgMap.active_offer_v1 !== undefined ||
+      rawOffersList.length > 0
+  );
+
+  const globalOfferPct =
+    normalizedOffer &&
+    normalizedOffer.isActive !== false &&
+    normalizedOffer.isVisible !== false &&
+    normalizedOffer.showBanner !== false &&
+    normalizedOffer.applyToAllPackages !== false
+      ? Number(normalizedOffer.discountPct || cleanGlobalDiscountPct || 0)
+      : cleanGlobalDiscountPct;
+
+  const pkgCandidates: { list: any[]; ts: number; rank: number }[] = [];
+  if (packagesV1List && packagesV1List.length > 0) {
+    pkgCandidates.push({ list: packagesV1List, ts: packagesTs, rank: 4 });
+  }
+  const gcPkgs =
+    (Array.isArray(globalConfigOnly.packages) && globalConfigOnly.packages.length > 0
+      ? globalConfigOnly.packages
+      : null) ||
+    (Array.isArray(globalConfigOnly.subscriptionPackages) &&
+    globalConfigOnly.subscriptionPackages.length > 0
+      ? globalConfigOnly.subscriptionPackages
+      : null);
+  if (gcPkgs) {
+    pkgCandidates.push({ list: gcPkgs, ts: globalTs, rank: 3 });
+  }
+  const mcPkgs =
+    (Array.isArray(masterEngineOnly.packages) && masterEngineOnly.packages.length > 0
+      ? masterEngineOnly.packages
+      : null) ||
+    (Array.isArray(masterEngineOnly.subscriptionPackages) &&
+    masterEngineOnly.subscriptionPackages.length > 0
+      ? masterEngineOnly.subscriptionPackages
+      : null);
+  if (mcPkgs) {
+    pkgCandidates.push({ list: mcPkgs, ts: masterTs, rank: 2 });
+  }
+  if (Array.isArray(cfgMap.subscription_packages_v1) && cfgMap.subscription_packages_v1.length > 0) {
+    pkgCandidates.push({
+      list: cfgMap.subscription_packages_v1,
+      ts: Date.parse(timestamps?.subscription_packages_v1 || '') || 0,
+      rank: 1,
+    });
+  }
+  pkgCandidates.sort((a, b) => (b.ts !== a.ts ? b.ts - a.ts : b.rank - a.rank));
+  const rawPackagesSource = pkgCandidates[0]?.list || null;
+
+  const resolvePkgPricingMetaOverride = (p: any): Record<string, any> | null => {
+    const pid = String(p?.id || '').trim();
+    const pcode = String(p?.planCode || '').trim().toUpperCase();
+    const fromMap =
+      (pid && pricingMeta[pid]) ||
+      (pcode && pricingMeta[pcode]) ||
+      (pcode && pricingMeta[pcode.toLowerCase()]) ||
+      (pid && pricingMeta.packages?.[pid]) ||
+      (pcode && pricingMeta.packages?.[pcode]) ||
+      (pid && pricingMeta.rates?.[pid]) ||
+      (pcode && pricingMeta.rates?.[pcode]) ||
+      null;
+    if (fromMap && typeof fromMap === 'object') return fromMap;
+    if (typeof fromMap === 'number' && Number.isFinite(fromMap) && fromMap > 0) {
+      return { priceRs: fromMap };
+    }
+    const flatByPlan: Record<string, any> = {
+      MONTHLY: pricingMeta.monthlyPriceRs ?? pricingMeta.monthlyPrice ?? pricingMeta.monthly,
+      QUARTERLY:
+        pricingMeta.quarterlyPriceRs ?? pricingMeta.quarterlyPrice ?? pricingMeta.quarterly,
+      HALF_YEARLY:
+        pricingMeta.halfYearlyPriceRs ?? pricingMeta.halfYearlyPrice ?? pricingMeta.halfYearly,
+      YEARLY: pricingMeta.yearlyPriceRs ?? pricingMeta.yearlyPrice ?? pricingMeta.yearly,
+      LIFETIME_VIP:
+        pricingMeta.lifetimePriceRs ?? pricingMeta.lifetimePrice ?? pricingMeta.lifetime,
+    };
+    const flatVal = pcode ? Number(flatByPlan[pcode]) : NaN;
+    if (Number.isFinite(flatVal) && flatVal > 0) {
+      return { priceRs: flatVal };
+    }
+    return null;
+  };
+
+  const applyOfferDiscountToPackages = (
+    pkgList: SubscriptionPackage[]
+  ): SubscriptionPackage[] =>
+    pkgList.map((p: any) => {
+      const metaOverride = resolvePkgPricingMetaOverride(p);
+      const mergedPkg = metaOverride ? { ...p, ...metaOverride } : p;
+      const curRawPrice = Number(mergedPkg.priceRs ?? mergedPkg.price ?? 0);
+      const rawOrig = Number(mergedPkg.originalPriceRs || mergedPkg.basePriceRs || 0);
+      const baseOrig = rawOrig > curRawPrice ? rawOrig : curRawPrice || rawOrig;
+      const ownPct = Number(
+        mergedPkg.discountPct ?? mergedPkg.discount_pct ?? mergedPkg.discount ?? 0
+      );
+      const effPct = ownPct > 0 ? ownPct : globalOfferPct > 0 ? globalOfferPct : 0;
+
+      if (effPct > 0 && baseOrig > 0) {
+        const computedDiscounted = Math.max(1, Math.round(baseOrig * (1 - effPct / 100)));
+        const finalPrice =
+          ownPct > 0 && curRawPrice > 0 && curRawPrice < baseOrig
+            ? curRawPrice
+            : computedDiscounted;
+        return {
+          ...mergedPkg,
+          originalPriceRs: baseOrig,
+          priceRs: finalPrice,
+          price: finalPrice,
+          discountPct: effPct,
+          discountOfferText:
+            mergedPkg.discountOfferText ||
+            (normalizedOffer?.title
+              ? `${effPct}% OFF — ${normalizedOffer.title}`
+              : `${effPct}% OFF`),
+        };
+      }
+      return {
+        ...mergedPkg,
+        originalPriceRs: rawOrig > curRawPrice ? rawOrig : curRawPrice,
+        priceRs: curRawPrice,
+        price: curRawPrice,
+        discountPct: 0,
+        discountOfferText: undefined,
+      };
+    });
+
+  return {
+    activeOffer: normalizedOffer,
+    hasOfferKeyInCloud,
+    packages: rawPackagesSource ? applyOfferDiscountToPackages(rawPackagesSource) : null,
+    applyOfferDiscountToPackages,
+  };
+}
+
 export default function App() {
   const [initialBootAuth] = useState<{
     session: ClientAuthSession | null;
@@ -641,7 +982,10 @@ export default function App() {
     const runPromise: Promise<boolean> = (async (): Promise<boolean> => {
       try {
         const [cfgRes, multiKeyRes, clientIpAddress, serverNowMs] = await Promise.all([
-          fetchAppConfigsSmart({ forceRefresh: forceRates }),
+          fetchAppConfigsSmart({
+            forceRefresh: forceRates,
+            alwaysRefreshIds: ['packages_v1', 'global_config'],
+          }),
           fetchMultiKeyUserRecords({
             deviceId: activeSession?.deviceId || clientDeviceId,
             userId: activeSession?.userId,
@@ -667,13 +1011,30 @@ export default function App() {
 
         const cfgMap: Record<string, any> =
           cfgRes.cfgMap && typeof cfgRes.cfgMap === 'object' ? cfgRes.cfgMap : {};
-
+        const cfgTimestamps = cfgRes.timestamps || {};
+        const hasCloudGlobalOrMaster = Boolean(
+          (cfgMap.global_config && typeof cfgMap.global_config === 'object') ||
+            (cfgMap.master_engine_config && typeof cfgMap.master_engine_config === 'object')
+        );
         const cachedMaster = loadCachedMasterEngineConfig();
-        const globalCfg = {
-          ...cachedMaster,
-          ...(cfgMap.global_config || {}),
-          ...(cfgMap.master_engine_config || {}),
-        };
+        const globalTs = Date.parse(cfgTimestamps.global_config || '') || 0;
+        const masterTs = Date.parse(cfgTimestamps.master_engine_config || '') || 0;
+        const globalCfg =
+          cfgRes.ok && hasCloudGlobalOrMaster
+            ? globalTs > masterTs
+              ? {
+                  ...(cfgMap.master_engine_config || {}),
+                  ...(cfgMap.global_config || {}),
+                }
+              : {
+                  ...(cfgMap.global_config || {}),
+                  ...(cfgMap.master_engine_config || {}),
+                }
+            : {
+                ...cachedMaster,
+                ...(cfgMap.global_config || {}),
+                ...(cfgMap.master_engine_config || {}),
+              };
         if (
           Object.keys(globalCfg).length > 0 &&
           (cfgRes.changed || Object.keys(cachedMaster).length === 0)
@@ -743,92 +1104,17 @@ export default function App() {
             setBankAccounts(globalCfg.bankAccounts);
           }
 
-      // Normalize Admin Discount Offer & Broadcast Banners (supporting all Admin field/key variants)
-      const cloudOfferUpdateTs = Number(
-        globalCfg.lastUpdated || globalCfg.lastCloudSyncAt || Date.now()
-      );
-      const rawOffersList = [
-        ...(Array.isArray(globalCfg.offers) ? globalCfg.offers : []),
-        ...(Array.isArray(globalCfg.activeOffers) ? globalCfg.activeOffers : []),
-        ...(Array.isArray(cfgMap.offers_v1) ? cfgMap.offers_v1 : []),
-      ];
-      const activeFromList =
-        rawOffersList.find(
-          (o: any) => o && o.isActive !== false && o.isVisible !== false && o.showBanner !== false
-        ) || rawOffersList[0];
+      const {
+        activeOffer: normalizedOffer,
+        hasOfferKeyInCloud,
+        packages: resolvedCloudPackages,
+        applyOfferDiscountToPackages,
+      } = resolveLivePackagesAndOfferFromConfigs(cfgMap, cfgTimestamps, globalCfg);
 
-      const rawCandidateOffer =
-        globalCfg.activeOffer ||
-        globalCfg.discountOffer ||
-        globalCfg.specialOffer ||
-        globalCfg.promoOffer ||
-        globalCfg.offerBanner ||
-        globalCfg.activeBanner ||
-        globalCfg.bannerConfig ||
-        globalCfg.offer ||
-        cfgMap.offer_banner_v1 ||
-        cfgMap.active_offer_v1 ||
-        cfgMap.discount_offer_v1 ||
-        activeFromList ||
-        null;
-
-      const normalizeOfferObj = (raw: any): AppOfferBanner | null => {
-        if (!raw || typeof raw !== 'object') return null;
-        const rawTitle = String(raw.title || raw.name || raw.heading || '').trim();
-        const rawMsg = String(raw.message || raw.description || raw.text || '').trim();
-        const rawBadge = String(raw.badgeText || raw.badge || 'SPECIAL OFFER').trim();
-        let parsedPct = Number(
-          raw.discountPct ??
-            raw.discount_pct ??
-            raw.discountPercent ??
-            raw.discount ??
-            raw.percentage ??
-            globalCfg.globalDiscountPct ??
-            0
-        );
-        if (!Number.isFinite(parsedPct) || parsedPct < 0) parsedPct = 0;
-        if (parsedPct === 0) {
-          const pctMatch = `${rawBadge} ${rawTitle} ${rawMsg}`.match(/(\d{1,2})\s*%/);
-          if (pctMatch) parsedPct = Number(pctMatch[1]) || 0;
-        }
-        return {
-          id: String(raw.id || 'admin-offer-1'),
-          title: rawTitle || (parsedPct > 0 ? `${parsedPct}% Special Discount Offer` : 'Special Offer'),
-          message: rawMsg,
-          badgeText: rawBadge,
-          isActive: raw.isActive !== false && raw.enabled !== false,
-          isVisible: raw.isVisible !== false,
-          showBanner: raw.showBanner !== false,
-          createdAt: Number(raw.createdAt || raw.created_at || Date.now()),
-          updatedAt: Number(raw.updatedAt || raw.updated_at || cloudOfferUpdateTs || raw.createdAt || Date.now()),
-          createdBy: String(raw.createdBy || 'Admin'),
-          discountPct: parsedPct,
-          discountCode: raw.discountCode ? String(raw.discountCode) : undefined,
-          applyToAllPackages: raw.applyToAllPackages !== false && raw.applyToPackages !== false,
-          expiresAt: raw.expiresAt ? Number(raw.expiresAt) : undefined,
-          imageUrl: raw.imageUrl ? String(raw.imageUrl) : undefined,
-        };
-      };
-
-      const normalizedOffer = normalizeOfferObj(rawCandidateOffer);
-      const hasOfferKeyInCloud =
-        cfgRes.ok &&
-        (globalCfg.activeOffer !== undefined ||
-          globalCfg.discountOffer !== undefined ||
-          globalCfg.specialOffer !== undefined ||
-          globalCfg.promoOffer !== undefined ||
-          globalCfg.offerBanner !== undefined ||
-          globalCfg.activeBanner !== undefined ||
-          globalCfg.bannerConfig !== undefined ||
-          globalCfg.offer !== undefined ||
-          cfgMap.offer_banner_v1 !== undefined ||
-          cfgMap.active_offer_v1 !== undefined ||
-          rawOffersList.length > 0);
       if (hasOfferKeyInCloud) {
         setActiveOffer(normalizedOffer);
       }
 
-      // Sync Broadcasts / Banners list
       const rawBroadcasts = Array.isArray(globalCfg.broadcasts)
         ? globalCfg.broadcasts
         : Array.isArray(globalCfg.banners)
@@ -841,68 +1127,56 @@ export default function App() {
       if (rawBroadcasts) {
         setBroadcasts(
           rawBroadcasts
-            .map((b: any) => normalizeOfferObj(b))
+            .map((b: any) =>
+              b && typeof b === 'object'
+                ? {
+                    id: String(b.id || 'admin-broadcast-1'),
+                    title: String(b.title || b.name || b.heading || 'Announcement').trim(),
+                    message: String(b.message || b.description || b.text || '').trim(),
+                    badgeText: String(b.badgeText || b.badge || 'NOTICE').trim(),
+                    isActive: b.isActive !== false && b.enabled !== false,
+                    isVisible: b.isVisible !== false,
+                    showBanner: b.showBanner !== false,
+                    createdAt: Number(b.createdAt || b.created_at || Date.now()),
+                    updatedAt: Number(b.updatedAt || b.updated_at || b.createdAt || Date.now()),
+                    createdBy: String(b.createdBy || 'Admin'),
+                    discountPct: Number(b.discountPct ?? b.discount_pct ?? b.discount ?? 0) || 0,
+                    discountCode: b.discountCode ? String(b.discountCode) : undefined,
+                    applyToAllPackages: b.applyToAllPackages !== false,
+                    expiresAt: b.expiresAt ? Number(b.expiresAt) : undefined,
+                    imageUrl: b.imageUrl ? String(b.imageUrl) : undefined,
+                  }
+                : null
+            )
             .filter(Boolean) as AppOfferBanner[]
         );
       }
 
-      // Sync Subscription Packages & Reflect Active Admin Discount Offers
-      const rawPackagesSource =
-        (Array.isArray(globalCfg.packages) && globalCfg.packages.length > 0 && globalCfg.packages) ||
-        (Array.isArray(globalCfg.subscriptionPackages) &&
-          globalCfg.subscriptionPackages.length > 0 &&
-          globalCfg.subscriptionPackages) ||
-        (Array.isArray(cfgMap.packages_v1) && cfgMap.packages_v1.length > 0 && cfgMap.packages_v1) ||
-        (Array.isArray(cfgMap.subscription_packages_v1) &&
-          cfgMap.subscription_packages_v1.length > 0 &&
-          cfgMap.subscription_packages_v1) ||
-        null;
-
-      const globalOfferPct =
-        normalizedOffer &&
-        normalizedOffer.isActive !== false &&
-        normalizedOffer.isVisible !== false &&
-        normalizedOffer.showBanner !== false &&
-        normalizedOffer.applyToAllPackages !== false
-          ? Number(normalizedOffer.discountPct || 0)
-          : Number(globalCfg.globalDiscountPct || 0);
-
-      const applyOfferDiscountToPackages = (pkgList: SubscriptionPackage[]): SubscriptionPackage[] =>
-        pkgList.map((p: any) => {
-          const baseOrig = Number(p.originalPriceRs || p.basePriceRs || p.priceRs || p.price || 0);
-          const curRawPrice = Number(p.priceRs ?? p.price ?? baseOrig);
-          const ownPct = Number(p.discountPct ?? p.discount_pct ?? p.discount ?? 0);
-          const effPct = ownPct > 0 ? ownPct : globalOfferPct > 0 ? globalOfferPct : 0;
-
-          if (effPct > 0 && baseOrig > 0) {
-            const computedDiscounted = Math.max(1, Math.round(baseOrig * (1 - effPct / 100)));
-            // Use explicit discounted price if Admin already lowered priceRs for ownPct, otherwise apply effPct to baseOrig
-            const finalPrice =
-              ownPct > 0 && curRawPrice > 0 && curRawPrice < baseOrig
-                ? curRawPrice
-                : computedDiscounted;
-            return {
-              ...p,
-              originalPriceRs: baseOrig,
-              priceRs: finalPrice,
-              price: finalPrice,
-              discountPct: effPct,
-              discountOfferText:
-                p.discountOfferText ||
-                (normalizedOffer?.title ? `${effPct}% OFF — ${normalizedOffer.title}` : `${effPct}% OFF`),
-            };
-          }
-          return {
-            ...p,
-            priceRs: curRawPrice,
-            price: curRawPrice,
-          };
-        });
-
-      if (rawPackagesSource) {
-        setPackages(applyOfferDiscountToPackages(rawPackagesSource));
+      if (resolvedCloudPackages) {
+        setPackages(resolvedCloudPackages);
+        try {
+          const curRaw = localStorage.getItem(STORAGE_KEY);
+          const curObj = curRaw ? JSON.parse(curRaw) : {};
+          curObj.packages = resolvedCloudPackages;
+          if (hasOfferKeyInCloud) curObj.activeOffer = normalizedOffer;
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(curObj));
+        } catch {
+          // ignore storage quota errors
+        }
       } else if (hasOfferKeyInCloud) {
-        setPackages((prev) => applyOfferDiscountToPackages(prev));
+        setPackages((prev) => {
+          const updated = applyOfferDiscountToPackages(prev);
+          try {
+            const curRaw = localStorage.getItem(STORAGE_KEY);
+            const curObj = curRaw ? JSON.parse(curRaw) : {};
+            curObj.packages = updated;
+            curObj.activeOffer = normalizedOffer;
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(curObj));
+          } catch {
+            // ignore storage quota errors
+          }
+          return updated;
+        });
       }
 
       const incomingLogo = String(
@@ -2375,22 +2649,40 @@ export default function App() {
           idsFilter: [
             'master_engine_config',
             'global_config',
+            'packages_v1',
             'company_branding_v1',
             'company_branding',
             'layout_config_v1',
             'letterhead_bg_url',
           ],
+          alwaysRefreshIds: ['packages_v1', 'global_config'],
           timeoutMs: 6000,
         })
           .then((cfgOnlyRes) => {
             if (!cfgOnlyRes.ok) return;
             const mapOnly = cfgOnlyRes.cfgMap || {};
-            const mergedCfg = {
-              ...(mapOnly.global_config || {}),
-              ...(mapOnly.master_engine_config || {}),
-            };
+            const tsOnly = cfgOnlyRes.timestamps || {};
+            const gTs = Date.parse(tsOnly.global_config || '') || 0;
+            const mTs = Date.parse(tsOnly.master_engine_config || '') || 0;
+            const mergedCfg =
+              gTs > mTs
+                ? {
+                    ...(mapOnly.master_engine_config || {}),
+                    ...(mapOnly.global_config || {}),
+                  }
+                : {
+                    ...(mapOnly.global_config || {}),
+                    ...(mapOnly.master_engine_config || {}),
+                  };
             if (Object.keys(mergedCfg).length > 0 && cfgOnlyRes.changed) {
               saveCachedMasterEngineConfig(mergedCfg);
+            }
+            const resolvedPre = resolveLivePackagesAndOfferFromConfigs(mapOnly, tsOnly, mergedCfg);
+            if (resolvedPre.hasOfferKeyInCloud) {
+              setActiveOffer(resolvedPre.activeOffer);
+            }
+            if (resolvedPre.packages) {
+              setPackages(resolvedPre.packages);
             }
             const foundLh = extractAdminLetterheadBgUrl(
               mergedCfg,
@@ -3372,6 +3664,7 @@ export default function App() {
               expiresAt={cloudAccessInfo.expiresAt}
               isSyncing={isSyncingCloud}
               onRefreshCloudStatus={() => syncFromSupabase({ forceRates: false, silent: false })}
+              onRefreshPackagesOnOpen={() => syncFromSupabase({ forceRates: false, silent: true })}
               onLogout={handleLogout}
               mainLogoUrl={mainLogoUrl}
             />
