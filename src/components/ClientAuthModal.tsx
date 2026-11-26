@@ -74,7 +74,7 @@ import {
   syncEmailOtpVerifiedStatus,
   syncGpsToSupabaseUser,
   syncUserPasswordAndOtpToCloud,
-  TWO_DAYS_MS,
+  getTrialDurationMs,
   verifyBiometricPasskey,
   verifySupabaseEmailOtp,
 } from '../utils/adminApiConfig';
@@ -763,7 +763,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       ),
       loggedInAt: safeLoginNow,
       trialStartTime: trialStart,
-      trialExpiresAt: isOwner ? 0 : cloudExpiry > 0 ? cloudExpiry : trialStart + TWO_DAYS_MS,
+      trialExpiresAt: isOwner
+        ? 0
+        : cloudExpiry > 0
+        ? Math.max(cloudExpiry, trialStart + getTrialDurationMs(masterCfg))
+        : trialStart + getTrialDurationMs(masterCfg),
       activeSessionToken: sessionToken,
       userRole: resolvedRole,
       ...(isOwner
@@ -1665,7 +1669,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         masterCfg: effectiveMasterCfg,
       });
       const recordUuid = generateSafeUUID();
-      const expiry = now + TWO_DAYS_MS;
+      const expiry = now + getTrialDurationMs(effectiveMasterCfg);
 
       const newUserPayload: Record<string, any> = {
         id: recordUuid,
@@ -2771,7 +2775,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       ),
       loggedInAt: safeLoginNow,
       trialStartTime: trialStart,
-      trialExpiresAt: isOwner ? 0 : cloudExpiry > 0 ? cloudExpiry : trialStart + TWO_DAYS_MS,
+      trialExpiresAt: isOwner
+        ? 0
+        : cloudExpiry > 0
+        ? Math.max(cloudExpiry, trialStart + getTrialDurationMs(masterCfg))
+        : trialStart + getTrialDurationMs(masterCfg),
       activeSessionToken: sessionToken,
       userRole: resolvedRole,
       ...(isOwner
@@ -3837,7 +3845,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
 
       const trialStart = serverNowMs > 0 ? serverNowMs : getEffectiveServerNowMs() || Date.now();
       const trialStartIso = new Date(trialStart).toISOString();
-      const expiry = isOwner ? 0 : trialStart + TWO_DAYS_MS;
+      const expiry = isOwner ? 0 : trialStart + getTrialDurationMs(effectiveMasterCfg);
       const expiryIso = new Date(isOwner ? trialStart : expiry).toISOString();
       const effectivePasswordHash =
         regPasswordHash || (effectivePlainPassword ? await hashPasswordSha256(regPassword) : '');

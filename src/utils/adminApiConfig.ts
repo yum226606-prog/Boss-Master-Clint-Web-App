@@ -26,6 +26,19 @@ export const DEFAULT_OWNER_PHONES = ['3105524225'];
 export const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000;
 export const INACTIVITY_LIMIT_MS = 3 * 24 * 60 * 60 * 1000;
 
+export function getTrialDurationMs(masterCfg?: Record<string, any> | null): number {
+  const rawDays = Number(
+    masterCfg?.trialDays ??
+      masterCfg?.trial_days ??
+      masterCfg?.defaultTrialDays ??
+      masterCfg?.default_trial_days ??
+      masterCfg?.layoutConfig?.trialDays ??
+      2
+  );
+  const days = Number.isFinite(rawDays) && rawDays > 0 ? Math.min(3650, rawDays) : 2;
+  return Math.round(days * 24 * 60 * 60 * 1000);
+}
+
 export type BossUserRole = 'OWNER' | 'ADMIN' | 'CLIENT';
 
 export interface ClientAuthSession {
@@ -1864,6 +1877,8 @@ export function evaluateClientAccessState(params: {
           isRowExplicitlyActivated(matchedUac)))
   );
 
+  const trialDurationMs = getTrialDurationMs(masterCfg);
+
   if (isOwnerUser) {
     status = 'FREE';
     tier = 'LIFETIME_VIP';
@@ -1898,11 +1913,12 @@ export function evaluateClientAccessState(params: {
     if (cloudTier.toUpperCase() === 'TRIAL') {
       status = 'TRIAL';
       tier = 'TRIAL';
+      const dynamicTrialExpiry = rawTrialStart > 0 ? rawTrialStart + trialDurationMs : 0;
       expiresAt =
         rawCloudExpiry > 0
-          ? rawCloudExpiry
-          : rawTrialStart > 0
-          ? rawTrialStart + TWO_DAYS_MS
+          ? Math.max(rawCloudExpiry, dynamicTrialExpiry)
+          : dynamicTrialExpiry > 0
+          ? dynamicTrialExpiry
           : session?.trialExpiresAt || null;
     } else {
       status = 'ACTIVE';
@@ -1912,10 +1928,11 @@ export function evaluateClientAccessState(params: {
   } else {
     status = 'TRIAL';
     tier = 'TRIAL';
+    const dynamicTrialExpiry = rawTrialStart > 0 ? rawTrialStart + trialDurationMs : 0;
     if (rawCloudExpiry > 0) {
-      expiresAt = rawCloudExpiry;
-    } else if (rawTrialStart > 0) {
-      expiresAt = rawTrialStart + TWO_DAYS_MS;
+      expiresAt = Math.max(rawCloudExpiry, dynamicTrialExpiry);
+    } else if (dynamicTrialExpiry > 0) {
+      expiresAt = dynamicTrialExpiry;
     } else if (session?.trialExpiresAt) {
       expiresAt = session.trialExpiresAt;
     } else {
@@ -3100,6 +3117,8 @@ export async function syncUserPasswordAndOtpToCloud(params: {
   smsOtp?: string;
   otpVerified?: boolean;
   emailVerified?: boolean;
+  preserveActiveSessionToken?: boolean;
+  activeSessionToken?: string;
 }): Promise<void> {
   const payload: Record<string, any> = {
     last_cloud_sync: Date.now(),
@@ -3113,7 +3132,12 @@ export async function syncUserPasswordAndOtpToCloud(params: {
   }
   if (params.otpCode) {
     payload.otp_code = params.otpCode;
-    payload.active_session_token = params.otpCode;
+    if (!params.preserveActiveSessionToken) {
+      payload.active_session_token = params.otpCode;
+    }
+  }
+  if (params.activeSessionToken) {
+    payload.active_session_token = params.activeSessionToken;
   }
   if (params.emailOtp) {
     payload.email_otp = params.emailOtp;

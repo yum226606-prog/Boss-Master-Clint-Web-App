@@ -47,6 +47,7 @@ import {
   enrollBiometricPasskey,
   hashPasswordSha256,
   isOwnerIdentity,
+  loadActiveSessionToken,
   loadBiometricBinding,
   loadCachedMasterEngineConfig,
   saveBiometricBinding,
@@ -536,7 +537,6 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
       const fallbackOtp = generateSixDigitOtp();
       const nowMs = Date.now();
       const expIso = new Date(nowMs + 10 * 60 * 1000).toISOString();
-      const resetToken = `RESET_OTP:${fallbackOtp}:${nowMs + 10 * 60 * 1000}`;
 
       const [sbOtp, otpRowRes] = await Promise.all([
         sendSupabaseEmailOtp(email, {
@@ -565,26 +565,9 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
           deviceId: clientDeviceId,
           email,
           phone: authSession?.phone,
-          otpCode: resetToken,
+          otpCode: fallbackOtp,
           emailOtp: fallbackOtp,
-        }),
-      ]);
-
-      // Keep clean 6-digit otp_code alongside active_session_token reset token
-      await Promise.allSettled([
-        callSupabaseProxy({
-          table: 'users',
-          method: 'PATCH',
-          query: `device_id=eq.${encodeURIComponent(clientDeviceId)}`,
-          payload: { otp_code: fallbackOtp, email_otp: fallbackOtp },
-          timeoutMs: 5000,
-        }),
-        callSupabaseProxy({
-          table: 'client_users',
-          method: 'PATCH',
-          query: `device_id=eq.${encodeURIComponent(clientDeviceId)}`,
-          payload: { otp_code: fallbackOtp, email_otp: fallbackOtp },
-          timeoutMs: 5000,
+          preserveActiveSessionToken: true,
         }),
       ]);
 
@@ -653,11 +636,17 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
         const verified = await verifySupabaseEmailOtp(email, cleanOtp);
         let otpMatched = verified.ok;
         if (!otpMatched && /^\d{6}$/.test(cleanOtp)) {
-          const [uCheck, otpRowsRes] = await Promise.all([
+          const [uCheck, cuCheck, otpRowsRes] = await Promise.all([
             callSupabaseProxy({
               table: 'users',
               method: 'GET',
-              query: `device_id=eq.${encodeURIComponent(clientDeviceId)}&select=active_session_token&limit=1`,
+              query: `device_id=eq.${encodeURIComponent(clientDeviceId)}&select=otp_code,email_otp,active_session_token&limit=1`,
+              timeoutMs: 6000,
+            }),
+            callSupabaseProxy({
+              table: 'client_users',
+              method: 'GET',
+              query: `device_id=eq.${encodeURIComponent(clientDeviceId)}&select=otp_code,email_otp,active_session_token&limit=1`,
               timeoutMs: 6000,
             }),
             callSupabaseProxy({
@@ -667,8 +656,23 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
               timeoutMs: 6000,
             }),
           ]);
-          const tok = String((Array.isArray(uCheck.data) ? uCheck.data[0] : null)?.active_session_token || '');
-          if (tok.startsWith('RESET_OTP:') && tok.split(':')[1] === cleanOtp) {
+          const extractOtpDigits = (val: any) => {
+            const s = String(val || '').trim();
+            if (s.startsWith('RESET_OTP:')) return s.split(':')[1] || '';
+            return s;
+          };
+          const uRow = Array.isArray(uCheck.data) ? uCheck.data[0] : null;
+          const cuRow = Array.isArray(cuCheck.data) ? cuCheck.data[0] : null;
+          if (
+            [
+              uRow?.otp_code,
+              uRow?.email_otp,
+              uRow?.active_session_token,
+              cuRow?.otp_code,
+              cuRow?.email_otp,
+              cuRow?.active_session_token,
+            ].some((v) => extractOtpDigits(v) === cleanOtp)
+          ) {
             otpMatched = true;
           }
           if (!otpMatched && Array.isArray(otpRowsRes.data)) {
@@ -690,6 +694,8 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
         }).catch(() => {});
       }
 
+      const currentSessionToken =
+        authSession?.activeSessionToken || loadActiveSessionToken() || '';
       const newHash = await hashPasswordSha256(newPasswordInput);
       await syncUserPasswordAndOtpToCloud({
         deviceId: clientDeviceId,
@@ -697,6 +703,8 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
         phone: authSession?.phone,
         passwordHash: newHash,
         plainPassword: newPasswordInput,
+        preserveActiveSessionToken: true,
+        ...(currentSessionToken ? { activeSessionToken: currentSessionToken } : {}),
         ...(pwMode === 'EMAIL_OTP' ? { otpVerified: true, emailVerified: true } : {}),
       });
 
