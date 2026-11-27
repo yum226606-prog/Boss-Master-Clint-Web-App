@@ -39,6 +39,57 @@ export function getTrialDurationMs(masterCfg?: Record<string, any> | null): numb
   return Math.round(days * 24 * 60 * 60 * 1000);
 }
 
+export function isValidImageSrc(raw?: string | null): boolean {
+  if (typeof raw !== 'string') return false;
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+  const lower = trimmed.toLowerCase();
+  if (
+    lower === 'null' ||
+    lower === 'undefined' ||
+    lower === 'none' ||
+    lower === 'false' ||
+    lower === 'na' ||
+    lower === 'n/a' ||
+    lower.includes('[stripped]') ||
+    lower.includes('[removed]') ||
+    lower.includes('[redacted]') ||
+    lower.includes('[truncated]') ||
+    lower.startsWith('javascript:') ||
+    lower.startsWith('vbscript:') ||
+    lower.startsWith('data:text/')
+  ) {
+    return false;
+  }
+  if (lower.startsWith('data:')) {
+    if (!lower.startsWith('data:image/')) return false;
+    const commaIdx = trimmed.indexOf(',');
+    if (commaIdx === -1) return false;
+    const payload = trimmed.slice(commaIdx + 1).trim();
+    if (payload.length < 16 || payload.endsWith('...')) return false;
+    return true;
+  }
+  if (lower.startsWith('blob:')) {
+    return trimmed.length > 8;
+  }
+  if (lower.startsWith('http://') || lower.startsWith('https://')) {
+    if (/\s/.test(trimmed) || trimmed.endsWith('...')) return false;
+    return trimmed.length >= 12;
+  }
+  if (
+    trimmed.startsWith('/') ||
+    trimmed.startsWith('./') ||
+    trimmed.startsWith('assets/')
+  ) {
+    return !trimmed.endsWith('...');
+  }
+  return false;
+}
+
+export function sanitizeImageUrl(raw?: string | null, fallback = ''): string {
+  return isValidImageSrc(raw) ? String(raw).trim() : fallback;
+}
+
 export type BossUserRole = 'OWNER' | 'ADMIN' | 'CLIENT';
 
 export interface ClientAuthSession {
@@ -1355,12 +1406,16 @@ export interface ExistingComboMatchResult {
   matchedSub: any | null;
   matchedUac: any | null;
   matchedFields: string[];
+  matchedTrialAbuseFields: string[];
+  matchedRows: any[];
   existingDeviceId: string;
   allowMultiAccount: boolean;
+  isSelfDeletedMatch: boolean;
+  hasPriorTrialOrAccount: boolean;
 }
 
 /**
- * Lightweight duplicate-check query fetching ONLY tiny identity/lock columns (no heavy base64 photos).
+ * Lightweight duplicate-check query fetching ONLY tiny identity/lock/trial columns (no heavy base64 photos).
  * Falls back gracefully if a table lacks optional columns.
  */
 export async function fetchDuplicateCheckRows(
@@ -1368,7 +1423,9 @@ export async function fetchDuplicateCheckRows(
   timeoutMs = 7000
 ): Promise<{ ok: boolean; rows: any[]; error?: string }> {
   const queries = [
-    'select=id,email,phone,cnic,device_id,allow_multi_account,allow_multiple_accounts&limit=500',
+    'select=id,email,phone,cnic,device_id,mac_address,ip_address,account_status,status,is_self_deleted,is_deleted,trial_used,trial_start,trial_start_time,trial_end,activated_until,activated_until_ms,subscription_expiry,expires_at,is_activated,is_lifetime,allow_multi_account,allow_multiple_accounts&limit=500',
+    'select=id,email,phone,cnic,device_id,mac_address,account_status,status,is_self_deleted,is_deleted,trial_used,trial_start,trial_end,activated_until,is_activated,allow_multi_account&limit=500',
+    'select=id,email,phone,cnic,device_id,mac_address,account_status,status,trial_start,activated_until,allow_multi_account&limit=500',
     'select=id,email,phone,cnic,device_id,allow_multi_account&limit=500',
     'select=email,phone,cnic,device_id&limit=500',
   ];
@@ -1389,6 +1446,63 @@ export async function fetchDuplicateCheckRows(
     }
   }
   return { ok: false, rows: [], error: lastRes?.error };
+}
+
+/**
+ * Computes backdated expired trial timestamps when carrying forward a previously used/self-deleted trial.
+ */
+export function computeExpiredTrialCarryForward(
+  matchedRows: any[],
+  trialDurationMs: number,
+  nowMs = Date.now()
+): {
+  trialStartTime: number;
+  trialExpiresAt: number;
+  trialStartIso: string;
+  trialEndIso: string;
+} {
+  const priorStarts: number[] = [];
+  const priorExpiries: number[] = [];
+  for (const r of matchedRows || []) {
+    if (!r || typeof r !== 'object') continue;
+    const s = [
+      r.trial_start_ms,
+      r.trial_start_time,
+      r.trial_start,
+      r.registered_at_epoch_ms,
+      r.trialStartTime,
+    ]
+      .map(parseTimestampMs)
+      .find((t) => t > 0);
+    if (s) priorStarts.push(s);
+
+    const e = [
+      r.activated_until_ms,
+      r.activated_until,
+      r.trial_end,
+      r.trial_expires_at,
+      r.subscription_expiry,
+      r.expires_at,
+    ]
+      .map(parseTimestampMs)
+      .find((t) => t > 0);
+    if (e) priorExpiries.push(e);
+  }
+
+  const maxSafeStart = nowMs - Math.max(trialDurationMs, TWO_DAYS_MS) - 24 * 60 * 60 * 1000;
+  const oldestPriorStart = priorStarts.length > 0 ? Math.min(...priorStarts) : maxSafeStart;
+  const trialStartTime = Math.min(oldestPriorStart, maxSafeStart);
+
+  const maxSafeExpiry = nowMs - 60 * 1000;
+  const oldestPriorExpiry = priorExpiries.length > 0 ? Math.min(...priorExpiries) : maxSafeExpiry;
+  const trialExpiresAt = Math.min(oldestPriorExpiry, maxSafeExpiry);
+
+  return {
+    trialStartTime,
+    trialExpiresAt,
+    trialStartIso: new Date(trialStartTime).toISOString(),
+    trialEndIso: new Date(trialExpiresAt).toISOString(),
+  };
 }
 
 /**
@@ -1539,14 +1653,31 @@ export function findExistingAccountComboMatch(params: {
       )
   );
 
+  const matchedTrialAbuseFields = Array.from(matchedReasons).filter((f) =>
+    ['PHONE', 'CNIC', 'EMAIL', 'DEVICE_ID', 'MAC_FINGERPRINT'].includes(f)
+  );
+  const isSelfDeletedMatch = matchedRows.some(
+    (r) =>
+      r?.is_self_deleted === true ||
+      String(r?.is_self_deleted || '').toLowerCase() === 'true' ||
+      String(r?.account_status || r?.status || '').trim().toUpperCase() === 'SELF_DELETED'
+  );
+  const hasPriorTrialOrAccount = Boolean(
+    matchedTrialAbuseFields.length > 0 || isSelfDeletedMatch
+  );
+
   return {
     matchedUser,
     matchedClientUser,
     matchedSub,
     matchedUac,
     matchedFields: Array.from(matchedReasons),
+    matchedTrialAbuseFields,
+    matchedRows,
     existingDeviceId,
     allowMultiAccount,
+    isSelfDeletedMatch,
+    hasPriorTrialOrAccount,
   };
 }
 
@@ -1561,6 +1692,9 @@ export interface EvaluatedCloudAccess {
   forceResetLogout: boolean;
   forceLogoutReason: string;
   sessionConflict: boolean;
+  accountRemovedByAdmin: boolean;
+  isSelfDeleted: boolean;
+  accountRemovedReason: string;
   cloudDeviceId: string;
   matchedUser: any | null;
   matchedClientUser: any | null;
@@ -1982,6 +2116,64 @@ export function evaluateClientAccessState(params: {
       ? params.serverNowMs
       : getEffectiveServerNowMs();
 
+  const isRowAdminDeleted = (r: any) =>
+    Boolean(
+      r &&
+        (r.is_deleted === true ||
+          String(r.is_deleted || '').toLowerCase() === 'true' ||
+          ['DELETED', 'REMOVED'].includes(
+            String(r.account_status || r.status || '').trim().toUpperCase()
+          ))
+    );
+
+  const isRowSelfDeleted = (r: any) =>
+    Boolean(
+      r &&
+        (r.is_self_deleted === true ||
+          String(r.is_self_deleted || '').toLowerCase() === 'true' ||
+          String(r.account_status || r.status || '').trim().toUpperCase() === 'SELF_DELETED')
+    );
+
+  const accountRemovedByAdmin = Boolean(
+    !isOwnerUser &&
+      (isRowAdminDeleted(matchedUser) ||
+        isRowAdminDeleted(matchedClientUser) ||
+        (!matchedUser && !matchedClientUser && isRowAdminDeleted(matchedSub)))
+  );
+
+  const isSelfDeleted = Boolean(
+    !isOwnerUser &&
+      !isPaidActivated &&
+      (isRowSelfDeleted(matchedUser) || isRowSelfDeleted(matchedClientUser))
+  );
+
+  const accountRemovedReason = accountRemovedByAdmin
+    ? 'Your account was removed by Admin. Please register again.'
+    : isSelfDeleted
+    ? 'Aapka account delete ho chuka hai. Dobara access ke liye Signup / Login karein.'
+    : '';
+
+  // Keep carried-forward / explicitly expired trial users expired even if Admin changes global trialDays
+  if (!isOwnerUser && status === 'TRIAL' && !isPaidActivated && !isLifetimeFlag) {
+    const isExplicitlyExpiredTrial = [matchedUser, matchedClientUser, matchedSub, matchedUac].some(
+      (r) =>
+        r &&
+        (['EXPIRED', 'TRIAL_EXPIRED'].includes(
+          String(r.account_status || r.status || '').trim().toUpperCase()
+        ) ||
+          ((r.trial_used === true || String(r.trial_used || '').toLowerCase() === 'true') &&
+            rawCloudExpiry > 0 &&
+            rawCloudExpiry <= effectiveServerNowMs))
+    );
+    if (isExplicitlyExpiredTrial) {
+      const clampedExp =
+        rawCloudExpiry > 0
+          ? Math.min(rawCloudExpiry, effectiveServerNowMs - 60_000)
+          : effectiveServerNowMs - 60_000;
+      expiresAt = clampedExp;
+    }
+  }
+
   const clockTampered = Boolean(
     !isOwnerUser &&
       (isLocalClockRolledBack() ||
@@ -2011,6 +2203,9 @@ export function evaluateClientAccessState(params: {
     forceResetLogout: isOwnerUser ? false : forceResetLogout,
     forceLogoutReason: isOwnerUser ? '' : forceLogoutReason,
     sessionConflict,
+    accountRemovedByAdmin,
+    isSelfDeleted,
+    accountRemovedReason,
     cloudDeviceId,
     matchedUser: effectiveUser,
     matchedClientUser,
@@ -2379,8 +2574,8 @@ export interface BiometricBinding {
   phone: string;
   cnic: string;
   credentialId?: string;
-  mode?: 'WEBAUTHN' | 'DEVICE_KEY';
-  quickUnlockKey?: string;
+  mode?: 'WEBAUTHN' | 'PIN' | 'DEVICE_KEY';
+  pinHash?: string;
   enrolledAt: number;
 }
 
@@ -2433,19 +2628,30 @@ function decryptBiometricPayload(raw: string): BiometricBinding | null {
   }
 }
 
-function buildDeviceFallbackCredentialId(deviceId: string, identifier: string): string {
-  const hw = getOrCreateDeviceMacFingerprint();
-  const seed = `${hw}|${deviceId}|${identifier.toLowerCase()}|BOSS_QUICK_UNLOCK_V1`;
-  let h1 = 0x811c9dc5;
-  let h2 = 0x9e3779b9;
-  for (let i = 0; i < seed.length; i++) {
-    const ch = seed.charCodeAt(i);
-    h1 = Math.imul(h1 ^ ch, 0x01000193);
-    h2 = Math.imul(h2 ^ ch, 0x85ebca6b);
+export async function hashSecurityPin(deviceId: string, pin: string): Promise<string> {
+  return hashPasswordSha256(`BOSS_SEC_PIN_V2:${deviceId}:${pin.trim()}`);
+}
+
+export async function isPlatformWebAuthnAvailable(): Promise<boolean> {
+  try {
+    if (
+      typeof window === 'undefined' ||
+      !window.PublicKeyCredential ||
+      !navigator.credentials?.create ||
+      !window.isSecureContext
+    ) {
+      return false;
+    }
+    if (
+      typeof window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable ===
+      'function'
+    ) {
+      return await window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
+    }
+    return true;
+  } catch {
+    return false;
   }
-  const partA = (h1 >>> 0).toString(16).padStart(8, '0').toUpperCase();
-  const partB = (h2 >>> 0).toString(16).padStart(8, '0').toUpperCase();
-  return `DEVBIO-${partA}-${partB}`;
 }
 
 export function loadBiometricBinding(): BiometricBinding | null {
@@ -2471,7 +2677,9 @@ export function saveBiometricBinding(binding: BiometricBinding): void {
   try {
     const normalized: BiometricBinding = {
       ...binding,
-      mode: binding.mode || (binding.credentialId?.startsWith('DEVBIO-') ? 'DEVICE_KEY' : 'WEBAUTHN'),
+      mode:
+        binding.mode ||
+        (binding.credentialId?.startsWith('PIN-') || binding.pinHash ? 'PIN' : 'WEBAUTHN'),
     };
     localStorage.setItem(BIOMETRIC_BOUND_USER_KEY, encryptBiometricPayload(normalized));
     localStorage.setItem(BIOMETRIC_BINDING_KEY, JSON.stringify(normalized));
@@ -2517,70 +2725,127 @@ export async function enrollBiometricPasskey(params: {
 }): Promise<{
   ok: boolean;
   credentialId?: string;
-  mode: 'WEBAUTHN' | 'DEVICE_KEY';
+  mode: 'WEBAUTHN' | 'PIN';
+  requiresPin?: boolean;
+  cancelled?: boolean;
   error?: string;
 }> {
-  try {
-    if (
-      typeof window !== 'undefined' &&
-      window.PublicKeyCredential &&
-      navigator.credentials?.create &&
-      window.isSecureContext
-    ) {
-      const challenge = new Uint8Array(32);
-      window.crypto.getRandomValues(challenge);
-      const userIdBytes = new TextEncoder().encode(params.deviceId || 'boss-client');
-      const cred = (await navigator.credentials.create({
-        publicKey: {
-          challenge,
-          rp: {
-            name: 'Boss Aluminium & Glass',
-            ...(window.location.hostname ? { id: window.location.hostname } : {}),
-          },
-          user: {
-            id: userIdBytes,
-            name: params.identifier,
-            displayName: params.userName || params.identifier,
-          },
-          pubKeyCredParams: [
-            { alg: -7, type: 'public-key' },
-            { alg: -257, type: 'public-key' },
-          ],
-          authenticatorSelection: {
-            userVerification: 'preferred',
-          },
-          timeout: 45000,
-        },
-      })) as PublicKeyCredential | null;
-      if (cred?.rawId) {
-        return {
-          ok: true,
-          credentialId: bufferToBase64Url(cred.rawId),
-          mode: 'WEBAUTHN',
-        };
-      }
-    }
-  } catch {
-    // Graceful fallback when WebAuthn is blocked/unsupported (e.g. Android APK WebView, Electron .exe, iframe)
+  const platformOk = await isPlatformWebAuthnAvailable();
+  if (!platformOk) {
+    return {
+      ok: false,
+      mode: 'PIN',
+      requiresPin: true,
+      error:
+        'Is device ya WebView mein hardware Fingerprint / Windows Hello sensor available nahi hai. 4-digit Security PIN set karein.',
+    };
   }
 
-  const fallbackCredId = buildDeviceFallbackCredentialId(
-    params.deviceId || getOrCreateClientDeviceId(),
-    params.identifier
-  );
-  return {
-    ok: true,
-    credentialId: fallbackCredId,
-    mode: 'DEVICE_KEY',
+  const startedAt = Date.now();
+  try {
+    const challenge = new Uint8Array(32);
+    window.crypto.getRandomValues(challenge);
+    const userIdBytes = new TextEncoder().encode(params.deviceId || 'boss-client');
+    const cred = (await navigator.credentials.create({
+      publicKey: {
+        challenge,
+        rp: {
+          name: 'Boss Aluminium & Glass',
+          ...(window.location.hostname ? { id: window.location.hostname } : {}),
+        },
+        user: {
+          id: userIdBytes,
+          name: params.identifier,
+          displayName: params.userName || params.identifier,
+        },
+        pubKeyCredParams: [
+          { alg: -7, type: 'public-key' },
+          { alg: -257, type: 'public-key' },
+        ],
+        authenticatorSelection: {
+          authenticatorAttachment: 'platform',
+          userVerification: 'required',
+          residentKey: 'preferred',
+        },
+        timeout: 45000,
+      },
+    })) as PublicKeyCredential | null;
+
+    if (cred?.rawId) {
+      return {
+        ok: true,
+        credentialId: bufferToBase64Url(cred.rawId),
+        mode: 'WEBAUTHN',
+      };
+    }
+    return {
+      ok: false,
+      mode: 'PIN',
+      requiresPin: true,
+      error: 'Biometric passkey create nahi ho saki. 4-digit Security PIN set karein.',
+    };
+  } catch (err: any) {
+    const elapsed = Date.now() - startedAt;
+    const isCancelName = err?.name === 'NotAllowedError' || err?.name === 'AbortError';
+    if (isCancelName && elapsed >= 400) {
+      return {
+        ok: false,
+        cancelled: true,
+        requiresPin: false,
+        mode: 'WEBAUTHN',
+        error: 'Fingerprint / Windows Hello prompt cancel kar diya gaya.',
+      };
+    }
+    return {
+      ok: false,
+      requiresPin: true,
+      mode: 'PIN',
+      error:
+        'Is browser/WebView mein hardware Biometric blocked/unsupported hai. 4-digit Security PIN set karein.',
+    };
+  }
+}
+
+export async function enrollSecurityPinBinding(params: {
+  deviceId: string;
+  identifier: string;
+  userName: string;
+  email: string;
+  phone: string;
+  cnic: string;
+  pin: string;
+}): Promise<{ ok: boolean; binding?: BiometricBinding; error?: string }> {
+  const cleanPin = String(params.pin || '').trim();
+  if (!/^\d{4}$/.test(cleanPin)) {
+    return { ok: false, error: 'Meharbani kar ke 4-hindso (4 digits) ka Security PIN darj karein.' };
+  }
+  const devId = params.deviceId || getOrCreateClientDeviceId();
+  const pinHash = await hashSecurityPin(devId, cleanPin);
+  const binding: BiometricBinding = {
+    deviceId: devId,
+    identifier: params.identifier,
+    userName: params.userName,
+    email: params.email,
+    phone: params.phone,
+    cnic: params.cnic,
+    credentialId: `PIN-${pinHash.slice(0, 16).toUpperCase()}`,
+    mode: 'PIN',
+    pinHash,
+    enrolledAt: Date.now(),
   };
+  saveBiometricBinding(binding);
+  return { ok: true, binding };
 }
 
 export async function verifyBiometricPasskey(
-  credentialId?: string
+  credentialId?: string,
+  options?: { pin?: string }
 ): Promise<{
   ok: boolean;
   cancelled?: boolean;
-  mode: 'WEBAUTHN' | 'DEVICE_KEY';
+  requiresPin?: boolean;
+  requiresPinSetup?: boolean;
+  mode: 'WEBAUTHN' | 'PIN';
   error?: string;
 }> {
   const saved = loadBiometricBinding();
@@ -2591,24 +2856,58 @@ export async function verifyBiometricPasskey(
       ok: false,
       mode: 'WEBAUTHN',
       error:
-        'Biometric / Fingerprint is device par linked nahi hai. Pehle Login karein ya Enable Fingerprint / Biometric dabayein.',
+        'Biometric / Fingerprint is device par linked nahi hai. Pehle Password se Verify & Enable karein.',
     };
   }
 
-  // Graceful 1-click verification for encrypted Device Quick-Unlock Key (APK / Windows EXE / WebView fallback)
+  // Legacy zero-prompt DEVICE_KEY bindings are rejected cleanly (security hardening)
   if (targetCred.startsWith('DEVBIO-') || saved?.mode === 'DEVICE_KEY') {
-    const matchesSaved =
-      Boolean(saved) &&
-      (saved?.credentialId === targetCred ||
-        buildDeviceFallbackCredentialId(saved!.deviceId, saved!.identifier) === targetCred);
-    if (matchesSaved) {
-      return { ok: true, mode: 'DEVICE_KEY' };
-    }
     return {
       ok: false,
-      mode: 'DEVICE_KEY',
-      error: 'Device Biometric key mismatch. Dobara Password se Login karein.',
+      requiresPinSetup: true,
+      mode: 'PIN',
+      error:
+        'Security policy update: Direct bypass band kar diya gaya hai. Meharbani kar ke Password darj kar ke Fingerprint ya 4-digit Security PIN dobara enable karein.',
     };
+  }
+
+  // PIN verification path (used when WebView/device lacks platform WebAuthn)
+  if (targetCred.startsWith('PIN-') || saved?.mode === 'PIN') {
+    const enteredPin = String(options?.pin || '').trim();
+    if (!enteredPin) {
+      return {
+        ok: false,
+        requiresPin: true,
+        mode: 'PIN',
+        error: 'Verify karne ke liye apna 4-digit Security PIN darj karein.',
+      };
+    }
+    if (!/^\d{4}$/.test(enteredPin)) {
+      return {
+        ok: false,
+        requiresPin: true,
+        mode: 'PIN',
+        error: 'Sahih 4-digit Security PIN darj karein.',
+      };
+    }
+    if (!saved?.pinHash || !saved.deviceId) {
+      return {
+        ok: false,
+        requiresPinSetup: true,
+        mode: 'PIN',
+        error: 'Security PIN record incomplete hai. Password se login kar ke dobara PIN set karein.',
+      };
+    }
+    const candidateHash = await hashSecurityPin(saved.deviceId, enteredPin);
+    if (candidateHash !== saved.pinHash) {
+      return {
+        ok: false,
+        requiresPin: true,
+        mode: 'PIN',
+        error: 'Ghalat 4-digit Security PIN. Dobara koshish karein.',
+      };
+    }
+    return { ok: true, mode: 'PIN' };
   }
 
   if (
@@ -2617,18 +2916,15 @@ export async function verifyBiometricPasskey(
     !navigator.credentials?.get ||
     !window.isSecureContext
   ) {
-    if (saved && saved.credentialId === targetCred) {
-      return { ok: true, mode: 'DEVICE_KEY' };
-    }
     return {
       ok: false,
-      mode: 'WEBAUTHN',
+      requiresPinSetup: true,
+      mode: 'PIN',
       error:
-        'Is device/browser par Biometric available nahi hai. Password ya Google se Login karein.',
+        'Is device/WebView par hardware Biometric sensor available nahi. Password se Login karein ya 4-digit Security PIN set karein.',
     };
   }
 
-  const startedAt = Date.now();
   try {
     const challenge = new Uint8Array(32);
     window.crypto.getRandomValues(challenge);
@@ -2642,7 +2938,7 @@ export async function verifyBiometricPasskey(
             type: 'public-key',
           },
         ],
-        userVerification: 'preferred',
+        userVerification: 'required',
         timeout: 45000,
       },
     });
@@ -2655,12 +2951,7 @@ export async function verifyBiometricPasskey(
       error: 'Fingerprint / FaceID verify nahi ho saka.',
     };
   } catch (err: any) {
-    const elapsed = Date.now() - startedAt;
     const isCancelName = err?.name === 'NotAllowedError' || err?.name === 'AbortError';
-    // If WebView/iframe immediately blocked WebAuthn (< 400ms) or API is unsupported, use encrypted Device Quick-Unlock fallback
-    if ((!isCancelName || elapsed < 400) && saved && saved.credentialId === targetCred) {
-      return { ok: true, mode: 'DEVICE_KEY' };
-    }
     return {
       ok: false,
       cancelled: isCancelName,
@@ -3451,8 +3742,9 @@ export async function syncEmailOtpVerifiedStatus(params: {
 }
 
 /**
- * Permanently delete client account rows from Supabase ('users', 'client_users', 'subscriptions'),
- * sign out Supabase Auth, and wipe local session/biometric/auth storage.
+ * Soft-delete client account on Supabase ('users', 'client_users', 'subscriptions') so Admin Panel
+ * permanently keeps full user telemetry, KYC & trial history, while signing the client out cleanly.
+ * Never deletes device fingerprint keys so Anti-Trial-Abuse stays active on repeat signups.
  */
 export async function deleteClientAccountInSupabase(params: {
   deviceId: string;
@@ -3468,7 +3760,7 @@ export async function deleteClientAccountInSupabase(params: {
     filters.push(`device_id=eq.${encodeURIComponent(cleanDev)}`);
   }
   if (cleanEmail) {
-    filters.push(`email=eq.${encodeURIComponent(cleanEmail)}`);
+    filters.push(`email=ilike.${encodeURIComponent(cleanEmail)}`);
   }
   if (cleanPhone) {
     filters.push(`phone=eq.${encodeURIComponent(cleanPhone)}`);
@@ -3478,16 +3770,40 @@ export async function deleteClientAccountInSupabase(params: {
     return { ok: false, error: 'Account identifier missing for deletion.' };
   }
 
+  const nowIso = new Date().toISOString();
+  const userSoftDeletePayload = {
+    account_status: 'SELF_DELETED',
+    status: 'SELF_DELETED',
+    is_self_deleted: true,
+    trial_used: true,
+    is_online: false,
+    active_session_token: null,
+    self_deleted_at: nowIso,
+    last_seen: nowIso,
+  };
+  const subSoftDeletePayload = {
+    account_status: 'SELF_DELETED',
+    status: 'SELF_DELETED',
+    is_self_deleted: true,
+    trial_used: true,
+    updated_at: nowIso,
+  };
+
   try {
-    const tables = ['users', 'client_users', 'subscriptions'];
+    const tables: { name: 'users' | 'client_users' | 'subscriptions'; payload: Record<string, any> }[] = [
+      { name: 'users', payload: userSoftDeletePayload },
+      { name: 'client_users', payload: userSoftDeletePayload },
+      { name: 'subscriptions', payload: subSoftDeletePayload },
+    ];
     const ops: Promise<any>[] = [];
-    for (const table of tables) {
+    for (const t of tables) {
       for (const q of filters) {
         ops.push(
           callSupabaseProxy({
-            table,
-            method: 'DELETE',
+            table: t.name,
+            method: 'PATCH',
             query: q,
+            payload: t.payload,
             timeoutMs: 8000,
           }).catch(() => null)
         );
@@ -3501,9 +3817,12 @@ export async function deleteClientAccountInSupabase(params: {
       try {
         clearBiometricBinding();
         clearAuthSession();
+        clearActiveSessionToken();
+        clearLastActiveAtMs();
         localStorage.removeItem(CLIENT_GPS_STORAGE_KEY);
-        localStorage.removeItem('boss_client_auth_session_v1');
-        localStorage.removeItem('boss_client_device_id_v1');
+        localStorage.removeItem(AUTH_SESSION_STORAGE_KEY);
+        localStorage.removeItem('boss_user_locked_tabs_v1');
+        localStorage.removeItem('boss_initial_cloud_sync_done_v1');
       } catch {
         // ignore storage errors
       }

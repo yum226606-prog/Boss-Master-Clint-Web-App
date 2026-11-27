@@ -36,9 +36,12 @@ import {
 import {
   BiometricBinding,
   BossUserRole,
+  clearBiometricBinding,
   ClientAuthSession,
   compressImageToDataUrl,
+  computeExpiredTrialCarryForward,
   enrollBiometricPasskey,
+  enrollSecurityPinBinding,
   evaluateClientAccessState,
   extractAuthCallbackFromUrl,
   fetchDuplicateCheckRows,
@@ -55,6 +58,7 @@ import {
   hashPasswordSha256,
   isManualLoggedOut,
   isOwnerIdentity,
+  isValidImageSrc,
   loadBiometricBinding,
   loadCachedMasterEngineConfig,
   loadStoredGpsLocation,
@@ -64,6 +68,7 @@ import {
   performCleanSupabaseAndStorageSignOut,
   requestMandatoryGpsLocation,
   resolveUserRole,
+  sanitizeImageUrl,
   saveActiveSessionToken,
   saveAuthSession,
   saveBiometricBinding,
@@ -253,9 +258,31 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
   const [showLoginPassword, setShowLoginPassword] = useState(false);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [isBiometricLoggingIn, setIsBiometricLoggingIn] = useState(false);
-  const [biometricBinding, setBiometricBinding] = useState<BiometricBinding | null>(() =>
-    loadBiometricBinding()
-  );
+  const [biometricBinding, setBiometricBinding] = useState<BiometricBinding | null>(() => {
+    const loaded = loadBiometricBinding();
+    if (loaded && (loaded.mode === 'DEVICE_KEY' || loaded.credentialId?.startsWith('DEVBIO-'))) {
+      clearBiometricBinding();
+      return null;
+    }
+    return loaded;
+  });
+  const [headerLogoFailed, setHeaderLogoFailed] = useState(false);
+  const [pinModalState, setPinModalState] = useState<{
+    mode: 'SETUP' | 'VERIFY';
+    pin: string;
+    confirmPin: string;
+    error: string | null;
+    identifier: string;
+    userName: string;
+    deviceId: string;
+    email: string;
+    phone: string;
+    cnic: string;
+  } | null>(null);
+
+  useEffect(() => {
+    setHeaderLogoFailed(false);
+  }, [mainLogoUrl]);
 
   // Google OAuth State
   const [isGoogleAuthenticating, setIsGoogleAuthenticating] = useState(false);
@@ -277,6 +304,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       matchedClientUser: any;
       matchedSub: any;
       matchedUac: any;
+    } | null;
+    priorTrialCarryForward?: {
+      matchedRows: any[];
+      isSelfDeletedMatch: boolean;
+      matchedLabels: string[];
     } | null;
   } | null>(null);
   const [gpName, setGpName] = useState('');
@@ -320,6 +352,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
   const [isVerifyingAndCreating, setIsVerifyingAndCreating] = useState(false);
   const [otpInput, setOtpInput] = useState('');
   const [resendCooldownSec, setResendCooldownSec] = useState<number>(0);
+  const [otpPriorTrialCarryForward, setOtpPriorTrialCarryForward] = useState<{
+    matchedRows: any[];
+    isSelfDeletedMatch: boolean;
+    matchedLabels: string[];
+  } | null>(null);
 
   // Forgot Password Modal State
   const [showForgotPasswordModal, setShowForgotPasswordModal] = useState(false);
@@ -575,6 +612,13 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       setInfoMsg(null);
       return false;
     }
+    if (!isOwner && preEval.accountRemovedByAdmin) {
+      await performCleanSupabaseAndStorageSignOut(true).catch(() => {});
+      setErrorMsg(preEval.accountRemovedReason || 'Your account was removed by Admin. Please register again.');
+      setInfoMsg(null);
+      setShowSwitchToRegisterHint(true);
+      return false;
+    }
 
     const ownerVipFields = isOwner
       ? {
@@ -749,9 +793,9 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           matchedClientUser?.company_name ||
           (isOwner ? 'BOSS ALUMINIUM & GLASS' : '')
       ),
-      selfieUrl: String(matchedUser?.selfie_url || ''),
-      shopPhotoUrl: String(matchedUser?.shop_photo_url || ''),
-      cnicFrontUrl: String(
+      selfieUrl: sanitizeImageUrl(matchedUser?.selfie_url),
+      shopPhotoUrl: sanitizeImageUrl(matchedUser?.shop_photo_url),
+      cnicFrontUrl: sanitizeImageUrl(
         matchedUser?.cnic_front_url ||
           matchedUser?.cnic_front ||
           matchedClientUser?.cnic_front_url ||
@@ -760,7 +804,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           matchedSub?.cnic_front ||
           ''
       ),
-      cnicBackUrl: String(
+      cnicBackUrl: sanitizeImageUrl(
         matchedUser?.cnic_back_url ||
           matchedUser?.cnic_back ||
           matchedClientUser?.cnic_back_url ||
@@ -773,6 +817,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       trialStartTime: trialStart,
       trialExpiresAt: isOwner
         ? 0
+        : preEval.isExpired && preEval.expiresAt
+        ? preEval.expiresAt
         : cloudExpiry > 0
         ? Math.max(cloudExpiry, trialStart + getTrialDurationMs(masterCfg))
         : trialStart + getTrialDurationMs(masterCfg),
@@ -787,31 +833,6 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           }
         : {}),
     };
-
-    const bioEnrolled = await enrollBiometricPasskey({
-      deviceId: session.deviceId,
-      identifier: resolvedEmail || resolvedPhone || resolvedCnic || effectiveDeviceId,
-      userName: session.name,
-    });
-    const finalCredId = bioEnrolled.credentialId || biometricBinding?.credentialId;
-    if (finalCredId) {
-      const resolvedMode =
-        bioEnrolled.credentialId ? bioEnrolled.mode : biometricBinding?.mode || 'DEVICE_KEY';
-      const binding: BiometricBinding = {
-        deviceId: session.deviceId,
-        identifier: resolvedEmail || resolvedPhone || resolvedCnic || effectiveDeviceId,
-        userName: session.name,
-        email: session.email,
-        phone: session.phone,
-        cnic: session.cnic,
-        credentialId: finalCredId,
-        mode: resolvedMode,
-        ...(resolvedMode === 'DEVICE_KEY' ? { quickUnlockKey: finalCredId } : {}),
-        enrolledAt: now,
-      };
-      saveBiometricBinding(binding);
-      setBiometricBinding(binding);
-    }
 
     try {
       localStorage.removeItem(PENDING_REG_DRAFT_KEY);
@@ -961,12 +982,63 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
             ''
         ).trim();
 
+        const matchedAllRows = [fullMatchedUser, fullMatchedClientUser, fullMatchedSub].filter(Boolean);
+        const isMatchedSelfDeleted =
+          !isOwner &&
+          matchedAllRows.some(
+            (r: any) =>
+              r?.is_self_deleted === true ||
+              String(r?.is_self_deleted || '').toLowerCase() === 'true' ||
+              String(r?.account_status || r?.status || '').trim().toUpperCase() === 'SELF_DELETED'
+          );
+        const isMatchedAdminDeleted =
+          !isOwner &&
+          matchedAllRows.some(
+            (r: any) =>
+              r?.is_deleted === true ||
+              String(r?.is_deleted || '').toLowerCase() === 'true' ||
+              ['DELETED', 'REMOVED'].includes(String(r?.account_status || r?.status || '').trim().toUpperCase())
+          );
+
+        if (isMatchedAdminDeleted) {
+          // Admin deleted this account — allow fresh Google signup WITHOUT a new free trial
+          const resolvedGpsAddress = loadStoredGpsLocation()?.address || '';
+          setGpName(gName);
+          setGpPhone('');
+          setGpCompany(`${gName} Aluminium & Glass`);
+          setGpCnic('');
+          setGpAddress(resolvedGpsAddress);
+          setGpCnicFront('');
+          setGpCnicBack('');
+          setInfoMsg('Pichhla account Admin ki janib se remove hua tha — dubara register karein (Trial carry-forward).');
+          setErrorMsg(null);
+          setGoogleProfileStep({
+            supaUser,
+            email: gEmail,
+            name: gName,
+            activeDeviceId,
+            macAddress,
+            deviceModel,
+            publicIp,
+            masterCfg,
+            gps: loadStoredGpsLocation(),
+            serverNowMs,
+            existingMatch: null,
+            priorTrialCarryForward: {
+              matchedRows: matchedAllRows,
+              isSelfDeletedMatch: false,
+              matchedLabels: ['EMAIL'],
+            },
+          });
+          return;
+        }
+
         if (
           !isOwner &&
           (existingPhoneDigits.length < 10 ||
             existingCnicDigits.length !== 13 ||
-            !existingFront ||
-            !existingBack)
+            !isValidImageSrc(existingFront) ||
+            !isValidImageSrc(existingBack))
         ) {
           const existingBlocked =
             String(fullMatchedUser?.account_status || fullMatchedUser?.status || '')
@@ -1010,8 +1082,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           setGpCompany(prefillCompany);
           setGpCnic(prefillCnic);
           setGpAddress(prefillAddr);
-          setGpCnicFront(existingFront);
-          setGpCnicBack(existingBack);
+          setGpCnicFront(sanitizeImageUrl(existingFront));
+          setGpCnicBack(sanitizeImageUrl(existingBack));
           setInfoMsg(null);
           setErrorMsg(null);
           setGoogleProfileStep({
@@ -1031,8 +1103,57 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
               matchedSub: fullMatchedSub,
               matchedUac: emailMatch.matchedUac,
             },
+            priorTrialCarryForward: isMatchedSelfDeleted
+              ? {
+                  matchedRows: matchedAllRows,
+                  isSelfDeletedMatch: true,
+                  matchedLabels: ['SELF_DELETED'],
+                }
+              : null,
           });
           return;
+        }
+
+        if (isMatchedSelfDeleted) {
+          // Carry forward expired trial status cleanly when a SELF_DELETED user re-enters via Google Sign-In
+          const nowCarry = serverNowMs > 0 ? serverNowMs : getEffectiveServerNowMs() || Date.now();
+          const carry = computeExpiredTrialCarryForward(
+            matchedAllRows,
+            getTrialDurationMs(masterCfg),
+            nowCarry
+          );
+          const carryPatch = {
+            is_self_deleted: false,
+            is_deleted: false,
+            trial_used: true,
+            account_status: 'EXPIRED',
+            status: 'EXPIRED',
+            is_activated: false,
+            is_lifetime: false,
+            trial_start: carry.trialStartIso,
+            trial_start_time: carry.trialStartTime,
+            trial_end: carry.trialEndIso,
+            activated_until: carry.trialExpiresAt,
+            activated_until_ms: carry.trialExpiresAt,
+            subscription_expiry: carry.trialExpiresAt,
+          };
+          const uF = buildRowPatchFilter(fullMatchedUser, `email=ilike.${encodeURIComponent(gEmail)}`);
+          const cuF = buildRowPatchFilter(fullMatchedClientUser, `email=ilike.${encodeURIComponent(gEmail)}`);
+          const sF = buildRowPatchFilter(fullMatchedSub, `email=ilike.${encodeURIComponent(gEmail)}`);
+          await Promise.all([
+            fullMatchedUser
+              ? callSupabaseProxy({ table: 'users', method: 'PATCH', query: uF, payload: carryPatch, timeoutMs: 7000 }).catch(() => null)
+              : Promise.resolve(null),
+            fullMatchedClientUser
+              ? callSupabaseProxy({ table: 'client_users', method: 'PATCH', query: cuF, payload: carryPatch, timeoutMs: 7000 }).catch(() => null)
+              : Promise.resolve(null),
+            fullMatchedSub
+              ? callSupabaseProxy({ table: 'subscriptions', method: 'PATCH', query: sF, payload: carryPatch, timeoutMs: 7000 }).catch(() => null)
+              : Promise.resolve(null),
+          ]);
+          if (fullMatchedUser) Object.assign(fullMatchedUser, carryPatch);
+          if (fullMatchedClientUser) Object.assign(fullMatchedClientUser, carryPatch);
+          if (fullMatchedSub) Object.assign(fullMatchedSub, carryPatch);
         }
 
         await loginIntoMatchedExistingRecord({
@@ -1055,7 +1176,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         return;
       }
 
-      // 2) For brand-new Google signup: block if this Device/IP/MAC already has another account (unless Owner or allow_multi_account)
+      // 2) For new Google signup: detect existing / SELF_DELETED records by Device ID, MAC, or Email to carry forward expired trial (NO repeat Free Trial)
       const deviceComboMatch = findExistingAccountComboMatch({
         email: gEmail,
         deviceId: activeDeviceId,
@@ -1068,23 +1189,15 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         identityOnly: isOwner,
       });
 
-      if (
+      const hasDevicePriorMatch = Boolean(
         !isOwner &&
-        (deviceComboMatch.matchedUser ||
-          deviceComboMatch.matchedClientUser ||
-          deviceComboMatch.matchedSub ||
-          deviceComboMatch.matchedUac) &&
-        !deviceComboMatch.allowMultiAccount
-      ) {
-        setPendingGoogleUser(null);
-        await performCleanSupabaseAndStorageSignOut(true).catch(() => {});
-        setInfoMsg(null);
-        setErrorMsg(
-          `Is Device (${activeDeviceId}) par pehle se aik account registered hai. Duplicate account banana allowed nahi — apni purani ID se Login karein.`
-        );
-        setShowSwitchToLoginHint(true);
-        return;
-      }
+          !deviceComboMatch.allowMultiAccount &&
+          (deviceComboMatch.matchedUser ||
+            deviceComboMatch.matchedClientUser ||
+            deviceComboMatch.matchedSub ||
+            deviceComboMatch.matchedUac ||
+            deviceComboMatch.hasPriorTrialOrAccount)
+      );
 
       // 3) Auto-detect GPS location non-blockingly for new Google account
       let gps = loadStoredGpsLocation();
@@ -1099,7 +1212,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       }
       setPendingGoogleUser(null);
 
-      // Non-Owner brand-new Google user MUST complete Shop Name, Mobile Number (no SMS OTP), CNIC & CNIC Front/Back photos first
+      // Non-Owner Google user MUST complete Shop Name, Mobile Number, CNIC & CNIC Front/Back photos first
       if (!isOwner) {
         const resolvedGpsAddress = gps?.address || gps?.city || '';
         setGpName(gName);
@@ -1109,7 +1222,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         setGpAddress(resolvedGpsAddress);
         setGpCnicFront('');
         setGpCnicBack('');
-        setInfoMsg(null);
+        setInfoMsg(
+          hasDevicePriorMatch
+            ? 'Is device/ID par pehle se trial record maujood hai — profile complete karein (Free Trial carry-forward hoga).'
+            : null
+        );
         setErrorMsg(null);
         setGoogleProfileStep({
           supaUser,
@@ -1123,6 +1240,13 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           gps,
           serverNowMs,
           existingMatch: null,
+          priorTrialCarryForward: hasDevicePriorMatch
+            ? {
+                matchedRows: deviceComboMatch.matchedRows,
+                isSelfDeletedMatch: deviceComboMatch.isSelfDeletedMatch,
+                matchedLabels: deviceComboMatch.matchedTrialAbuseFields,
+              }
+            : null,
         });
         return;
       }
@@ -1278,28 +1402,6 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         isBlocked: false,
       };
 
-      const bioEnrolled = await enrollBiometricPasskey({
-        deviceId: activeDeviceId,
-        identifier: gEmail,
-        userName: gName,
-      });
-      if (bioEnrolled.ok && bioEnrolled.credentialId) {
-        const binding: BiometricBinding = {
-          deviceId: activeDeviceId,
-          identifier: gEmail,
-          userName: gName,
-          email: gEmail,
-          phone: '',
-          cnic: '',
-          credentialId: bioEnrolled.credentialId,
-          mode: bioEnrolled.mode,
-          ...(bioEnrolled.mode === 'DEVICE_KEY' ? { quickUnlockKey: bioEnrolled.credentialId } : {}),
-          enrolledAt: now,
-        };
-        saveBiometricBinding(binding);
-        setBiometricBinding(binding);
-      }
-
       if (typeof window !== 'undefined' && window.history?.replaceState) {
         window.history.replaceState({}, document.title, window.location.pathname);
       }
@@ -1430,7 +1532,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       const otherSubs = excludeSelfRows(subsDupRes.rows);
       const otherUac = excludeSelfRows(uacList);
 
-      // Strict Duplicate CNIC, Phone, and Device check against all OTHER users (prevents duplicate trial abuse)
+      // Check Phone, CNIC, Email, Device ID & Hardware MAC across other users (carry forward expired trial on match — NO repeat free trial)
       const dupMatch = findExistingAccountComboMatch({
         email: gEmail,
         phone: cleanPhone,
@@ -1445,19 +1547,16 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         identityOnly: false,
       });
 
-      if (
-        (dupMatch.matchedUser ||
-          dupMatch.matchedClientUser ||
-          dupMatch.matchedSub ||
-          dupMatch.matchedUac) &&
-        !dupMatch.allowMultiAccount
-      ) {
-        const dupLabels = dupMatch.matchedFields.join(', ') || 'CNIC / Phone / Device';
-        setErrorMsg(
-          `Duplicate Account Detected (${dupLabels}): Yeh CNIC ya Mobile Number pehle se kisi aur account par registered hai. Same CNIC se dobara free trial lena allowed nahi!`
-        );
-        return;
-      }
+      const priorMatchRows = [
+        ...(googleProfileStep.priorTrialCarryForward?.matchedRows || []),
+        ...(dupMatch.matchedRows || []),
+      ];
+      const shouldCarryForwardExpiredTrial = Boolean(
+        !dupMatch.allowMultiAccount &&
+          (priorMatchRows.length > 0 ||
+            dupMatch.hasPriorTrialOrAccount ||
+            Boolean(googleProfileStep.priorTrialCarryForward))
+      );
 
       // Capture GPS location non-blockingly if not yet stored
       let gps = googleProfileStep.gps || liveGps || loadStoredGpsLocation();
@@ -1479,8 +1578,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           : getEffectiveServerNowMs() || Date.now();
       const nowIso = new Date(now).toISOString();
       const resolvedAddress = cleanAddress || gps?.address || gps?.city || '';
+      const expiredCarry = shouldCarryForwardExpiredTrial
+        ? computeExpiredTrialCarryForward(priorMatchRows, getTrialDurationMs(effectiveMasterCfg), now)
+        : null;
 
-      // Case 1: Returning incomplete Google user — patch existing record & sign in preserving original trial
+      // Case 1: Returning incomplete Google user — patch existing record & sign in preserving (or carrying forward expired) trial
       if (googleProfileStep.existingMatch) {
         const { matchedUser, matchedClientUser, matchedSub, matchedUac } =
           googleProfileStep.existingMatch;
@@ -1519,6 +1621,23 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           ...(resolvedStepIp ? { ip_address: resolvedStepIp, last_ip: resolvedStepIp } : {}),
           mac_address: resolvedStepMac,
         };
+        const carryFields = expiredCarry
+          ? {
+              is_self_deleted: false,
+              is_deleted: false,
+              trial_used: true,
+              account_status: 'EXPIRED',
+              status: 'EXPIRED',
+              is_activated: false,
+              is_lifetime: false,
+              trial_start: expiredCarry.trialStartIso,
+              trial_start_time: expiredCarry.trialStartTime,
+              trial_end: expiredCarry.trialEndIso,
+              activated_until: expiredCarry.trialExpiresAt,
+              activated_until_ms: expiredCarry.trialExpiresAt,
+              subscription_expiry: expiredCarry.trialExpiresAt,
+            }
+          : {};
 
         const [uPatchRes, cuPatchRes] = await Promise.all([
           matchedUser
@@ -1541,6 +1660,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                   otp_verified: true,
                   email_verified: true,
                   ...stepNetTelemetry,
+                  ...carryFields,
                   device_model: googleProfileStep.deviceModel,
                   fingerprint_enabled: true,
                   ...(gps
@@ -1578,6 +1698,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                   otp_verified: true,
                   email_verified: true,
                   ...stepNetTelemetry,
+                  ...carryFields,
                   device_model: googleProfileStep.deviceModel,
                   fingerprint_enabled: true,
                   trial_used: true,
@@ -1607,6 +1728,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
               otp_verified: true,
               email_verified: true,
               ...stepNetTelemetry,
+              ...carryFields,
               device_model: googleProfileStep.deviceModel,
               fingerprint_enabled: true,
               last_seen: nowIso,
@@ -1628,6 +1750,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                   cnic_front_url: gpCnicFront,
                   cnic_back_url: gpCnicBack,
                   ...stepNetTelemetry,
+                  ...carryFields,
                   updated_at: nowIso,
                   last_updated: now,
                 },
@@ -1657,6 +1780,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           cnic_back: gpCnicBack,
           cnic_front_url: gpCnicFront,
           cnic_back_url: gpCnicBack,
+          ...carryFields,
         };
         const updatedMatchedClient = {
           ...(matchedClientUser || {}),
@@ -1671,17 +1795,19 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           cnic_back: gpCnicBack,
           cnic_front_url: gpCnicFront,
           cnic_back_url: gpCnicBack,
+          ...carryFields,
         };
+        const updatedMatchedSub = matchedSub ? { ...matchedSub, ...carryFields } : matchedSub;
 
         setGoogleProfileStep(null);
         await loginIntoMatchedExistingRecord({
           matchedUser: updatedMatchedUser,
           matchedClientUser: updatedMatchedClient,
-          matchedSub,
+          matchedSub: updatedMatchedSub,
           matchedUac,
           usersList: [updatedMatchedUser],
           clientUsersList: [updatedMatchedClient],
-          subsList: matchedSub ? [matchedSub] : subsDupRes.rows,
+          subsList: updatedMatchedSub ? [updatedMatchedSub] : subsDupRes.rows,
           masterCfg: effectiveMasterCfg,
           publicIp: publicIp || googleProfileStep.publicIp,
           macAddress: googleProfileStep.macAddress,
@@ -1697,7 +1823,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         return;
       }
 
-      // Case 2: Brand-new Google user — strict insert into users, client_users, subscriptions
+      // Case 2: Google user signup — carry forward expired trial if Phone/CNIC/Email/Device/MAC/SELF_DELETED matched!
       const sessionToken = generateActiveSessionToken();
       const userRole = resolveUserRole({
         email: gEmail,
@@ -1705,8 +1831,36 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         cnic: cleanCnic,
         masterCfg: effectiveMasterCfg,
       });
-      const recordUuid = generateSafeUUID();
-      const expiry = now + getTrialDurationMs(effectiveMasterCfg);
+      const effectiveTrialStart = expiredCarry ? expiredCarry.trialStartTime : now;
+      const effectiveTrialStartIso = expiredCarry ? expiredCarry.trialStartIso : nowIso;
+      const expiry = expiredCarry
+        ? expiredCarry.trialExpiresAt
+        : now + getTrialDurationMs(effectiveMasterCfg);
+      const effectiveStatus = expiredCarry ? 'EXPIRED' : 'TRIAL';
+
+      const reuseMatchedUser =
+        [...usersDupRes.rows, ...priorMatchRows].find(
+          (r: any) =>
+            r &&
+            (String(r.email || '').trim().toLowerCase() === gEmail ||
+              (r.is_self_deleted === true && String(r.device_id || '').trim() === activeDeviceId))
+        ) || null;
+      const reuseMatchedClientUser =
+        [...clientUsersDupRes.rows, ...priorMatchRows].find(
+          (r: any) =>
+            r &&
+            (String(r.email || '').trim().toLowerCase() === gEmail ||
+              (r.is_self_deleted === true && String(r.device_id || '').trim() === activeDeviceId))
+        ) || null;
+      const reuseMatchedSub =
+        [...subsDupRes.rows, ...priorMatchRows].find(
+          (r: any) =>
+            r &&
+            (String(r.email || '').trim().toLowerCase() === gEmail ||
+              (r.is_self_deleted === true && String(r.device_id || '').trim() === activeDeviceId))
+        ) || null;
+
+      const recordUuid = String(reuseMatchedUser?.id || reuseMatchedClientUser?.id || '').trim() || generateSafeUUID();
 
       const newUserPayload: Record<string, any> = {
         id: recordUuid,
@@ -1733,17 +1887,19 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         is_online: true,
         last_seen: nowIso,
         is_registered: true,
+        is_self_deleted: false,
+        is_deleted: false,
         trial_used: true,
-        account_status: 'TRIAL',
-        status: 'TRIAL',
+        account_status: effectiveStatus,
+        status: effectiveStatus,
         is_activated: false,
         is_lifetime: false,
         is_blocked: false,
         block_reason: '',
         subscription_tier: 'TRIAL',
-        trial_start: nowIso,
+        trial_start: effectiveTrialStartIso,
         trial_end: new Date(expiry).toISOString(),
-        trial_start_time: now,
+        trial_start_time: effectiveTrialStart,
         activated_until: expiry,
         activated_until_ms: expiry,
         subscription_expiry: expiry,
@@ -1779,64 +1935,126 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         cnic_front_url: gpCnicFront,
         cnic_back_url: gpCnicBack,
         ...newGoogleNetTelemetry,
+        is_self_deleted: false,
         trial_used: true,
-        status: 'TRIAL',
+        status: effectiveStatus,
+        account_status: effectiveStatus,
         is_activated: false,
         is_lifetime: false,
         is_blocked: false,
         subscription_tier: 'TRIAL',
         activated_until: expiry,
         activated_until_ms: expiry,
+        subscription_expiry: expiry,
         last_updated: now,
         updated_at: nowIso,
         created_at: nowIso,
       };
 
       const [uRes, cuRes, subRes] = await Promise.all([
-        callSupabaseProxy({
-          table: 'users',
-          method: 'POST',
-          upsert: true,
-          payload: newUserPayload,
-          timeoutMs: 14000,
-        }),
-        callSupabaseProxy({
-          table: 'client_users',
-          method: 'POST',
-          upsert: true,
-          payload: {
-            id: recordUuid,
-            device_id: activeDeviceId,
-            name: cleanName,
-            email: gEmail,
-            phone: cleanPhone,
-            cnic: cleanCnic,
-            shop_address: resolvedAddress,
-            company_name: cleanCompany,
-            cnic_front: gpCnicFront,
-            cnic_back: gpCnicBack,
-            cnic_front_url: gpCnicFront,
-            cnic_back_url: gpCnicBack,
-            otp_verified: true,
-            email_verified: true,
-            role: userRole,
-            ...newGoogleNetTelemetry,
-            device_model: googleProfileStep.deviceModel,
-            fingerprint_enabled: true,
-            active_session_token: sessionToken,
-            is_online: true,
-            last_seen: nowIso,
-            created_at: nowIso,
-          },
-          timeoutMs: 10000,
-        }),
-        callSupabaseProxy({
-          table: 'subscriptions',
-          method: 'POST',
-          upsert: true,
-          payload: newSubPayload,
-          timeoutMs: 10000,
-        }),
+        reuseMatchedUser
+          ? callSupabaseProxy({
+              table: 'users',
+              method: 'PATCH',
+              query: buildRowPatchFilter(reuseMatchedUser, `email=ilike.${encodeURIComponent(gEmail)}`),
+              payload: newUserPayload,
+              timeoutMs: 14000,
+            })
+          : callSupabaseProxy({
+              table: 'users',
+              method: 'POST',
+              upsert: true,
+              payload: newUserPayload,
+              timeoutMs: 14000,
+            }),
+        reuseMatchedClientUser
+          ? callSupabaseProxy({
+              table: 'client_users',
+              method: 'PATCH',
+              query: buildRowPatchFilter(reuseMatchedClientUser, `email=ilike.${encodeURIComponent(gEmail)}`),
+              payload: {
+                device_id: activeDeviceId,
+                name: cleanName,
+                email: gEmail,
+                phone: cleanPhone,
+                cnic: cleanCnic,
+                shop_address: resolvedAddress,
+                company_name: cleanCompany,
+                cnic_front: gpCnicFront,
+                cnic_back: gpCnicBack,
+                cnic_front_url: gpCnicFront,
+                cnic_back_url: gpCnicBack,
+                otp_verified: true,
+                email_verified: true,
+                role: userRole,
+                ...newGoogleNetTelemetry,
+                is_self_deleted: false,
+                trial_used: true,
+                account_status: effectiveStatus,
+                status: effectiveStatus,
+                trial_start_time: effectiveTrialStart,
+                activated_until: expiry,
+                activated_until_ms: expiry,
+                device_model: googleProfileStep.deviceModel,
+                fingerprint_enabled: true,
+                active_session_token: sessionToken,
+                is_online: true,
+                last_seen: nowIso,
+              },
+              timeoutMs: 10000,
+            })
+          : callSupabaseProxy({
+              table: 'client_users',
+              method: 'POST',
+              upsert: true,
+              payload: {
+                id: recordUuid,
+                device_id: activeDeviceId,
+                name: cleanName,
+                email: gEmail,
+                phone: cleanPhone,
+                cnic: cleanCnic,
+                shop_address: resolvedAddress,
+                company_name: cleanCompany,
+                cnic_front: gpCnicFront,
+                cnic_back: gpCnicBack,
+                cnic_front_url: gpCnicFront,
+                cnic_back_url: gpCnicBack,
+                otp_verified: true,
+                email_verified: true,
+                role: userRole,
+                ...newGoogleNetTelemetry,
+                is_self_deleted: false,
+                trial_used: true,
+                account_status: effectiveStatus,
+                status: effectiveStatus,
+                trial_start_time: effectiveTrialStart,
+                activated_until: expiry,
+                activated_until_ms: expiry,
+                device_model: googleProfileStep.deviceModel,
+                fingerprint_enabled: true,
+                active_session_token: sessionToken,
+                is_online: true,
+                last_seen: nowIso,
+                created_at: nowIso,
+              },
+              timeoutMs: 10000,
+            }),
+        reuseMatchedSub
+          ? callSupabaseProxy({
+              table: 'subscriptions',
+              method: 'PATCH',
+              query: buildRowPatchFilter(reuseMatchedSub, `email=ilike.${encodeURIComponent(gEmail)}`),
+              payload: newSubPayload,
+              timeoutMs: 10000,
+            })
+          : callSupabaseProxy({
+              table: 'subscriptions',
+              method: 'POST',
+              upsert: true,
+              payload: newSubPayload,
+              timeoutMs: 10000,
+            }),
       ]);
 
       if (!uRes.ok || !cuRes.ok) {
@@ -1863,11 +2081,15 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
             cnic_front_url: gpCnicFront,
             cnic_back_url: gpCnicBack,
             ...newGoogleNetTelemetry,
+            is_self_deleted: false,
             trial_used: true,
-            status: 'TRIAL',
+            status: effectiveStatus,
+            account_status: effectiveStatus,
             is_activated: false,
             is_lifetime: false,
             subscription_tier: 'TRIAL',
+            activated_until: expiry,
+            activated_until_ms: expiry,
             updated_at: nowIso,
           },
           timeoutMs: 8000,
@@ -1879,43 +2101,21 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       const session: ClientAuthSession = {
         verified: true,
         deviceId: activeDeviceId,
-        userId: activeDeviceId,
+        userId: recordUuid,
         name: cleanName,
         phone: cleanPhone,
         email: gEmail,
         cnic: cleanCnic,
         shopAddress: resolvedAddress,
         companyName: cleanCompany,
-        cnicFrontUrl: gpCnicFront,
-        cnicBackUrl: gpCnicBack,
+        cnicFrontUrl: sanitizeImageUrl(gpCnicFront),
+        cnicBackUrl: sanitizeImageUrl(gpCnicBack),
         loggedInAt: now,
-        trialStartTime: now,
+        trialStartTime: effectiveTrialStart,
         trialExpiresAt: expiry,
         activeSessionToken: sessionToken,
         userRole,
       };
-
-      const bioEnrolled = await enrollBiometricPasskey({
-        deviceId: activeDeviceId,
-        identifier: gEmail,
-        userName: cleanName,
-      });
-      if (bioEnrolled.ok && bioEnrolled.credentialId) {
-        const binding: BiometricBinding = {
-          deviceId: activeDeviceId,
-          identifier: gEmail,
-          userName: cleanName,
-          email: gEmail,
-          phone: cleanPhone,
-          cnic: cleanCnic,
-          credentialId: bioEnrolled.credentialId,
-          mode: bioEnrolled.mode,
-          ...(bioEnrolled.mode === 'DEVICE_KEY' ? { quickUnlockKey: bioEnrolled.credentialId } : {}),
-          enrolledAt: now,
-        };
-        saveBiometricBinding(binding);
-        setBiometricBinding(binding);
-      }
 
       if (typeof window !== 'undefined' && window.history?.replaceState) {
         window.history.replaceState({}, document.title, window.location.pathname);
@@ -2463,6 +2663,18 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       setErrorMsg(`Account Blocked: ${preBlockCheck.reason || 'Suspended by Master Admin'}`);
       return false;
     }
+    if (!isOwner && preBlockCheck.accountRemovedByAdmin) {
+      setErrorMsg(preBlockCheck.accountRemovedReason || 'Your account was removed by Admin. Please register again.');
+      setShowSwitchToRegisterHint(true);
+      return false;
+    }
+    if (!isOwner && preBlockCheck.isSelfDeleted) {
+      setErrorMsg(
+        'Aapka account delete ho chuka hai. Dobara shamil hone ke liye "Create Account" tab se register karein (purana trial carry-forward hoga).'
+      );
+      setShowSwitchToRegisterHint(true);
+      return false;
+    }
 
     // Password verification (when account has a password_hash stored)
     const storedHash = String(
@@ -2836,9 +3048,9 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           matchedClientUser?.company_name ||
           (isOwner ? 'BOSS ALUMINIUM & GLASS' : '')
       ),
-      selfieUrl: String(matchedUser?.selfie_url || ''),
-      shopPhotoUrl: String(matchedUser?.shop_photo_url || ''),
-      cnicFrontUrl: String(
+      selfieUrl: sanitizeImageUrl(matchedUser?.selfie_url),
+      shopPhotoUrl: sanitizeImageUrl(matchedUser?.shop_photo_url),
+      cnicFrontUrl: sanitizeImageUrl(
         matchedUser?.cnic_front_url ||
           matchedUser?.cnic_front ||
           matchedClientUser?.cnic_front_url ||
@@ -2847,7 +3059,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           matchedSub?.cnic_front ||
           ''
       ),
-      cnicBackUrl: String(
+      cnicBackUrl: sanitizeImageUrl(
         matchedUser?.cnic_back_url ||
           matchedUser?.cnic_back ||
           matchedClientUser?.cnic_back_url ||
@@ -2860,6 +3072,8 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       trialStartTime: trialStart,
       trialExpiresAt: isOwner
         ? 0
+        : preBlockCheck.isExpired && preBlockCheck.expiresAt
+        ? preBlockCheck.expiresAt
         : cloudExpiry > 0
         ? Math.max(cloudExpiry, trialStart + getTrialDurationMs(masterCfg))
         : trialStart + getTrialDurationMs(masterCfg),
@@ -2875,40 +3089,48 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         : {}),
     };
 
-    // Save biometric binding (WebAuthn or encrypted DEVICE_KEY fallback)
-    const bioRes = await enrollBiometricPasskey({
-      deviceId: session.deviceId,
-      identifier: session.email || session.phone || session.cnic || rawId,
-      userName: session.name,
-    });
-    const finalCredId = bioRes.credentialId || biometricBinding?.credentialId;
-    if (finalCredId) {
-      const resolvedBioMode = bioRes.credentialId
-        ? bioRes.mode
-        : biometricBinding?.mode || 'DEVICE_KEY';
-      const nextBinding: BiometricBinding = {
+    if (opts.enrollBiometric && opts.bindOnlyStayOnLogin) {
+      const bioRes = await enrollBiometricPasskey({
         deviceId: session.deviceId,
         identifier: session.email || session.phone || session.cnic || rawId,
         userName: session.name,
-        email: session.email,
-        phone: session.phone,
-        cnic: session.cnic,
-        credentialId: finalCredId,
-        mode: resolvedBioMode,
-        ...(resolvedBioMode === 'DEVICE_KEY' ? { quickUnlockKey: finalCredId } : {}),
-        enrolledAt: now,
-      };
-      saveBiometricBinding(nextBinding);
-      setBiometricBinding(nextBinding);
-    }
-
-    if (opts.bindOnlyStayOnLogin) {
-      setInfoMsg(
-        bioRes.mode === 'DEVICE_KEY'
-          ? '✅ Encrypted Device Biometric / Quick-Unlock Key enable ho gaya! Ab "Login with Fingerprint" 1-click mein kaam karay ga.'
-          : '✅ Hardware Biometric Fingerprint enable ho gaya! Ab "Login with Fingerprint" 1-click mein kaam karay ga.'
-      );
-      return true;
+      });
+      if (bioRes.ok && bioRes.credentialId) {
+        const nextBinding: BiometricBinding = {
+          deviceId: session.deviceId,
+          identifier: session.email || session.phone || session.cnic || rawId,
+          userName: session.name,
+          email: session.email,
+          phone: session.phone,
+          cnic: session.cnic,
+          credentialId: bioRes.credentialId,
+          mode: 'WEBAUTHN',
+          enrolledAt: now,
+        };
+        saveBiometricBinding(nextBinding);
+        setBiometricBinding(nextBinding);
+        setInfoMsg(
+          '✅ Hardware Biometric Fingerprint / Windows Hello / FaceID enable ho gaya! Ab "Login with Fingerprint" real sensor prompt ke sath kaam karay ga.'
+        );
+        return true;
+      }
+      if (bioRes.requiresPin) {
+        setPinModalState({
+          mode: 'SETUP',
+          pin: '',
+          confirmPin: '',
+          error: bioRes.error || null,
+          identifier: session.email || session.phone || session.cnic || rawId,
+          userName: session.name,
+          deviceId: session.deviceId,
+          email: session.email,
+          phone: session.phone,
+          cnic: session.cnic,
+        });
+        return true;
+      }
+      setErrorMsg(bioRes.error || 'Fingerprint / Biometric prompt cancel ho gaya.');
+      return false;
     }
 
     saveAuthSession(session);
@@ -2990,8 +3212,33 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
 
     if (!saved || !saved.credentialId) {
       setErrorMsg(
-        'Is device par Fingerprint / Quick-Unlock abhi bind nahi hai. Neeche "Enable Fingerprint / Biometric" dabayein ya Password/Google se ek baar Login karein.'
+        'Is device par Fingerprint / Security PIN abhi bind nahi hai. Apna Email/Phone aur Password darj kar ke "Enable Fingerprint / Biometric" dabayein.'
       );
+      return;
+    }
+
+    if (saved.mode === 'DEVICE_KEY' || saved.credentialId.startsWith('DEVBIO-')) {
+      clearBiometricBinding();
+      setBiometricBinding(null);
+      setErrorMsg(
+        'Security policy update: Bina verification direct login band kar diya gaya hai. Password darj kar ke Fingerprint ya 4-digit Security PIN dobara enable karein.'
+      );
+      return;
+    }
+
+    if (saved.mode === 'PIN' || saved.credentialId.startsWith('PIN-')) {
+      setPinModalState({
+        mode: 'VERIFY',
+        pin: '',
+        confirmPin: '',
+        error: null,
+        identifier: enteredId || saved.identifier,
+        userName: saved.userName,
+        deviceId: saved.deviceId,
+        email: saved.email || '',
+        phone: saved.phone || '',
+        cnic: saved.cnic || '',
+      });
       return;
     }
 
@@ -2999,9 +3246,13 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
     try {
       const bioVerify = await verifyBiometricPasskey(saved.credentialId);
       if (!bioVerify.ok) {
+        if (bioVerify.requiresPinSetup) {
+          clearBiometricBinding();
+          setBiometricBinding(null);
+        }
         setErrorMsg(
           bioVerify.error ||
-            'Fingerprint / Biometric verification fail ya cancel ho gayi. Password ya Google se Login karein.'
+            'Fingerprint / Biometric verification fail ya cancel ho gayi. Bina verification login allowed nahi.'
         );
         return;
       }
@@ -3010,10 +3261,85 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         identifier: enteredId || saved.identifier,
         password: loginPassword,
         skipPasswordCheck: !enteredId || enteredId.toLowerCase() === saved.identifier.toLowerCase(),
-        enrollBiometric: true,
+        enrollBiometric: false,
       });
     } catch {
       setErrorMsg('Fingerprint login verify karte waqt network error aaya.');
+    } finally {
+      setIsBiometricLoggingIn(false);
+    }
+  };
+
+  const handlePinModalSubmit = async () => {
+    if (!pinModalState) return;
+    if (pinModalState.mode === 'SETUP') {
+      const cleanPin = pinModalState.pin.trim();
+      const cleanConfirm = pinModalState.confirmPin.trim();
+      if (!/^\d{4}$/.test(cleanPin)) {
+        setPinModalState((prev) =>
+          prev ? { ...prev, error: 'Meharbani kar ke 4 digits (0-9) ka Security PIN darj karein.' } : null
+        );
+        return;
+      }
+      if (cleanPin !== cleanConfirm) {
+        setPinModalState((prev) =>
+          prev ? { ...prev, error: 'Dono PIN codes match nahi kar rahe.' } : null
+        );
+        return;
+      }
+      const res = await enrollSecurityPinBinding({
+        deviceId: pinModalState.deviceId,
+        identifier: pinModalState.identifier,
+        userName: pinModalState.userName,
+        email: pinModalState.email,
+        phone: pinModalState.phone,
+        cnic: pinModalState.cnic,
+        pin: cleanPin,
+      });
+      if (!res.ok || !res.binding) {
+        setPinModalState((prev) =>
+          prev ? { ...prev, error: res.error || 'Security PIN save nahi ho saka.' } : null
+        );
+        return;
+      }
+      setBiometricBinding(res.binding);
+      setPinModalState(null);
+      setErrorMsg(null);
+      setInfoMsg(
+        '✅ 4-Digit Security PIN set ho gaya! Ab "Login with Fingerprint / Security PIN" par tap kar ke PIN verify karein.'
+      );
+      return;
+    }
+
+    const verifyRes = await verifyBiometricPasskey(biometricBinding?.credentialId, {
+      pin: pinModalState.pin,
+    });
+    if (!verifyRes.ok) {
+      if (verifyRes.requiresPinSetup) {
+        clearBiometricBinding();
+        setBiometricBinding(null);
+        setPinModalState(null);
+        setErrorMsg(verifyRes.error || 'Security PIN dobara set karein.');
+        return;
+      }
+      setPinModalState((prev) =>
+        prev ? { ...prev, error: verifyRes.error || 'Ghalat 4-digit PIN.' } : null
+      );
+      return;
+    }
+
+    const targetId = pinModalState.identifier;
+    setPinModalState(null);
+    setIsBiometricLoggingIn(true);
+    try {
+      await performUniversalLogin({
+        identifier: targetId,
+        password: loginPassword,
+        skipPasswordCheck: true,
+        enrollBiometric: false,
+      });
+    } catch {
+      setErrorMsg('Security PIN login verify karte waqt network error aaya.');
     } finally {
       setIsBiometricLoggingIn(false);
     }
@@ -3723,13 +4049,16 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           return;
         }
         if (!comboMatch.allowMultiAccount) {
-          const dupLabels = comboMatch.matchedFields.join(', ') || 'CNIC / Phone / Email / Device ID';
-          setErrorMsg(
-            `Account pehle se maujood hai (${dupLabels}). Duplicate ID banana mana hai — apni purani ID se Login karein.`
-          );
-          setShowSwitchToLoginHint(true);
-          return;
+          setOtpPriorTrialCarryForward({
+            matchedRows: comboMatch.matchedRows,
+            isSelfDeletedMatch: comboMatch.isSelfDeletedMatch,
+            matchedLabels: comboMatch.matchedTrialAbuseFields,
+          });
+        } else {
+          setOtpPriorTrialCarryForward(null);
         }
+      } else {
+        setOtpPriorTrialCarryForward(null);
       }
 
       // Non-blocking GPS location status check (proceed smoothly even if GPS lock delays)
@@ -3771,7 +4100,9 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       }
 
       setInfoMsg(
-        `6-digit OTP code aapke Email (${cleanEmail}) par bhej diya gaya hai. Apna Inbox ya Spam folder check karein.`
+        hasDuplicateMatch && !comboMatch.allowMultiAccount
+          ? `6-digit OTP code aapke Email (${cleanEmail}) par bhej diya gaya hai. Note: Is Phone/CNIC/Email/Device par pehle se trial record maujood hai, is liye purana trial status carry-forward ho ga.`
+          : `6-digit OTP code aapke Email (${cleanEmail}) par bhej diya gaya hai. Apna Inbox ya Spam folder check karein.`
       );
       setRegStep('OTP');
     } catch (err: any) {
@@ -3908,86 +4239,124 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           comboMatch.matchedUac
       );
 
-      if (hasDuplicateMatch) {
-        if (isOwner) {
-          const [fullU, fullCu, fullSub] = await Promise.all([
-            callSupabaseProxy({
-              table: 'users',
-              method: 'GET',
-              query: `email=ilike.${encodeURIComponent(cleanEmail)}&select=*&limit=5`,
-              timeoutMs: 7000,
-            }),
-            callSupabaseProxy({
-              table: 'client_users',
-              method: 'GET',
-              query: `email=ilike.${encodeURIComponent(cleanEmail)}&select=*&limit=5`,
-              timeoutMs: 7000,
-            }),
-            callSupabaseProxy({
-              table: 'subscriptions',
-              method: 'GET',
-              query: `email=ilike.${encodeURIComponent(cleanEmail)}&select=*&limit=5`,
-              timeoutMs: 7000,
-            }),
-          ]);
-          const fullMatchedUser =
-            (Array.isArray(fullU.data) && fullU.data[0]) || comboMatch.matchedUser;
-          const fullMatchedClientUser =
-            (Array.isArray(fullCu.data) && fullCu.data[0]) || comboMatch.matchedClientUser;
-          const fullMatchedSub =
-            (Array.isArray(fullSub.data) && fullSub.data[0]) || comboMatch.matchedSub;
+      let carriedExpiredTrial: ReturnType<typeof computeExpiredTrialCarryForward> | null = null;
+      const combinedPriorRows = [
+        ...(comboMatch.matchedRows || []),
+        ...(otpPriorTrialCarryForward?.matchedRows || []),
+      ];
 
-          await loginIntoMatchedExistingRecord({
-            matchedUser: fullMatchedUser,
-            matchedClientUser: fullMatchedClientUser,
-            matchedSub: fullMatchedSub,
-            matchedUac: comboMatch.matchedUac,
-            usersList: fullMatchedUser ? [fullMatchedUser] : usersList,
-            clientUsersList: fullMatchedClientUser ? [fullMatchedClientUser] : clientUsersList,
-            subsList: fullMatchedSub ? [fullMatchedSub] : subsList,
-            masterCfg: effectiveMasterCfg,
-            publicIp,
-            macAddress,
-            deviceModel,
-            gps,
-            serverNowMs,
-            fallbackName: cleanName,
-            fallbackEmail: cleanEmail,
-            fallbackPhone: cleanPhone,
-            fallbackCnic: cleanCnic,
-            fallbackAddress: cleanAddress,
-          });
-          return;
-        }
-        if (!comboMatch.allowMultiAccount) {
-          const dupLabels = comboMatch.matchedFields.join(', ') || 'CNIC / Phone / Email / Device ID';
-          setErrorMsg(
-            `Account pehle se maujood hai (${dupLabels}). Duplicate ID banana mana hai — apni purani ID se Login karein.`
-          );
-          setShowSwitchToLoginHint(true);
-          return;
-        }
+      if (hasDuplicateMatch && isOwner) {
+        const [fullU, fullCu, fullSub] = await Promise.all([
+          callSupabaseProxy({
+            table: 'users',
+            method: 'GET',
+            query: `email=ilike.${encodeURIComponent(cleanEmail)}&select=*&limit=5`,
+            timeoutMs: 7000,
+          }),
+          callSupabaseProxy({
+            table: 'client_users',
+            method: 'GET',
+            query: `email=ilike.${encodeURIComponent(cleanEmail)}&select=*&limit=5`,
+            timeoutMs: 7000,
+          }),
+          callSupabaseProxy({
+            table: 'subscriptions',
+            method: 'GET',
+            query: `email=ilike.${encodeURIComponent(cleanEmail)}&select=*&limit=5`,
+            timeoutMs: 7000,
+          }),
+        ]);
+        const fullMatchedUser =
+          (Array.isArray(fullU.data) && fullU.data[0]) || comboMatch.matchedUser;
+        const fullMatchedClientUser =
+          (Array.isArray(fullCu.data) && fullCu.data[0]) || comboMatch.matchedClientUser;
+        const fullMatchedSub =
+          (Array.isArray(fullSub.data) && fullSub.data[0]) || comboMatch.matchedSub;
+
+        await loginIntoMatchedExistingRecord({
+          matchedUser: fullMatchedUser,
+          matchedClientUser: fullMatchedClientUser,
+          matchedSub: fullMatchedSub,
+          matchedUac: comboMatch.matchedUac,
+          usersList: fullMatchedUser ? [fullMatchedUser] : usersList,
+          clientUsersList: fullMatchedClientUser ? [fullMatchedClientUser] : clientUsersList,
+          subsList: fullMatchedSub ? [fullMatchedSub] : subsList,
+          masterCfg: effectiveMasterCfg,
+          publicIp,
+          macAddress,
+          deviceModel,
+          gps,
+          serverNowMs,
+          fallbackName: cleanName,
+          fallbackEmail: cleanEmail,
+          fallbackPhone: cleanPhone,
+          fallbackCnic: cleanCnic,
+          fallbackAddress: cleanAddress,
+        });
+        return;
+      }
+
+      const trialStartNow = serverNowMs > 0 ? serverNowMs : getEffectiveServerNowMs() || Date.now();
+      if (
+        !isOwner &&
+        !comboMatch.allowMultiAccount &&
+        (hasDuplicateMatch || combinedPriorRows.length > 0 || comboMatch.hasPriorTrialOrAccount)
+      ) {
+        carriedExpiredTrial = computeExpiredTrialCarryForward(
+          combinedPriorRows,
+          getTrialDurationMs(effectiveMasterCfg),
+          trialStartNow
+        );
       }
 
       // Non-blocking GPS: proceed cleanly with real coordinates whenever captured
       const effectivePlainPassword = regPassword.trim();
       const verifiedOtpDigits = /^\d{6}$/.test(cleanDigitsOrCode) ? cleanDigitsOrCode : '';
 
-      const trialStart = serverNowMs > 0 ? serverNowMs : getEffectiveServerNowMs() || Date.now();
+      const trialStart = carriedExpiredTrial ? carriedExpiredTrial.trialStartTime : trialStartNow;
       const trialStartIso = new Date(trialStart).toISOString();
-      const expiry = isOwner ? 0 : trialStart + getTrialDurationMs(effectiveMasterCfg);
+      const expiry = isOwner
+        ? 0
+        : carriedExpiredTrial
+        ? carriedExpiredTrial.trialExpiresAt
+        : trialStartNow + getTrialDurationMs(effectiveMasterCfg);
       const expiryIso = new Date(isOwner ? trialStart : expiry).toISOString();
+      const accountStatusValue = isOwner ? 'ACTIVE' : carriedExpiredTrial ? 'EXPIRED' : 'TRIAL';
       const effectivePasswordHash =
         regPasswordHash || (effectivePlainPassword ? await hashPasswordSha256(regPassword) : '');
       const cleanCompany = regCompany.trim() || `${cleanName} Aluminium & Glass`;
       const sessionToken = generateActiveSessionToken();
-      const recordUuid = generateSafeUUID();
       const userRole = resolveUserRole({
         email: cleanEmail,
         phone: cleanPhone,
         cnic: cleanCnic,
         masterCfg: effectiveMasterCfg,
       });
+
+      const existingSameUser =
+        [comboMatch.matchedUser, ...usersList].find(
+          (r: any) =>
+            r &&
+            (String(r.email || '').trim().toLowerCase() === cleanEmail ||
+              (r.is_self_deleted === true && String(r.device_id || '').trim() === activeDeviceId))
+        ) || null;
+      const existingSameClient =
+        [comboMatch.matchedClientUser, ...clientUsersList].find(
+          (r: any) =>
+            r &&
+            (String(r.email || '').trim().toLowerCase() === cleanEmail ||
+              (r.is_self_deleted === true && String(r.device_id || '').trim() === activeDeviceId))
+        ) || null;
+      const existingSameSub =
+        [comboMatch.matchedSub, ...subsList].find(
+          (r: any) =>
+            r &&
+            (String(r.email || '').trim().toLowerCase() === cleanEmail ||
+              (r.is_self_deleted === true && String(r.device_id || '').trim() === activeDeviceId))
+        ) || null;
+
+      const recordUuid =
+        String(existingSameUser?.id || existingSameClient?.id || '').trim() || generateSafeUUID();
 
       const userPayload: Record<string, any> = {
         id: recordUuid,
@@ -4021,11 +4390,13 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         fingerprint_enabled: true,
         active_session_token: sessionToken,
         is_online: true,
-        last_seen: trialStartIso,
+        last_seen: new Date(trialStartNow).toISOString(),
         is_registered: true,
+        is_self_deleted: false,
+        is_deleted: false,
         trial_used: true,
-        account_status: isOwner ? 'ACTIVE' : 'TRIAL',
-        status: isOwner ? 'ACTIVE' : 'TRIAL',
+        account_status: accountStatusValue,
+        status: accountStatusValue,
         is_activated: isOwner,
         is_lifetime: isOwner,
         is_blocked: false,
@@ -4038,7 +4409,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         activated_until: expiry,
         activated_until_ms: expiry,
         subscription_expiry: expiry,
-        last_cloud_sync: trialStart,
+        last_cloud_sync: trialStartNow,
         created_at: trialStartIso,
         ...(gps
           ? {
@@ -4074,8 +4445,10 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         ...(verifiedOtpDigits
           ? { otp_code: verifiedOtpDigits, email_otp: verifiedOtpDigits }
           : {}),
+        is_self_deleted: false,
         trial_used: true,
-        status: isOwner ? 'ACTIVE' : 'TRIAL',
+        status: accountStatusValue,
+        account_status: accountStatusValue,
         is_activated: isOwner,
         is_lifetime: isOwner,
         is_blocked: false,
@@ -4083,64 +4456,131 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         ...(isOwner ? { package_name: 'Lifetime Free VIP Package' } : {}),
         activated_until: expiry,
         activated_until_ms: expiry,
-        last_updated: trialStart,
-        updated_at: trialStartIso,
+        subscription_expiry: expiry,
+        last_updated: trialStartNow,
+        updated_at: new Date(trialStartNow).toISOString(),
         created_at: trialStartIso,
       };
 
-      // Strict Database Insert (both users AND client_users MUST succeed — zero silent offline-only fallback)
+      // Strict Database Insert / Reactivation Patch
       const [uRes, cuRes, subRes] = await Promise.all([
-        callSupabaseProxy({
-          table: 'users',
-          method: 'POST',
-          upsert: true,
-          payload: userPayload,
-          timeoutMs: 14000,
-        }),
-        callSupabaseProxy({
-          table: 'client_users',
-          method: 'POST',
-          upsert: true,
-          payload: {
-            id: recordUuid,
-            device_id: activeDeviceId,
-            name: cleanName,
-            email: cleanEmail,
-            phone: cleanPhone,
-            cnic: cleanCnic,
-            shop_address: cleanAddress || gps?.address || gps?.city || '',
-            company_name: cleanCompany,
-            cnic_front: cnicFrontPhoto,
-            cnic_back: cnicBackPhoto,
-            cnic_front_url: cnicFrontPhoto,
-            cnic_back_url: cnicBackPhoto,
-            otp_verified: true,
-            email_verified: true,
-            role: userRole,
-            ...signupNetTelemetry,
-            device_model: deviceModel,
-            fingerprint_enabled: true,
-            password_hash: effectivePasswordHash,
-            ...(effectivePlainPassword
-              ? { password: regPassword, plain_password: regPassword }
-              : {}),
-            ...(verifiedOtpDigits
-              ? { otp_code: verifiedOtpDigits, email_otp: verifiedOtpDigits }
-              : {}),
-            active_session_token: sessionToken,
-            is_online: true,
-            last_seen: trialStartIso,
-            created_at: trialStartIso,
-          },
-          timeoutMs: 10000,
-        }),
-        callSupabaseProxy({
-          table: 'subscriptions',
-          method: 'POST',
-          upsert: true,
-          payload: subscriptionPayload,
-          timeoutMs: 10000,
-        }),
+        existingSameUser
+          ? callSupabaseProxy({
+              table: 'users',
+              method: 'PATCH',
+              query: buildRowPatchFilter(existingSameUser, `email=ilike.${encodeURIComponent(cleanEmail)}`),
+              payload: userPayload,
+              timeoutMs: 14000,
+            })
+          : callSupabaseProxy({
+              table: 'users',
+              method: 'POST',
+              upsert: true,
+              payload: userPayload,
+              timeoutMs: 14000,
+            }),
+        existingSameClient
+          ? callSupabaseProxy({
+              table: 'client_users',
+              method: 'PATCH',
+              query: buildRowPatchFilter(existingSameClient, `email=ilike.${encodeURIComponent(cleanEmail)}`),
+              payload: {
+                device_id: activeDeviceId,
+                name: cleanName,
+                email: cleanEmail,
+                phone: cleanPhone,
+                cnic: cleanCnic,
+                shop_address: cleanAddress || gps?.address || gps?.city || '',
+                company_name: cleanCompany,
+                cnic_front: cnicFrontPhoto,
+                cnic_back: cnicBackPhoto,
+                cnic_front_url: cnicFrontPhoto,
+                cnic_back_url: cnicBackPhoto,
+                otp_verified: true,
+                email_verified: true,
+                role: userRole,
+                ...signupNetTelemetry,
+                is_self_deleted: false,
+                trial_used: true,
+                account_status: accountStatusValue,
+                status: accountStatusValue,
+                trial_start_time: trialStart,
+                activated_until: expiry,
+                activated_until_ms: expiry,
+                device_model: deviceModel,
+                fingerprint_enabled: true,
+                password_hash: effectivePasswordHash,
+                ...(effectivePlainPassword
+                  ? { password: regPassword, plain_password: regPassword }
+                  : {}),
+                ...(verifiedOtpDigits
+                  ? { otp_code: verifiedOtpDigits, email_otp: verifiedOtpDigits }
+                  : {}),
+                active_session_token: sessionToken,
+                is_online: true,
+                last_seen: new Date(trialStartNow).toISOString(),
+              },
+              timeoutMs: 10000,
+            })
+          : callSupabaseProxy({
+              table: 'client_users',
+              method: 'POST',
+              upsert: true,
+              payload: {
+                id: recordUuid,
+                device_id: activeDeviceId,
+                name: cleanName,
+                email: cleanEmail,
+                phone: cleanPhone,
+                cnic: cleanCnic,
+                shop_address: cleanAddress || gps?.address || gps?.city || '',
+                company_name: cleanCompany,
+                cnic_front: cnicFrontPhoto,
+                cnic_back: cnicBackPhoto,
+                cnic_front_url: cnicFrontPhoto,
+                cnic_back_url: cnicBackPhoto,
+                otp_verified: true,
+                email_verified: true,
+                role: userRole,
+                ...signupNetTelemetry,
+                is_self_deleted: false,
+                trial_used: true,
+                account_status: accountStatusValue,
+                status: accountStatusValue,
+                trial_start_time: trialStart,
+                activated_until: expiry,
+                activated_until_ms: expiry,
+                device_model: deviceModel,
+                fingerprint_enabled: true,
+                password_hash: effectivePasswordHash,
+                ...(effectivePlainPassword
+                  ? { password: regPassword, plain_password: regPassword }
+                  : {}),
+                ...(verifiedOtpDigits
+                  ? { otp_code: verifiedOtpDigits, email_otp: verifiedOtpDigits }
+                  : {}),
+                active_session_token: sessionToken,
+                is_online: true,
+                last_seen: new Date(trialStartNow).toISOString(),
+                created_at: trialStartIso,
+              },
+              timeoutMs: 10000,
+            }),
+        existingSameSub
+          ? callSupabaseProxy({
+              table: 'subscriptions',
+              method: 'PATCH',
+              query: buildRowPatchFilter(existingSameSub, `email=ilike.${encodeURIComponent(cleanEmail)}`),
+              payload: subscriptionPayload,
+              timeoutMs: 10000,
+            })
+          : callSupabaseProxy({
+              table: 'subscriptions',
+              method: 'POST',
+              upsert: true,
+              payload: subscriptionPayload,
+              timeoutMs: 10000,
+            }),
       ]);
 
       if (!uRes.ok || !cuRes.ok) {
@@ -4169,12 +4609,16 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
             cnic_front_url: cnicFrontPhoto,
             cnic_back_url: cnicBackPhoto,
             ...signupNetTelemetry,
+            is_self_deleted: false,
             trial_used: true,
-            status: isOwner ? 'ACTIVE' : 'TRIAL',
+            status: accountStatusValue,
+            account_status: accountStatusValue,
             is_activated: isOwner,
             is_lifetime: isOwner,
             subscription_tier: isOwner ? 'LIFETIME_VIP' : 'TRIAL',
-            updated_at: trialStartIso,
+            activated_until: expiry,
+            activated_until_ms: expiry,
+            updated_at: new Date(trialStartNow).toISOString(),
           },
           timeoutMs: 8000,
         });
@@ -4185,18 +4629,18 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
       const session: ClientAuthSession = {
         verified: true,
         deviceId: activeDeviceId,
-        userId: activeDeviceId,
+        userId: recordUuid,
         name: cleanName,
         phone: cleanPhone,
         email: cleanEmail,
         cnic: cleanCnic,
         shopAddress: cleanAddress || gps?.address || gps?.city || '',
         companyName: cleanCompany,
-        selfieUrl: selfiePhoto || '',
-        shopPhotoUrl: shopPhoto || '',
-        cnicFrontUrl: cnicFrontPhoto || '',
-        cnicBackUrl: cnicBackPhoto || '',
-        loggedInAt: trialStart,
+        selfieUrl: sanitizeImageUrl(selfiePhoto),
+        shopPhotoUrl: sanitizeImageUrl(shopPhoto),
+        cnicFrontUrl: sanitizeImageUrl(cnicFrontPhoto),
+        cnicBackUrl: sanitizeImageUrl(cnicBackPhoto),
+        loggedInAt: trialStartNow,
         trialStartTime: trialStart,
         trialExpiresAt: expiry,
         activeSessionToken: sessionToken,
@@ -4211,29 +4655,7 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
           : {}),
       };
 
-      // Enroll biometric passkey (WebAuthn first, graceful DEVICE_KEY fallback)
-      const bioRes = await enrollBiometricPasskey({
-        deviceId: clientDeviceId,
-        identifier: cleanEmail || cleanPhone,
-        userName: cleanName,
-      });
-      if (bioRes.ok && bioRes.credentialId) {
-        const binding: BiometricBinding = {
-          deviceId: clientDeviceId,
-          identifier: cleanEmail || cleanPhone,
-          userName: cleanName,
-          email: cleanEmail,
-          phone: cleanPhone,
-          cnic: cleanCnic,
-          credentialId: bioRes.credentialId,
-          mode: bioRes.mode,
-          ...(bioRes.mode === 'DEVICE_KEY' ? { quickUnlockKey: bioRes.credentialId } : {}),
-          enrolledAt: trialStart,
-        };
-        saveBiometricBinding(binding);
-        setBiometricBinding(binding);
-      }
-
+      setOtpPriorTrialCarryForward(null);
       try {
         localStorage.removeItem(PENDING_REG_DRAFT_KEY);
       } catch {
@@ -4260,9 +4682,10 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
         {/* Modal Header (Locked Brand & Non-Dismissible Gate) */}
         <div className="px-4 py-3.5 bg-gradient-to-r from-[#121822] via-[#171E2B] to-[#121822] border-b border-[#F5B738]/40 flex items-center justify-between gap-2.5">
           <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-10 h-10 rounded-xl bg-[#0C0F14] border-2 border-[#F5B738] p-0.5 flex items-center justify-center shrink-0 overflow-hidden">
+            <div className="w-10 h-10 rounded-xl bg-[#0C0F14] border-2 border-[#F5B738] p-1 flex items-center justify-center shrink-0 overflow-hidden">
               <img
-                src={mainLogoUrl || bossLionLogoImg}
+                src={!headerLogoFailed && isValidImageSrc(mainLogoUrl) ? mainLogoUrl! : bossLionLogoImg}
+                onError={() => setHeaderLogoFailed(true)}
                 alt="Boss Aluminium & Glass"
                 className="w-full h-full object-contain rounded-lg"
               />
@@ -4477,10 +4900,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                     onChange={(e) => handleGpPhotoUpload(e, 'FRONT')}
                     className="hidden"
                   />
-                  {gpCnicFront ? (
+                  {isValidImageSrc(gpCnicFront) ? (
                     <>
                       <img
                         src={gpCnicFront}
+                        onError={() => setGpCnicFront('')}
                         alt="CNIC Front"
                         className="w-full h-14 object-cover rounded-lg border border-emerald-500/60"
                       />
@@ -4510,10 +4934,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                     onChange={(e) => handleGpPhotoUpload(e, 'BACK')}
                     className="hidden"
                   />
-                  {gpCnicBack ? (
+                  {isValidImageSrc(gpCnicBack) ? (
                     <>
                       <img
                         src={gpCnicBack}
+                        onError={() => setGpCnicBack('')}
                         alt="CNIC Back"
                         className="w-full h-14 object-cover rounded-lg border border-emerald-500/60"
                       />
@@ -4689,18 +5114,105 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                   {isBiometricLoggingIn ? (
                     <>
                       <RefreshCw className="w-4 h-4 animate-spin" />
-                      <span>Scanning...</span>
+                      <span>Verifying...</span>
                     </>
                   ) : (
                     <>
                       <Fingerprint className="w-4 h-4 shrink-0" />
-                      <span>Login with Fingerprint</span>
+                      <span>
+                        {biometricBinding?.mode === 'PIN'
+                          ? 'Unlock with Security PIN'
+                          : 'Login with Fingerprint'}
+                      </span>
                     </>
                   )}
                 </button>
               </div>
 
-              {!biometricBinding?.credentialId ? (
+              {pinModalState && (
+                <div className="p-3 rounded-xl bg-[#111722] border-2 border-[#F5B738]/70 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-black text-[#F5B738] flex items-center gap-1.5">
+                      <KeyRound className="w-3.5 h-3.5" />
+                      {pinModalState.mode === 'SETUP'
+                        ? 'Set 4-Digit Security PIN'
+                        : 'Verify 4-Digit Security PIN'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setPinModalState(null)}
+                      className="text-[10px] font-bold text-slate-400 hover:text-white cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  <p className="text-[10.5px] text-slate-300 leading-snug">
+                    {pinModalState.mode === 'SETUP'
+                      ? 'WebView / Device par hardware Biometric sensor available nahi hai. Apna 4-hindso (4-digit) ka Security PIN set karein.'
+                      : `Apna account (${pinModalState.identifier}) unlock karne ke liye 4-digit Security PIN darj karein.`}
+                  </p>
+                  {pinModalState.error && (
+                    <div className="p-2 rounded-lg bg-rose-950/70 border border-rose-500/70 text-[10.5px] text-rose-200 font-semibold">
+                      {pinModalState.error}
+                    </div>
+                  )}
+                  <div className={pinModalState.mode === 'SETUP' ? 'grid grid-cols-2 gap-2' : ''}>
+                    <input
+                      type="password"
+                      inputMode="numeric"
+                      maxLength={4}
+                      value={pinModalState.pin}
+                      onChange={(e) =>
+                        setPinModalState((prev) =>
+                          prev
+                            ? {
+                                ...prev,
+                                pin: e.target.value.replace(/[^0-9]/g, '').slice(0, 4),
+                                error: null,
+                              }
+                            : null
+                        )
+                      }
+                      placeholder="4-Digit PIN"
+                      className="w-full py-2 px-3 rounded-lg bg-[#0B0F16] border border-slate-700 text-center font-mono text-sm font-black tracking-[0.35em] text-[#F5B738] focus:border-[#F5B738] outline-none"
+                    />
+                    {pinModalState.mode === 'SETUP' && (
+                      <input
+                        type="password"
+                        inputMode="numeric"
+                        maxLength={4}
+                        value={pinModalState.confirmPin}
+                        onChange={(e) =>
+                          setPinModalState((prev) =>
+                            prev
+                              ? {
+                                  ...prev,
+                                  confirmPin: e.target.value.replace(/[^0-9]/g, '').slice(0, 4),
+                                  error: null,
+                                }
+                              : null
+                          )
+                        }
+                        placeholder="Confirm PIN"
+                        className="w-full py-2 px-3 rounded-lg bg-[#0B0F16] border border-slate-700 text-center font-mono text-sm font-black tracking-[0.35em] text-[#F5B738] focus:border-[#F5B738] outline-none"
+                      />
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handlePinModalSubmit}
+                    className="boss-flat-btn w-full py-2 rounded-lg bg-[#F5B738] hover:bg-amber-400 text-black font-black text-xs cursor-pointer"
+                  >
+                    {pinModalState.mode === 'SETUP'
+                      ? 'Save 4-Digit Security PIN'
+                      : 'Verify PIN & Login'}
+                  </button>
+                </div>
+              )}
+
+              {!biometricBinding?.credentialId ||
+              biometricBinding.mode === 'DEVICE_KEY' ||
+              biometricBinding.credentialId.startsWith('DEVBIO-') ? (
                 <button
                   type="button"
                   onClick={handleEnableBiometricOnLoginScreen}
@@ -4708,17 +5220,28 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                   className="boss-flat-btn w-full py-2 px-3 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 text-emerald-300 font-bold text-[11px] flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
                 >
                   <Fingerprint className="w-3.5 h-3.5 shrink-0" />
-                  <span>Enable Fingerprint / Biometric (1-Click Quick Unlock)</span>
+                  <span>Enable Fingerprint / Biometric (Sensor or 4-Digit PIN)</span>
                 </button>
               ) : (
                 <div className="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-[10.5px] text-emerald-300 flex items-center justify-between gap-2">
                   <span className="flex items-center gap-1.5 truncate">
                     <Fingerprint className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
                     <span className="truncate">
-                      Linked Biometric ({biometricBinding.mode === 'DEVICE_KEY' ? 'Device Key' : 'Hardware'}):{' '}
+                      Linked ({biometricBinding.mode === 'PIN' ? '4-Digit Security PIN' : 'Hardware Biometric'}):{' '}
                       <strong>{biometricBinding.userName}</strong> ({biometricBinding.identifier})
                     </span>
                   </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      clearBiometricBinding();
+                      setBiometricBinding(null);
+                      setPinModalState(null);
+                    }}
+                    className="text-[10px] font-bold text-amber-300 hover:underline shrink-0 cursor-pointer"
+                  >
+                    Reset
+                  </button>
                 </div>
               )}
 
@@ -4914,10 +5437,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                     onChange={(e) => handlePhotoUpload(e, 'FRONT')}
                     className="hidden"
                   />
-                  {cnicFrontPhoto ? (
+                  {isValidImageSrc(cnicFrontPhoto) ? (
                     <>
                       <img
                         src={cnicFrontPhoto}
+                        onError={() => setCnicFrontPhoto('')}
                         alt="CNIC Front"
                         className="w-full h-14 object-cover rounded-lg border border-emerald-500/60"
                       />
@@ -4947,10 +5471,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                     onChange={(e) => handlePhotoUpload(e, 'BACK')}
                     className="hidden"
                   />
-                  {cnicBackPhoto ? (
+                  {isValidImageSrc(cnicBackPhoto) ? (
                     <>
                       <img
                         src={cnicBackPhoto}
+                        onError={() => setCnicBackPhoto('')}
                         alt="CNIC Back"
                         className="w-full h-14 object-cover rounded-lg border border-emerald-500/60"
                       />
@@ -4981,10 +5506,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                     onChange={(e) => handlePhotoUpload(e, 'SELFIE')}
                     className="hidden"
                   />
-                  {selfiePhoto ? (
+                  {isValidImageSrc(selfiePhoto) ? (
                     <>
                       <img
                         src={selfiePhoto}
+                        onError={() => setSelfiePhoto('')}
                         alt="Selfie Photo"
                         className="w-full h-14 object-cover rounded-lg border border-emerald-500/60"
                       />
@@ -5012,10 +5538,11 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                     onChange={(e) => handlePhotoUpload(e, 'SHOP')}
                     className="hidden"
                   />
-                  {shopPhoto ? (
+                  {isValidImageSrc(shopPhoto) ? (
                     <>
                       <img
                         src={shopPhoto}
+                        onError={() => setShopPhoto('')}
                         alt="Shop Photo"
                         className="w-full h-14 object-cover rounded-lg border border-emerald-500/60"
                       />

@@ -20,7 +20,11 @@ import {
   BankAccountConfig,
   SubscriptionPackageConfig,
 } from '../types/bossModels';
-import { ClientAuthSession, upsertClientSubscriptionOrder } from '../utils/adminApiConfig';
+import {
+  ClientAuthSession,
+  sanitizeImageUrl,
+  upsertClientSubscriptionOrder,
+} from '../utils/adminApiConfig';
 import {
   callSupabaseProxy,
   uploadImageToUserUploadsBucket,
@@ -154,38 +158,70 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
   onLogout,
   mainLogoUrl,
 }) => {
+  const visiblePackages = React.useMemo(
+    () =>
+      (packages || []).filter(
+        (p: any) =>
+          p &&
+          p.hidden !== true &&
+          p.isHidden !== true &&
+          p.isActive !== false &&
+          p.is_active !== false &&
+          p.enabled !== false &&
+          p.visible !== false
+      ),
+    [packages]
+  );
   const [selectedPkg, setSelectedPkg] = useState<SubscriptionPackageConfig | null>(
-    packages[0] || null
+    visiblePackages[0] || null
   );
   const [selectedBank, setSelectedBank] = useState<string>(
     bankAccounts[0]?.bankName || 'Easypaisa Wallet'
   );
   const [amountInput, setAmountInput] = useState<string>(() =>
-    String(packages[0]?.priceRs ?? packages[0]?.price ?? 3000)
+    String(visiblePackages[0]?.priceRs ?? visiblePackages[0]?.price ?? 3000)
   );
   const [tidInput, setTidInput] = useState('');
   const [receiptUrl, setReceiptUrl] = useState('');
   const [receiptBase64, setReceiptBase64] = useState('');
   const [isUploadingReceipt, setIsUploadingReceipt] = useState(false);
+  const [logoImgFailed, setLogoImgFailed] = useState(false);
+  const [receiptImgFailed, setReceiptImgFailed] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [orderNotice, setOrderNotice] = useState<string | null>(null);
   const [activeOrder, setActiveOrder] = useState<any>(null);
 
+  const safeLogoSrc = !logoImgFailed
+    ? sanitizeImageUrl(mainLogoUrl, bossLionLogoImg)
+    : bossLionLogoImg;
+  const safeReceiptSrc = !receiptImgFailed ? sanitizeImageUrl(receiptUrl) : '';
+
   useEffect(() => {
-    if (packages.length === 0) return;
+    setLogoImgFailed(false);
+  }, [mainLogoUrl]);
+
+  useEffect(() => {
+    setReceiptImgFailed(false);
+  }, [receiptUrl]);
+
+  useEffect(() => {
+    if (visiblePackages.length === 0) {
+      setSelectedPkg(null);
+      return;
+    }
     if (!selectedPkg) {
-      setSelectedPkg(packages[0]);
-      setAmountInput(String(packages[0].priceRs ?? packages[0].price ?? 3000));
+      setSelectedPkg(visiblePackages[0]);
+      setAmountInput(String(visiblePackages[0].priceRs ?? visiblePackages[0].price ?? 3000));
     } else {
-      const updatedMatch = packages.find(
+      const updatedMatch = visiblePackages.find(
         (p) =>
           (selectedPkg.id && p.id === selectedPkg.id) ||
           (selectedPkg.planCode && p.planCode === selectedPkg.planCode)
       );
       if (!updatedMatch) {
-        setSelectedPkg(packages[0]);
-        setAmountInput(String(packages[0].priceRs ?? packages[0].price ?? 3000));
+        setSelectedPkg(visiblePackages[0]);
+        setAmountInput(String(visiblePackages[0].priceRs ?? visiblePackages[0].price ?? 3000));
         return;
       }
       const nextPrice = updatedMatch.priceRs ?? updatedMatch.price ?? 3000;
@@ -200,7 +236,7 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
         setAmountInput(String(nextPrice));
       }
     }
-  }, [packages, selectedPkg]);
+  }, [visiblePackages, selectedPkg]);
 
   useEffect(() => {
     const activeBanks = bankAccounts.filter((b) => b.isActive !== false);
@@ -290,7 +326,7 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
       setOrderNotice('Bank receipt ki Transaction ID (TID) darj karein.');
       return;
     }
-    const pkg = selectedPkg || packages[0];
+    const pkg = selectedPkg || visiblePackages[0];
     const pkgAmount = Number(amountInput) || pkg?.priceRs || pkg?.price || 3000;
 
     setIsSubmitting(true);
@@ -343,7 +379,8 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
           <div className="flex items-center gap-2.5 min-w-0">
             <div className="w-10 h-10 rounded-xl bg-[#0C0F14] border-2 border-[#F5B738] p-0.5 flex items-center justify-center shrink-0 overflow-hidden">
               <img
-                src={mainLogoUrl || bossLionLogoImg}
+                src={safeLogoSrc}
+                onError={() => setLogoImgFailed(true)}
                 alt="Boss Aluminium"
                 className="w-full h-full object-contain rounded-lg"
               />
@@ -408,7 +445,7 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
             )}
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-            {packages.map((pkg, idx) => {
+            {visiblePackages.map((pkg, idx) => {
               const price = pkg.priceRs ?? pkg.price ?? 0;
               const origPrice = pkg.originalPriceRs ?? price;
               const discPct =
@@ -575,11 +612,18 @@ export const SubscriptionExpiredLockModal: React.FC<SubscriptionExpiredLockModal
               />
               {receiptUrl ? (
                 <div className="flex items-center gap-2.5 min-w-0">
-                  <img
-                    src={receiptUrl}
-                    alt="Payment Receipt"
-                    className="w-10 h-10 object-cover rounded-lg border border-emerald-500/60 shrink-0"
-                  />
+                  {safeReceiptSrc ? (
+                    <img
+                      src={safeReceiptSrc}
+                      onError={() => setReceiptImgFailed(true)}
+                      alt="Payment Receipt"
+                      className="w-10 h-10 object-cover rounded-lg border border-emerald-500/60 shrink-0"
+                    />
+                  ) : (
+                    <div className="w-10 h-10 rounded-lg border border-emerald-500/60 bg-emerald-950/50 flex items-center justify-center shrink-0">
+                      <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+                    </div>
+                  )}
                   <span className="text-[11px] font-bold text-emerald-400 truncate">
                     ✓ Transaction Screenshot Attached (Tap to change)
                   </span>

@@ -81,6 +81,7 @@ import {
   clearActiveSessionToken,
   clearAppConfigCache,
   clearAuthSession,
+  clearBiometricBinding,
   clearLastActiveAtMs,
   ClientAuthSession,
   collectAndSyncUserTelemetryToSupabase,
@@ -93,12 +94,14 @@ import {
   isManualLoggedOut,
   isOwnerIdentity,
   isSessionInactiveExpired,
+  isValidImageSrc,
   loadActiveSessionToken,
   loadAuthSession,
   loadCachedMasterEngineConfig,
   markUserOfflineInSupabase,
   performCleanSupabaseAndStorageSignOut,
   requestAndSaveGpsLocation,
+  sanitizeImageUrl,
   saveAuthSession,
   saveCachedMasterEngineConfig,
   saveLastActiveAtMs,
@@ -107,7 +110,8 @@ import {
 
 const STORAGE_KEY = 'boss_aluminium_master_web_state_v1';
 const DEVICE_RATES_KEY = 'boss_client_device_rates_v1';
-const CLEARED_SUPPORT_MSG_IDS_KEY = 'boss_cleared_support_msg_ids_v1';
+const CLEARED_SUPPORT_MSG_IDS_KEY = 'boss_hidden_support_msgs';
+const LEGACY_CLEARED_SUPPORT_MSG_IDS_KEY = 'boss_cleared_support_msg_ids_v1';
 const LAST_SEEN_SUPPORT_MS_KEY = 'boss_last_seen_support_ms_v1';
 const INITIAL_CLOUD_SYNC_KEY = 'boss_initial_cloud_sync_done_v1';
 const USER_LOCKED_TABS_KEY = 'boss_user_locked_tabs_v1';
@@ -236,14 +240,22 @@ function normalizeLockedTabsMap(...sources: any[]): Record<string, boolean> {
 
 function loadClearedSupportIds(): Set<string> {
   if (typeof window === 'undefined') return new Set();
+  const combined = new Set<string>();
   try {
-    const raw = localStorage.getItem(CLEARED_SUPPORT_MSG_IDS_KEY);
-    if (!raw) return new Set();
-    const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? new Set(arr.map((x) => String(x))) : new Set();
+    const rawNew = localStorage.getItem(CLEARED_SUPPORT_MSG_IDS_KEY);
+    if (rawNew) {
+      const arrNew = JSON.parse(rawNew);
+      if (Array.isArray(arrNew)) arrNew.forEach((x) => combined.add(String(x)));
+    }
+    const rawOld = localStorage.getItem(LEGACY_CLEARED_SUPPORT_MSG_IDS_KEY);
+    if (rawOld) {
+      const arrOld = JSON.parse(rawOld);
+      if (Array.isArray(arrOld)) arrOld.forEach((x) => combined.add(String(x)));
+    }
   } catch {
-    return new Set();
+    // ignore parse errors
   }
+  return combined;
 }
 
 function addClearedSupportIds(ids: string[]): void {
@@ -319,10 +331,21 @@ function extractAdminLetterheadBgUrl(
     directVal,
   ];
   for (const c of candidates) {
-    const s = typeof c === 'string' ? c.trim() : '';
+    const s = sanitizeImageUrl(typeof c === 'string' ? c : '');
     if (s) return s;
   }
   return '';
+}
+
+function isPackageVisibleToClient(p: any): boolean {
+  if (!p || typeof p !== 'object') return false;
+  if (p.hidden === true || String(p.hidden || '').toLowerCase() === 'true') return false;
+  if (p.isHidden === true || String(p.isHidden || '').toLowerCase() === 'true') return false;
+  if (p.isActive === false || String(p.isActive || '').toLowerCase() === 'false') return false;
+  if (p.is_active === false || String(p.is_active || '').toLowerCase() === 'false') return false;
+  if (p.enabled === false || String(p.enabled || '').toLowerCase() === 'false') return false;
+  if (p.visible === false || String(p.visible || '').toLowerCase() === 'false') return false;
+  return true;
 }
 
 function resolveLivePackagesAndOfferFromConfigs(
@@ -618,45 +641,49 @@ function resolveLivePackagesAndOfferFromConfigs(
   const applyOfferDiscountToPackages = (
     pkgList: SubscriptionPackage[]
   ): SubscriptionPackage[] =>
-    pkgList.map((p: any) => {
-      const metaOverride = resolvePkgPricingMetaOverride(p);
-      const mergedPkg = metaOverride ? { ...p, ...metaOverride } : p;
-      const curRawPrice = Number(mergedPkg.priceRs ?? mergedPkg.price ?? 0);
-      const rawOrig = Number(mergedPkg.originalPriceRs || mergedPkg.basePriceRs || 0);
-      const baseOrig = rawOrig > curRawPrice ? rawOrig : curRawPrice || rawOrig;
-      const ownPct = Number(
-        mergedPkg.discountPct ?? mergedPkg.discount_pct ?? mergedPkg.discount ?? 0
-      );
-      const effPct = ownPct > 0 ? ownPct : globalOfferPct > 0 ? globalOfferPct : 0;
+    pkgList
+      .filter(isPackageVisibleToClient)
+      .map((p: any) => {
+        const metaOverride = resolvePkgPricingMetaOverride(p);
+        const mergedPkg = metaOverride ? { ...p, ...metaOverride } : p;
+        if (!isPackageVisibleToClient(mergedPkg)) return null;
+        const curRawPrice = Number(mergedPkg.priceRs ?? mergedPkg.price ?? 0);
+        const rawOrig = Number(mergedPkg.originalPriceRs || mergedPkg.basePriceRs || 0);
+        const baseOrig = rawOrig > curRawPrice ? rawOrig : curRawPrice || rawOrig;
+        const ownPct = Number(
+          mergedPkg.discountPct ?? mergedPkg.discount_pct ?? mergedPkg.discount ?? 0
+        );
+        const effPct = ownPct > 0 ? ownPct : globalOfferPct > 0 ? globalOfferPct : 0;
 
-      if (effPct > 0 && baseOrig > 0) {
-        const computedDiscounted = Math.max(1, Math.round(baseOrig * (1 - effPct / 100)));
-        const finalPrice =
-          ownPct > 0 && curRawPrice > 0 && curRawPrice < baseOrig
-            ? curRawPrice
-            : computedDiscounted;
+        if (effPct > 0 && baseOrig > 0) {
+          const computedDiscounted = Math.max(1, Math.round(baseOrig * (1 - effPct / 100)));
+          const finalPrice =
+            ownPct > 0 && curRawPrice > 0 && curRawPrice < baseOrig
+              ? curRawPrice
+              : computedDiscounted;
+          return {
+            ...mergedPkg,
+            originalPriceRs: baseOrig,
+            priceRs: finalPrice,
+            price: finalPrice,
+            discountPct: effPct,
+            discountOfferText:
+              mergedPkg.discountOfferText ||
+              (normalizedOffer?.title
+                ? `${effPct}% OFF — ${normalizedOffer.title}`
+                : `${effPct}% OFF`),
+          };
+        }
         return {
           ...mergedPkg,
-          originalPriceRs: baseOrig,
-          priceRs: finalPrice,
-          price: finalPrice,
-          discountPct: effPct,
-          discountOfferText:
-            mergedPkg.discountOfferText ||
-            (normalizedOffer?.title
-              ? `${effPct}% OFF — ${normalizedOffer.title}`
-              : `${effPct}% OFF`),
+          originalPriceRs: rawOrig > curRawPrice ? rawOrig : curRawPrice,
+          priceRs: curRawPrice,
+          price: curRawPrice,
+          discountPct: 0,
+          discountOfferText: undefined,
         };
-      }
-      return {
-        ...mergedPkg,
-        originalPriceRs: rawOrig > curRawPrice ? rawOrig : curRawPrice,
-        priceRs: curRawPrice,
-        price: curRawPrice,
-        discountPct: 0,
-        discountOfferText: undefined,
-      };
-    });
+      })
+      .filter(Boolean) as SubscriptionPackage[];
 
   return {
     activeOffer: normalizedOffer,
@@ -804,8 +831,9 @@ export default function App() {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (typeof parsed?.adminLetterheadBgUrl === 'string' && parsed.adminLetterheadBgUrl.trim()) {
-          return parsed.adminLetterheadBgUrl.trim();
+        if (typeof parsed?.adminLetterheadBgUrl === 'string') {
+          const validSaved = sanitizeImageUrl(parsed.adminLetterheadBgUrl);
+          if (validSaved) return validSaved;
         }
       }
     } catch {}
@@ -817,9 +845,9 @@ export default function App() {
       if (raw) {
         const parsed = JSON.parse(raw);
         if (typeof parsed?.customLetterheadBgUrl === 'string') {
-          return parsed.customLetterheadBgUrl.trim();
+          return sanitizeImageUrl(parsed.customLetterheadBgUrl);
         }
-        const legacyLh = String(parsed?.letterheadBgUrl || '').trim();
+        const legacyLh = sanitizeImageUrl(String(parsed?.letterheadBgUrl || ''));
         const cachedAdminLh = extractAdminLetterheadBgUrl(loadCachedMasterEngineConfig());
         if (
           legacyLh &&
@@ -832,8 +860,11 @@ export default function App() {
     } catch {}
     return '';
   });
-  const letterheadBgUrl = customLetterheadBgUrl || adminLetterheadBgUrl || bossLetterheadCleanImg;
-  const isCustomLetterhead = Boolean(customLetterheadBgUrl);
+  const letterheadBgUrl =
+    sanitizeImageUrl(customLetterheadBgUrl) ||
+    sanitizeImageUrl(adminLetterheadBgUrl) ||
+    bossLetterheadCleanImg;
+  const isCustomLetterhead = Boolean(sanitizeImageUrl(customLetterheadBgUrl));
   const lastAppliedAdminThemeHashRef = useRef<string>('');
   const hasMigratedDbInSessionRef = useRef<boolean>(false);
   const [rateListSavedAt, setRateListSavedAt] = useState<number | null>(() => {
@@ -1179,7 +1210,7 @@ export default function App() {
         });
       }
 
-      const incomingLogo = String(
+      const incomingLogoRaw = String(
         globalCfg.mainLogoUrl ||
           globalCfg.appLogoUrl ||
           globalCfg.branding?.mainLogoUrl ||
@@ -1189,8 +1220,11 @@ export default function App() {
           brandingCfg.mainLogoUrl ||
           ''
       ).trim();
-      if (incomingLogo) {
-        setMainLogoUrl(incomingLogo);
+      const validIncomingLogo = sanitizeImageUrl(incomingLogoRaw);
+      if (validIncomingLogo) {
+        setMainLogoUrl(validIncomingLogo);
+      } else if (incomingLogoRaw) {
+        setMainLogoUrl((prev) => sanitizeImageUrl(prev, bossLionLogoImg));
       }
 
       const incomingAdminLetterhead = extractAdminLetterheadBgUrl(
@@ -1201,6 +1235,13 @@ export default function App() {
       );
       if (incomingAdminLetterhead) {
         setAdminLetterheadBgUrl(incomingAdminLetterhead);
+      } else if (
+        globalCfg.letterhead_bg_url ||
+        globalCfg.letterheadBgUrl ||
+        brandingCfg.letterhead_bg_url ||
+        brandingCfg.letterheadBgUrl
+      ) {
+        setAdminLetterheadBgUrl((prev) => sanitizeImageUrl(prev));
       }
 
       const rawMob =
@@ -1532,6 +1573,30 @@ export default function App() {
           })
       );
 
+      // Auto-Logout if Admin deleted user record (0 rows online in users & client_users) OR marked is_deleted / DELETED / SELF_DELETED
+      const cloudConfirmsAccountRemoved = Boolean(
+        !isOwnerAccount &&
+          activeSession?.verified &&
+          typeof navigator !== 'undefined' &&
+          navigator.onLine !== false &&
+          (evaluated.accountRemovedByAdmin ||
+            evaluated.isSelfDeleted ||
+            (usersRes.ok &&
+              clientUsersRes.ok &&
+              !evaluated.matchedUser &&
+              !evaluated.matchedClientUser))
+      );
+
+      if (cloudConfirmsAccountRemoved) {
+        await triggerAccountRemovedLogout(
+          evaluated.isSelfDeleted
+            ? 'Aapka account delete ho chuka hai. Dobara access ke liye Signup karein.'
+            : evaluated.accountRemovedReason ||
+                'Your account was removed by Admin. Please register again.'
+        );
+        return false;
+      }
+
       if (evaluated.forceResetLogout && !isOwnerAccount) {
         clearLastActiveAtMs();
         clearInitialSyncCompletedFlag();
@@ -1702,6 +1767,28 @@ export default function App() {
     setAuthNotice('Your ID was logged in on another device.');
   };
 
+  const triggerAccountRemovedLogout = async (noticeMessage: string) => {
+    clearLastActiveAtMs();
+    clearInitialSyncCompletedFlag();
+    clearBiometricBinding();
+    try {
+      localStorage.removeItem(USER_LOCKED_TABS_KEY);
+    } catch {}
+    setUserLockedTabs({});
+    await performCleanSupabaseAndStorageSignOut(true);
+    setAuthSession(null);
+    setIsSubscriptionExpired(false);
+    setCloudAccessInfo({
+      status: 'TRIAL',
+      tier: 'CLIENT',
+      role: 'CLIENT',
+      expiresAt: null,
+      reason: '',
+      lastSyncedAt: null,
+    });
+    setAuthNotice(noticeMessage || 'Your account was removed by Admin. Please register again.');
+  };
+
   const triggerInactivityLogout = async () => {
     markUserOfflineInSupabase(clientDeviceId);
     clearLastActiveAtMs();
@@ -1733,7 +1820,6 @@ export default function App() {
     const localToken = String(
       activeSess.activeSessionToken || loadActiveSessionToken() || ''
     ).trim();
-    if (!localToken) return true;
 
     try {
       const scopedTokenQuery = buildScopedUserQuery({
@@ -1742,7 +1828,8 @@ export default function App() {
         email: activeSess.email,
         phone: activeSess.phone,
         cnic: activeSess.cnic,
-        select: 'id,device_id,email,phone,cnic,active_session_token',
+        select:
+          'id,device_id,email,phone,cnic,active_session_token,is_deleted,is_self_deleted,account_status,status',
         limit: 5,
       });
       if (!scopedTokenQuery) return true;
@@ -1763,15 +1850,39 @@ export default function App() {
       ]);
       if (!usersRes.ok && !clientUsersRes.ok) return true;
 
+      const masterCfgCached = loadCachedMasterEngineConfig();
+      const isOwner = isOwnerIdentity({
+        email: activeSess.email,
+        phone: activeSess.phone,
+        cnic: activeSess.cnic,
+        masterCfg: masterCfgCached,
+      });
       const evalRes = evaluateClientAccessState({
         session: activeSess,
         clientDeviceId: activeSess.deviceId || clientDeviceId,
         usersList: Array.isArray(usersRes.data) ? usersRes.data : [],
         clientUsersList: Array.isArray(clientUsersRes.data) ? clientUsersRes.data : [],
         subsList: [],
-        masterCfg: loadCachedMasterEngineConfig(),
+        masterCfg: masterCfgCached,
       });
-      if (evalRes.sessionConflict) {
+      if (
+        !isOwner &&
+        (evalRes.accountRemovedByAdmin ||
+          evalRes.isSelfDeleted ||
+          (usersRes.ok &&
+            clientUsersRes.ok &&
+            !evalRes.matchedUser &&
+            !evalRes.matchedClientUser))
+      ) {
+        await triggerAccountRemovedLogout(
+          evalRes.isSelfDeleted
+            ? 'Aapka account delete ho chuka hai. Dobara access ke liye Signup karein.'
+            : evalRes.accountRemovedReason ||
+                'Your account was removed by Admin. Please register again.'
+        );
+        return false;
+      }
+      if (localToken && evalRes.sessionConflict) {
         await triggerSessionConflictLogout();
         return false;
       }
@@ -1933,37 +2044,10 @@ export default function App() {
   };
 
   const handleDeleteSupportRequest = async (id: string) => {
+    // Soft-delete on client ONLY (stored in boss_hidden_support_msgs); NEVER delete from Supabase messages so Admin keeps full record
     addClearedSupportIds([id]);
-    const target = supportRequests.find((r) => r.id === id);
     setSupportRequests((prev) => prev.filter((r) => r.id !== id));
-    if (
-      typeof navigator !== 'undefined' &&
-      navigator.onLine !== false &&
-      target &&
-      !target.isBroadcast &&
-      !id.startsWith('local-')
-    ) {
-      try {
-        const delRes = await callSupabaseProxy({
-          table: 'messages',
-          method: 'DELETE',
-          query: `id=eq.${encodeURIComponent(id)}`,
-          timeoutMs: 6000,
-        });
-        if (!delRes.ok) {
-          await callSupabaseProxy({
-            table: 'messages',
-            method: 'PATCH',
-            query: `id=eq.${encodeURIComponent(id)}`,
-            payload: { deleted_by_client: true },
-            timeoutMs: 6000,
-          }).catch(() => {});
-        }
-      } catch {
-        // non-fatal; local clearedIds keeps it removed
-      }
-    }
-    triggerGlobalToast('🗑️ Message cleared!');
+    triggerGlobalToast('🗑️ Message cleared from your view!');
   };
 
   const handleClearAllSupportRequests = async () => {
@@ -1972,19 +2056,7 @@ export default function App() {
     setSupportRequests([]);
     saveLastSeenSupportMs(Date.now());
     setLastSeenSupportMs(Date.now());
-    if (typeof navigator !== 'undefined' && navigator.onLine !== false && clientDeviceId) {
-      try {
-        await callSupabaseProxy({
-          table: 'messages',
-          method: 'DELETE',
-          query: `device_id=eq.${encodeURIComponent(clientDeviceId)}`,
-          timeoutMs: 6000,
-        });
-      } catch {
-        // non-fatal
-      }
-    }
-    triggerGlobalToast('🧹 All support messages cleared!');
+    triggerGlobalToast('🧹 Support messages cleared from your view!');
   };
 
   const handleMarkSupportMessagesRead = () => {
@@ -2198,13 +2270,22 @@ export default function App() {
     saveLastActiveAtMs(Date.now());
     setAuthSession(session);
     setAuthNotice(null);
-    setIsSubscriptionExpired(false);
     const isOwner = isOwnerIdentity({
       email: session.email,
       phone: session.phone,
       cnic: session.cnic,
       masterCfg: loadCachedMasterEngineConfig(),
     });
+    const nowRef = getEffectiveServerNowMs() || Date.now();
+    const isCarriedExpired = Boolean(
+      !isOwner &&
+        !session.isActivated &&
+        !session.isLifetimeFree &&
+        session.trialExpiresAt &&
+        session.trialExpiresAt > 0 &&
+        session.trialExpiresAt <= nowRef
+    );
+    setIsSubscriptionExpired(isCarriedExpired);
     if (isOwner) {
       setCloudAccessInfo({
         status: 'FREE',
@@ -2214,6 +2295,16 @@ export default function App() {
         reason: '',
         lastSyncedAt: Date.now(),
       });
+    } else if (isCarriedExpired) {
+      setCloudAccessInfo((prev) => ({
+        ...prev,
+        status: 'TRIAL',
+        tier: 'TRIAL',
+        role: session.userRole || 'CLIENT',
+        expiresAt: session.trialExpiresAt || prev.expiresAt,
+        serverNowMs: nowRef,
+        reason: 'Free trial already used on this account/device — please activate a package.',
+      }));
     } else {
       setCloudAccessInfo((prev) => ({
         ...prev,
@@ -2401,11 +2492,15 @@ export default function App() {
         } else {
           setRates(getInitialRates());
         }
-        if (parsed.packages?.length) setPackages(parsed.packages);
+        if (parsed.packages?.length) {
+          setPackages(parsed.packages.filter(isPackageVisibleToClient));
+        }
         if (parsed.bankAccounts?.length) setBankAccounts(parsed.bankAccounts);
         if (parsed.activeOffer !== undefined) setActiveOffer(parsed.activeOffer);
         if (Array.isArray(parsed.broadcasts)) setBroadcasts(parsed.broadcasts);
-        if (parsed.mainLogoUrl) setMainLogoUrl(parsed.mainLogoUrl);
+        if (parsed.mainLogoUrl && isValidImageSrc(parsed.mainLogoUrl)) {
+          setMainLogoUrl(sanitizeImageUrl(parsed.mainLogoUrl, bossLionLogoImg));
+        }
         if (cachedMobSrc && typeof cachedMobSrc === 'object') {
           const cAnd = String(
             cachedMobSrc.androidUrl ||
@@ -2484,13 +2579,13 @@ export default function App() {
             },
           }));
         }
-        if (typeof parsed.adminLetterheadBgUrl === 'string' && parsed.adminLetterheadBgUrl.trim()) {
-          setAdminLetterheadBgUrl((prev) => prev || parsed.adminLetterheadBgUrl.trim());
+        if (typeof parsed.adminLetterheadBgUrl === 'string' && isValidImageSrc(parsed.adminLetterheadBgUrl)) {
+          setAdminLetterheadBgUrl((prev) => prev || sanitizeImageUrl(parsed.adminLetterheadBgUrl));
         }
         if (typeof parsed.customLetterheadBgUrl === 'string') {
-          setCustomLetterheadBgUrl(parsed.customLetterheadBgUrl.trim());
+          setCustomLetterheadBgUrl(sanitizeImageUrl(parsed.customLetterheadBgUrl));
         } else if (typeof parsed.letterheadBgUrl === 'string') {
-          const legacyLh = parsed.letterheadBgUrl.trim();
+          const legacyLh = sanitizeImageUrl(parsed.letterheadBgUrl);
           const cachedAdminLh = extractAdminLetterheadBgUrl(cachedM);
           if (
             legacyLh &&
@@ -2725,7 +2820,7 @@ export default function App() {
             if (foundLh) {
               setAdminLetterheadBgUrl(foundLh);
             }
-            const foundLogo = String(
+            const foundLogoRaw = String(
               mergedCfg.mainLogoUrl ||
                 mergedCfg.appLogoUrl ||
                 mergedCfg.branding?.mainLogoUrl ||
@@ -2734,8 +2829,9 @@ export default function App() {
                 mapOnly.company_branding_v1?.mainLogoUrl ||
                 ''
             ).trim();
-            if (foundLogo) {
-              setMainLogoUrl(foundLogo);
+            const validFoundLogo = sanitizeImageUrl(foundLogoRaw);
+            if (validFoundLogo) {
+              setMainLogoUrl(validFoundLogo);
             }
           })
           .catch(() => {});

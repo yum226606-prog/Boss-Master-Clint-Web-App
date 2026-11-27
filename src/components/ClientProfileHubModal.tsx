@@ -39,17 +39,21 @@ import {
   ClientSupportRequest,
   SubscriptionPackageConfig,
 } from '../types/bossModels';
+import bossLionLogoImg from '../assets/images/boss_lion_logo_1791741005749.jpg';
 import {
   BiometricBinding,
   clearBiometricBinding,
   ClientAuthSession,
   deleteClientAccountInSupabase,
   enrollBiometricPasskey,
+  enrollSecurityPinBinding,
   hashPasswordSha256,
   isOwnerIdentity,
+  isValidImageSrc,
   loadActiveSessionToken,
   loadBiometricBinding,
   loadCachedMasterEngineConfig,
+  sanitizeImageUrl,
   saveBiometricBinding,
   sendSupabaseEmailOtp,
   syncEmailOtpVerifiedStatus,
@@ -209,16 +213,31 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
   // -------------------------------------------------------------------------
   // TAB 1: PACKAGE & PAYMENT ORDER STATE
   // -------------------------------------------------------------------------
+  const visiblePackages = React.useMemo(
+    () =>
+      (packages || []).filter(
+        (p: any) =>
+          p &&
+          p.hidden !== true &&
+          p.isHidden !== true &&
+          p.isActive !== false &&
+          p.is_active !== false &&
+          p.enabled !== false &&
+          p.visible !== false
+      ),
+    [packages]
+  );
+
   const [selectedPkg, setSelectedPkg] = useState<SubscriptionPackageConfig | null>(
-    preselectedPackage || packages[0] || null
+    preselectedPackage || visiblePackages[0] || null
   );
   const [bankName, setBankName] = useState<string>(
     bankAccounts.find((b) => b.isActive !== false)?.bankName || 'Easypaisa Wallet'
   );
   const [amountInput, setAmountInput] = useState<string>(() =>
     String(
-      (preselectedPackage || packages[0])?.priceRs ??
-        (preselectedPackage || packages[0])?.price ??
+      (preselectedPackage || visiblePackages[0])?.priceRs ??
+        (preselectedPackage || visiblePackages[0])?.price ??
         3000
     )
   );
@@ -234,10 +253,10 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
   const [copiedBankId, setCopiedBankId] = useState<string | null>(null);
 
   useEffect(() => {
-    if (packages.length === 0) return;
+    if (visiblePackages.length === 0) return;
     if (preselectedPackage) {
       const liveMatch =
-        packages.find(
+        visiblePackages.find(
           (p) =>
             (preselectedPackage.id && p.id === preselectedPackage.id) ||
             (preselectedPackage.planCode && p.planCode === preselectedPackage.planCode)
@@ -247,18 +266,18 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
       return;
     }
     if (!selectedPkg) {
-      setSelectedPkg(packages[0]);
-      setAmountInput(String(packages[0].priceRs ?? packages[0].price ?? 3000));
+      setSelectedPkg(visiblePackages[0]);
+      setAmountInput(String(visiblePackages[0].priceRs ?? visiblePackages[0].price ?? 3000));
       return;
     }
-    const updatedMatch = packages.find(
+    const updatedMatch = visiblePackages.find(
       (p) =>
         (selectedPkg.id && p.id === selectedPkg.id) ||
         (selectedPkg.planCode && p.planCode === selectedPkg.planCode)
     );
     if (!updatedMatch) {
-      setSelectedPkg(packages[0]);
-      setAmountInput(String(packages[0].priceRs ?? packages[0].price ?? 3000));
+      setSelectedPkg(visiblePackages[0]);
+      setAmountInput(String(visiblePackages[0].priceRs ?? visiblePackages[0].price ?? 3000));
       return;
     }
     const prevPrice = selectedPkg.priceRs ?? selectedPkg.price ?? 0;
@@ -272,7 +291,7 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
       setSelectedPkg(updatedMatch);
       setAmountInput(String(nextPrice));
     }
-  }, [preselectedPackage, packages, selectedPkg]);
+  }, [preselectedPackage, visiblePackages, selectedPkg]);
 
   const checkOrderStatus = async () => {
     if (!clientDeviceId) return;
@@ -501,9 +520,15 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
     return () => clearInterval(t);
   }, [pwOtpCooldown]);
 
+  const [showPinSetupBox, setShowPinSetupBox] = useState(false);
+  const [pinInput, setPinInput] = useState('');
+  const [pinConfirmInput, setPinConfirmInput] = useState('');
+  const [pinNotice, setPinNotice] = useState<string | null>(null);
+
   const handleEnableBiometric = async () => {
     if (!authSession) return;
     setIsUpdatingBio(true);
+    setPinNotice(null);
     try {
       const res = await enrollBiometricPasskey({
         deviceId: clientDeviceId,
@@ -511,9 +536,18 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
         userName: authSession.name,
       });
       if (!res.ok || !res.credentialId) {
-        showToast(res.error || 'Is browser/device par Biometric Passkey support maujood nahi.');
+        if (res.requiresPin) {
+          setShowPinSetupBox(true);
+          setPinNotice(
+            res.error ||
+              'Is device/WebView mein hardware Fingerprint available nahi. Neeche apna 4-digit Security PIN set karein.'
+          );
+        } else {
+          showToast(res.error || 'Biometric verification cancel ho gaya.');
+        }
         return;
       }
+      setShowPinSetupBox(false);
       const nextBinding: BiometricBinding = {
         deviceId: clientDeviceId,
         identifier: authSession.email || authSession.phone || authSession.name,
@@ -522,8 +556,7 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
         phone: authSession.phone || '',
         cnic: authSession.cnic || '',
         credentialId: res.credentialId,
-        mode: res.mode,
-        ...(res.mode === 'DEVICE_KEY' ? { quickUnlockKey: res.credentialId } : {}),
+        mode: 'WEBAUTHN',
         enrolledAt: Date.now(),
       };
       saveBiometricBinding(nextBinding);
@@ -545,11 +578,63 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
           timeoutMs: 6000,
         }),
       ]);
-      showToast(
-        res.mode === 'DEVICE_KEY'
-          ? '✅ Encrypted Device Biometric / Quick-Unlock Key enable ho gaya! Ab Login screen par "Login with Fingerprint" 1-click mein kaam karay ga.'
-          : '✅ Hardware Biometric Fingerprint Login enable ho gaya!'
-      );
+      showToast('✅ Hardware Biometric Fingerprint Login enable ho gaya!');
+    } finally {
+      setIsUpdatingBio(false);
+    }
+  };
+
+  const handleSaveSecurityPin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!authSession) return;
+    setPinNotice(null);
+    const cleanPin = pinInput.trim();
+    const cleanConfirm = pinConfirmInput.trim();
+    if (!/^\d{4}$/.test(cleanPin)) {
+      setPinNotice('Sirf 4-hindso (4 digits) ka Security PIN darj karein (e.g. 2580).');
+      return;
+    }
+    if (cleanPin !== cleanConfirm) {
+      setPinNotice('Dono 4-digit Security PIN match nahi ho rahe.');
+      return;
+    }
+    setIsUpdatingBio(true);
+    try {
+      const res = await enrollSecurityPinBinding({
+        deviceId: clientDeviceId,
+        identifier: authSession.email || authSession.phone || authSession.name,
+        userName: authSession.name,
+        email: authSession.email || '',
+        phone: authSession.phone || '',
+        cnic: authSession.cnic || '',
+        pin: cleanPin,
+      });
+      if (!res.ok || !res.binding) {
+        setPinNotice(res.error || 'Security PIN save nahi ho saka.');
+        return;
+      }
+      setBiometricBinding(res.binding);
+      setShowPinSetupBox(false);
+      setPinInput('');
+      setPinConfirmInput('');
+      const devFilter = `device_id=eq.${encodeURIComponent(clientDeviceId)}`;
+      await Promise.allSettled([
+        callSupabaseProxy({
+          table: 'users',
+          method: 'PATCH',
+          query: devFilter,
+          payload: { fingerprint_enabled: true },
+          timeoutMs: 6000,
+        }),
+        callSupabaseProxy({
+          table: 'client_users',
+          method: 'PATCH',
+          query: devFilter,
+          payload: { fingerprint_enabled: true },
+          timeoutMs: 6000,
+        }),
+      ]);
+      showToast('✅ 4-Digit Security PIN Lock enable ho gaya!');
     } finally {
       setIsUpdatingBio(false);
     }
@@ -898,10 +983,64 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
     ? 'BLOCKED'
     : 'FREE TRIAL ACTIVE';
 
-  const activeShopLogo =
-    layoutConfig.shopLogoUrl && layoutConfig.shopLogoUrl.trim().length > 0
-      ? layoutConfig.shopLogoUrl
-      : mainLogoUrl;
+  const [brokenImgFlags, setBrokenImgFlags] = useState<Record<string, boolean>>({});
+  const markImgBroken = (key: string) =>
+    setBrokenImgFlags((prev) => (prev[key] ? prev : { ...prev, [key]: true }));
+
+  const activeShopLogo = !brokenImgFlags.logo
+    ? sanitizeImageUrl(
+        layoutConfig.shopLogoUrl && layoutConfig.shopLogoUrl.trim().length > 0
+          ? layoutConfig.shopLogoUrl
+          : mainLogoUrl,
+        bossLionLogoImg
+      )
+    : bossLionLogoImg;
+
+  const safeLetterheadPreviewSrc = !brokenImgFlags.letterhead
+    ? sanitizeImageUrl(letterheadBgUrl)
+    : '';
+  const safeShopPhotoSrc = !brokenImgFlags.shopPhoto
+    ? sanitizeImageUrl(cloudUserRecord.shopPhotoUrl)
+    : '';
+  const safeCnicFrontSrc = !brokenImgFlags.cnicFront
+    ? sanitizeImageUrl(cloudUserRecord.cnicFrontUrl)
+    : '';
+  const safeCnicBackSrc = !brokenImgFlags.cnicBack
+    ? sanitizeImageUrl(cloudUserRecord.cnicBackUrl)
+    : '';
+  const safeSelfieSrc = !brokenImgFlags.selfie
+    ? sanitizeImageUrl(cloudUserRecord.selfieUrl)
+    : '';
+  const safeReceiptPreviewSrc = !brokenImgFlags.receipt
+    ? sanitizeImageUrl(receiptUrl)
+    : '';
+  const safeSupportSsSrc = !brokenImgFlags.supportSs
+    ? sanitizeImageUrl(supportScreenshotUrl)
+    : '';
+
+  useEffect(() => {
+    setBrokenImgFlags((prev) => ({
+      ...prev,
+      logo: false,
+      letterhead: false,
+      shopPhoto: false,
+      cnicFront: false,
+      cnicBack: false,
+      selfie: false,
+      receipt: false,
+      supportSs: false,
+    }));
+  }, [
+    layoutConfig.shopLogoUrl,
+    mainLogoUrl,
+    letterheadBgUrl,
+    cloudUserRecord.shopPhotoUrl,
+    cloudUserRecord.cnicFrontUrl,
+    cloudUserRecord.cnicBackUrl,
+    cloudUserRecord.selfieUrl,
+    receiptUrl,
+    supportScreenshotUrl,
+  ]);
 
   return (
     <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-2 sm:p-4 overflow-y-auto no-print">
@@ -912,6 +1051,7 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
             <div className="w-10 h-10 rounded-xl bg-[#0C0F14] border-2 border-[#F5B738] p-0.5 flex items-center justify-center shrink-0 overflow-hidden">
               <img
                 src={activeShopLogo}
+                onError={() => markImgBroken('logo')}
                 alt="Shop Logo"
                 className="w-full h-full object-contain rounded-lg"
               />
@@ -1081,7 +1221,7 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
 
               {/* Packages Cards Grid */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                {packages.map((pkg, idx) => {
+                {visiblePackages.map((pkg, idx) => {
                   const curPrice = pkg.priceRs ?? pkg.price ?? 0;
                   const origPrice = pkg.originalPriceRs ?? curPrice;
                   const discPct =
@@ -1251,9 +1391,9 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
                   <select
-                    value={selectedPkg?.id || (packages[0]?.id ?? '')}
+                    value={selectedPkg?.id || (visiblePackages[0]?.id ?? '')}
                     onChange={(e) => {
-                      const ch = packages.find((p) => p.id === e.target.value);
+                      const ch = visiblePackages.find((p) => p.id === e.target.value);
                       if (ch) {
                         setSelectedPkg(ch);
                         setAmountInput(String(ch.priceRs ?? ch.price ?? 3000));
@@ -1261,7 +1401,7 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
                     }}
                     className="px-3 py-2 rounded-lg bg-[#0C1017] border border-slate-700 text-white text-xs outline-none"
                   >
-                    {packages.map((p) => (
+                    {visiblePackages.map((p) => (
                       <option key={p.id} value={p.id}>
                         {p.name} — Rs. {(p.priceRs ?? p.price ?? 0).toLocaleString()}
                       </option>
@@ -1306,11 +1446,18 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
                   <input type="file" accept="image/*" onChange={handleReceiptUpload} className="hidden" />
                   {receiptUrl ? (
                     <div className="flex items-center gap-2.5 min-w-0">
-                      <img
-                        src={receiptUrl}
-                        alt="Receipt"
-                        className="w-10 h-10 object-cover rounded-lg border border-emerald-500/60 shrink-0"
-                      />
+                      {safeReceiptPreviewSrc ? (
+                        <img
+                          src={safeReceiptPreviewSrc}
+                          onError={() => markImgBroken('receipt')}
+                          alt="Receipt"
+                          className="w-10 h-10 object-cover rounded-lg border border-emerald-500/60 shrink-0"
+                        />
+                      ) : (
+                        <div className="w-10 h-10 rounded-lg border border-emerald-500/60 bg-emerald-950/50 flex items-center justify-center shrink-0">
+                          <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+                        </div>
+                      )}
                       <span className="text-[11px] font-bold text-emerald-400 truncate">
                         ✓ Receipt Screenshot Ready (Tap to change)
                       </span>
@@ -1489,11 +1636,14 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
                 <div className="p-3 rounded-xl bg-[#14181F] border border-slate-800 space-y-2">
                   <div className="text-[11px] font-bold text-[#F5B738]">Shop Logo</div>
                   <div className="flex items-center gap-2.5">
-                    <img
-                      src={activeShopLogo}
-                      alt="Shop Logo"
-                      className="w-12 h-12 rounded-full object-cover border border-[#F5B738] shrink-0"
-                    />
+                    <div className="w-12 h-12 rounded-xl bg-[#0C0F14] border-2 border-[#F5B738] p-1 flex items-center justify-center shrink-0 overflow-hidden">
+                      <img
+                        src={activeShopLogo}
+                        onError={() => markImgBroken('logo')}
+                        alt="Shop Logo"
+                        className="w-full h-full object-contain"
+                      />
+                    </div>
                     <label className="boss-flat-btn flex-1 py-2 px-2.5 rounded-lg bg-[#0C1017] border border-slate-700 hover:border-[#F5B738] text-center font-bold cursor-pointer">
                       <input
                         type="file"
@@ -1562,12 +1712,17 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
                     </button>
                   </div>
                   <div className="flex items-center gap-2">
-                    <div className="w-11 h-[62px] rounded-md overflow-hidden border border-[#F5B738]/50 bg-[#0C1017] shrink-0">
-                      <img
-                        src={letterheadBgUrl}
-                        alt="Letterhead"
-                        className="w-full h-full object-fill"
-                      />
+                    <div className="w-11 h-[62px] rounded-md overflow-hidden border border-[#F5B738]/50 bg-[#0C1017] shrink-0 flex items-center justify-center">
+                      {safeLetterheadPreviewSrc ? (
+                        <img
+                          src={safeLetterheadPreviewSrc}
+                          onError={() => markImgBroken('letterhead')}
+                          alt="Letterhead"
+                          className="w-full h-full object-fill"
+                        />
+                      ) : (
+                        <FileText className="w-5 h-5 text-slate-600" />
+                      )}
                     </div>
                     <label className="boss-flat-btn flex-1 py-2 px-2.5 rounded-lg bg-[#0C1017] border border-slate-700 hover:border-[#F5B738] text-center font-bold cursor-pointer">
                       <input
@@ -1637,9 +1792,10 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
                 <div className="p-3 rounded-xl bg-[#14181F] border border-slate-800 space-y-2">
                   <div className="text-[11px] font-bold text-[#F5B738]">Shop Photo</div>
                   <div className="flex items-center gap-2.5">
-                    {cloudUserRecord.shopPhotoUrl ? (
+                    {safeShopPhotoSrc ? (
                       <img
-                        src={cloudUserRecord.shopPhotoUrl}
+                        src={safeShopPhotoSrc}
+                        onError={() => markImgBroken('shopPhoto')}
                         alt="Shop"
                         className="w-12 h-12 rounded-lg object-cover border border-emerald-500/60 shrink-0"
                       />
@@ -1759,9 +1915,10 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
                         {cloudUserRecord.cnicFrontUrl ? '✓ Uploaded' : 'Pending'}
                       </span>
                     </div>
-                    {cloudUserRecord.cnicFrontUrl ? (
+                    {safeCnicFrontSrc ? (
                       <img
-                        src={cloudUserRecord.cnicFrontUrl}
+                        src={safeCnicFrontSrc}
+                        onError={() => markImgBroken('cnicFront')}
                         alt="CNIC Front"
                         className="w-full h-24 object-cover rounded-lg border border-emerald-500/40"
                       />
@@ -1822,9 +1979,10 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
                         {cloudUserRecord.cnicBackUrl ? '✓ Uploaded' : 'Pending'}
                       </span>
                     </div>
-                    {cloudUserRecord.cnicBackUrl ? (
+                    {safeCnicBackSrc ? (
                       <img
-                        src={cloudUserRecord.cnicBackUrl}
+                        src={safeCnicBackSrc}
+                        onError={() => markImgBroken('cnicBack')}
                         alt="CNIC Back"
                         className="w-full h-24 object-cover rounded-lg border border-emerald-500/40"
                       />
@@ -1885,9 +2043,10 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
                         {cloudUserRecord.selfieUrl ? '✓ Verified' : 'Optional'}
                       </span>
                     </div>
-                    {cloudUserRecord.selfieUrl ? (
+                    {safeSelfieSrc ? (
                       <img
-                        src={cloudUserRecord.selfieUrl}
+                        src={safeSelfieSrc}
+                        onError={() => markImgBroken('selfie')}
                         alt="Owner Selfie"
                         className="w-full h-24 object-cover rounded-lg border border-sky-500/40"
                       />
@@ -1940,27 +2099,32 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
           {/* =============================================================== */}
           {activeTab === 'SECURITY' && (
             <div className="space-y-4">
-              {/* Biometric Fingerprint Section (Never displays raw credentialId or deviceId) */}
+              {/* Biometric Fingerprint / Security PIN Section (Never displays raw credentialId or deviceId) */}
               <div className="p-3.5 rounded-xl bg-[#14181F] border border-slate-800 space-y-2.5">
                 <div className="flex items-center justify-between gap-2 flex-wrap">
                   <div className="flex items-center gap-2">
                     <Fingerprint className="w-5 h-5 text-[#F5B738] shrink-0" />
                     <div>
                       <div className="font-black text-white text-xs">
-                        Biometric Fingerprint Lock
+                        Biometric Fingerprint / Security PIN Lock
                       </div>
                       <div className="text-[10.5px] text-slate-400">
                         Status:{' '}
                         <strong
                           className={
-                            biometricBinding?.credentialId
+                            biometricBinding?.credentialId &&
+                            biometricBinding.mode !== 'DEVICE_KEY' &&
+                            !biometricBinding.credentialId.startsWith('DEVBIO-')
                               ? 'text-emerald-400'
                               : 'text-amber-300'
                           }
                         >
                           {biometricBinding?.credentialId
-                            ? biometricBinding.mode === 'DEVICE_KEY'
-                              ? 'Enabled ✓ (Device Quick-Unlock Key)'
+                            ? biometricBinding.mode === 'DEVICE_KEY' ||
+                              biometricBinding.credentialId.startsWith('DEVBIO-')
+                              ? 'Upgrade Required (Set Fingerprint or 4-Digit PIN)'
+                              : biometricBinding.mode === 'PIN'
+                              ? 'Enabled ✓ (4-Digit Security PIN)'
                               : 'Enabled ✓ (Hardware Biometric)'
                             : 'Not Enabled'}
                         </strong>
@@ -1968,16 +2132,27 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <button
                       type="button"
                       disabled={isUpdatingBio}
                       onClick={handleEnableBiometric}
                       className="boss-flat-btn px-3 py-1.5 rounded-lg bg-[#F5B738] hover:bg-amber-400 text-black font-black text-[11px] cursor-pointer disabled:opacity-60"
                     >
-                      {biometricBinding?.credentialId
+                      {biometricBinding?.mode === 'WEBAUTHN'
                         ? 'Refresh Fingerprint'
                         : 'Enable Fingerprint / Biometric'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isUpdatingBio}
+                      onClick={() => {
+                        setShowPinSetupBox((prev) => !prev);
+                        setPinNotice(null);
+                      }}
+                      className="boss-flat-btn px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[#F5B738] border border-[#F5B738]/40 font-bold text-[11px] cursor-pointer disabled:opacity-60"
+                    >
+                      {biometricBinding?.mode === 'PIN' ? 'Change 4-Digit PIN' : 'Set 4-Digit PIN'}
                     </button>
                     {biometricBinding?.credentialId && (
                       <button
@@ -1991,6 +2166,65 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
                     )}
                   </div>
                 </div>
+
+                {showPinSetupBox && (
+                  <form
+                    onSubmit={handleSaveSecurityPin}
+                    className="p-3 rounded-lg bg-[#0C1017] border border-[#F5B738]/50 space-y-2.5"
+                  >
+                    <div className="text-[11px] font-bold text-[#F5B738]">
+                      4-Digit Security PIN Setup (WebView / Fallback Lock)
+                    </div>
+                    {pinNotice && (
+                      <div className="p-2 rounded bg-amber-950/60 border border-amber-500/60 text-[10.5px] text-amber-200">
+                        {pinNotice}
+                      </div>
+                    )}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <input
+                        type="password"
+                        inputMode="numeric"
+                        maxLength={4}
+                        value={pinInput}
+                        onChange={(e) => setPinInput(e.target.value.replace(/[^0-9]/g, '').slice(0, 4))}
+                        placeholder="4-Digit PIN (e.g. 2580)"
+                        className="px-3 py-2 rounded-lg bg-[#14181F] border border-slate-700 text-white font-mono text-xs tracking-widest outline-none"
+                        required
+                      />
+                      <input
+                        type="password"
+                        inputMode="numeric"
+                        maxLength={4}
+                        value={pinConfirmInput}
+                        onChange={(e) =>
+                          setPinConfirmInput(e.target.value.replace(/[^0-9]/g, '').slice(0, 4))
+                        }
+                        placeholder="Confirm 4-Digit PIN"
+                        className="px-3 py-2 rounded-lg bg-[#14181F] border border-slate-700 text-white font-mono text-xs tracking-widest outline-none"
+                        required
+                      />
+                    </div>
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowPinSetupBox(false);
+                          setPinNotice(null);
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-slate-800 text-slate-300 font-bold text-[11px] cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={isUpdatingBio || pinInput.length !== 4 || pinConfirmInput.length !== 4}
+                        className="boss-flat-btn px-3.5 py-1.5 rounded-lg bg-[#F5B738] text-black font-black text-[11px] cursor-pointer disabled:opacity-50"
+                      >
+                        Save 4-Digit PIN
+                      </button>
+                    </div>
+                  </form>
+                )}
               </div>
 
               {/* Password Change / Reset Section */}
@@ -2147,7 +2381,7 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
                     <div>
                       <div className="font-black text-rose-300 text-xs">Delete My Account</div>
                       <div className="text-[10.5px] text-rose-200/75">
-                        Aapka cloud account aur local session hamesha ke liye delete ho jaye ga.
+                        Aapka local session aur app access deactivate ho jaye ga (Admin record mehfooz rahe ga).
                       </div>
                     </div>
                   </div>
@@ -2314,11 +2548,18 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
                   />
                   {supportScreenshotUrl ? (
                     <div className="flex items-center gap-2 min-w-0">
-                      <img
-                        src={supportScreenshotUrl}
-                        alt="Support Screenshot"
-                        className="w-9 h-9 rounded object-cover border border-emerald-500/60 shrink-0"
-                      />
+                      {safeSupportSsSrc ? (
+                        <img
+                          src={safeSupportSsSrc}
+                          onError={() => markImgBroken('supportSs')}
+                          alt="Support Screenshot"
+                          className="w-9 h-9 rounded object-cover border border-emerald-500/60 shrink-0"
+                        />
+                      ) : (
+                        <div className="w-9 h-9 rounded border border-emerald-500/60 bg-emerald-950/50 flex items-center justify-center shrink-0">
+                          <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                        </div>
+                      )}
                       <span className="text-[11px] font-bold text-emerald-400 truncate">
                         ✓ Screenshot Attached (Tap to change)
                       </span>
@@ -2455,20 +2696,23 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
                             {parsed.cleanText}
                           </div>
 
-                          {parsed.screenshotUrl && (
-                            <a
-                              href={parsed.screenshotUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="inline-block"
-                            >
-                              <img
-                                src={parsed.screenshotUrl}
-                                alt="Attached Screenshot"
-                                className="max-h-28 rounded-lg border border-slate-700"
-                              />
-                            </a>
-                          )}
+                          {parsed.screenshotUrl &&
+                            isValidImageSrc(parsed.screenshotUrl) &&
+                            !brokenImgFlags[`req_${req.id}`] && (
+                              <a
+                                href={parsed.screenshotUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-block"
+                              >
+                                <img
+                                  src={parsed.screenshotUrl}
+                                  onError={() => markImgBroken(`req_${req.id}`)}
+                                  alt="Attached Screenshot"
+                                  className="max-h-28 rounded-lg border border-slate-700"
+                                />
+                              </a>
+                            )}
 
                           {req.adminReply && (
                             <div className="p-2 rounded-lg bg-emerald-950/50 border border-emerald-500/50 space-y-0.5">

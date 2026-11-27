@@ -61,11 +61,14 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
+import bossLionLogoImg from '../assets/images/boss_lion_logo_1791741005749.jpg';
 import {
   BossUserRole,
   ClientAuthSession,
   isOwnerIdentity,
+  isValidImageSrc,
   loadCachedMasterEngineConfig,
+  sanitizeImageUrl,
 } from '../utils/adminApiConfig';
 import {
   callSupabaseProxy,
@@ -668,11 +671,32 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     }
   };
 
-  // Active Shop Logo for Quotation & Charts (falls back to Official Golden Lion Main Icon if no custom Shop Logo is set)
-  const activeShopLogoUrl =
-    layoutConfig.shopLogoUrl && layoutConfig.shopLogoUrl.trim().length > 0
-      ? layoutConfig.shopLogoUrl
-      : mainLogoUrl;
+  const [letterheadImgFailed, setLetterheadImgFailed] = useState(false);
+  const [shopLogoImgFailed, setShopLogoImgFailed] = useState(false);
+  const [mainLogoImgFailed, setMainLogoImgFailed] = useState(false);
+  const [failedBannerKeys, setFailedBannerKeys] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    setLetterheadImgFailed(false);
+  }, [letterheadBgUrl]);
+
+  useEffect(() => {
+    setShopLogoImgFailed(false);
+  }, [layoutConfig.shopLogoUrl, mainLogoUrl]);
+
+  useEffect(() => {
+    setMainLogoImgFailed(false);
+  }, [mainLogoUrl]);
+
+  const safeMainLogoUrl =
+    !mainLogoImgFailed && isValidImageSrc(mainLogoUrl) ? mainLogoUrl : bossLionLogoImg;
+  const safeLetterheadBgUrl =
+    !letterheadImgFailed && isValidImageSrc(letterheadBgUrl) ? letterheadBgUrl : '';
+
+  // Active Shop Logo for Quotation & Charts (falls back to Official Golden Lion Main Icon if no custom Shop Logo is set or URL fails)
+  const activeShopLogoUrl = !shopLogoImgFailed
+    ? sanitizeImageUrl(layoutConfig.shopLogoUrl) || safeMainLogoUrl
+    : bossLionLogoImg;
 
   // Dynamic 5mm & 8mm Glass Colors from live glassRates (supports separate Add & Delete for 5mm and 8mm!)
   const glassColors5mm =
@@ -1464,7 +1488,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   };
 
   const loadExportImageSafe = async (src: string): Promise<HTMLImageElement | null> => {
-    if (!src) return null;
+    if (!isValidImageSrc(src)) return null;
     if (src.startsWith('data:') || src.startsWith('blob:')) {
       return new Promise((resolve) => {
         let settled = false;
@@ -1736,8 +1760,8 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     ctx.fillStyle = '#0D1118';
     ctx.fillRect(0, 0, width, height);
 
-    if (layoutConfig.showLetterheadBackground && letterheadBgUrl) {
-      const bgImg = await loadImg(letterheadBgUrl);
+    if (layoutConfig.showLetterheadBackground && safeLetterheadBgUrl) {
+      const bgImg = await loadImg(safeLetterheadBgUrl);
       if (bgImg) {
         ctx.save();
         ctx.globalAlpha =
@@ -1762,17 +1786,39 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
 
     const logoImg = await loadImg(activeShopLogoUrl);
     if (logoImg) {
+      const bx = 40;
+      const by = 40;
+      const bs = 84;
+      const r = 14;
+      const drawBadgePath = () => {
+        ctx.beginPath();
+        ctx.moveTo(bx + r, by);
+        ctx.lineTo(bx + bs - r, by);
+        ctx.quadraticCurveTo(bx + bs, by, bx + bs, by + r);
+        ctx.lineTo(bx + bs, by + bs - r);
+        ctx.quadraticCurveTo(bx + bs, by + bs, bx + bs - r, by + bs);
+        ctx.lineTo(bx + r, by + bs);
+        ctx.quadraticCurveTo(bx, by + bs, bx, by + bs - r);
+        ctx.lineTo(bx, by + r);
+        ctx.quadraticCurveTo(bx, by, bx + r, by);
+        ctx.closePath();
+      };
       ctx.save();
-      ctx.beginPath();
-      ctx.arc(82, 82, 42, 0, Math.PI * 2);
-      ctx.closePath();
+      drawBadgePath();
+      ctx.fillStyle = '#0C0F14';
+      ctx.fill();
       ctx.clip();
-      ctx.drawImage(logoImg, 40, 40, 84, 84);
+      const pad = 6;
+      const iw = logoImg.naturalWidth || logoImg.width || bs;
+      const ih = logoImg.naturalHeight || logoImg.height || bs;
+      const scale = Math.min((bs - pad * 2) / iw, (bs - pad * 2) / ih);
+      const dw = iw * scale;
+      const dh = ih * scale;
+      ctx.drawImage(logoImg, bx + (bs - dw) / 2, by + (bs - dh) / 2, dw, dh);
       ctx.restore();
       ctx.strokeStyle = '#F5B738';
       ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.arc(82, 82, 42, 0, Math.PI * 2);
+      drawBadgePath();
       ctx.stroke();
     }
 
@@ -1920,8 +1966,8 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     ctx.fillStyle = '#0D1118';
     ctx.fillRect(0, 0, width, height);
 
-    if (layoutConfig.showLetterheadBackground && letterheadBgUrl) {
-      const bgImg = await loadImg(letterheadBgUrl);
+    if (layoutConfig.showLetterheadBackground && safeLetterheadBgUrl) {
+      const bgImg = await loadImg(safeLetterheadBgUrl);
       if (bgImg) {
         ctx.save();
         ctx.globalAlpha =
@@ -1946,17 +1992,39 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
 
     const logoImg = await loadImg(activeShopLogoUrl);
     if (logoImg) {
+      const bx = 40;
+      const by = 40;
+      const bs = 84;
+      const r = 14;
+      const drawBadgePath = () => {
+        ctx.beginPath();
+        ctx.moveTo(bx + r, by);
+        ctx.lineTo(bx + bs - r, by);
+        ctx.quadraticCurveTo(bx + bs, by, bx + bs, by + r);
+        ctx.lineTo(bx + bs, by + bs - r);
+        ctx.quadraticCurveTo(bx + bs, by + bs, bx + bs - r, by + bs);
+        ctx.lineTo(bx + r, by + bs);
+        ctx.quadraticCurveTo(bx, by + bs, bx, by + bs - r);
+        ctx.lineTo(bx, by + r);
+        ctx.quadraticCurveTo(bx, by, bx + r, by);
+        ctx.closePath();
+      };
       ctx.save();
-      ctx.beginPath();
-      ctx.arc(82, 82, 42, 0, Math.PI * 2);
-      ctx.closePath();
+      drawBadgePath();
+      ctx.fillStyle = '#0C0F14';
+      ctx.fill();
       ctx.clip();
-      ctx.drawImage(logoImg, 40, 40, 84, 84);
+      const pad = 6;
+      const iw = logoImg.naturalWidth || logoImg.width || bs;
+      const ih = logoImg.naturalHeight || logoImg.height || bs;
+      const scale = Math.min((bs - pad * 2) / iw, (bs - pad * 2) / ih);
+      const dw = iw * scale;
+      const dh = ih * scale;
+      ctx.drawImage(logoImg, bx + (bs - dw) / 2, by + (bs - dh) / 2, dw, dh);
       ctx.restore();
       ctx.strokeStyle = '#F5B738';
       ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.arc(82, 82, 42, 0, Math.PI * 2);
+      drawBadgePath();
       ctx.stroke();
     }
 
@@ -2419,12 +2487,20 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
           className="p-3 rounded-xl bg-gradient-to-r from-amber-500/20 via-rose-500/20 to-amber-500/20 border border-amber-400 shadow-lg flex items-center justify-between gap-2 flex-wrap no-print"
         >
           <div className="flex items-center gap-2 min-w-0">
-            {banner.imageUrl ? (
-              <img
-                src={banner.imageUrl}
-                alt={banner.title}
-                className="w-9 h-9 rounded-lg object-cover border border-[#F5B738] shrink-0"
-              />
+            {isValidImageSrc(banner.imageUrl) && !failedBannerKeys[getBannerDismissKey(banner)] ? (
+              <div className="w-9 h-9 rounded-lg bg-[#0C0F14] border border-[#F5B738] p-0.5 flex items-center justify-center shrink-0 overflow-hidden">
+                <img
+                  src={banner.imageUrl}
+                  onError={() =>
+                    setFailedBannerKeys((prev) => ({
+                      ...prev,
+                      [getBannerDismissKey(banner)]: true,
+                    }))
+                  }
+                  alt={banner.title}
+                  className="w-full h-full object-contain rounded"
+                />
+              </div>
             ) : (
               <div className="w-8 h-8 rounded-lg bg-[#F5B738] text-black flex items-center justify-center font-black shrink-0">
                 <Zap className="w-4 h-4 text-black" />
@@ -2481,7 +2557,8 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
           >
             <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-xl bg-[#0C0F14] border-2 border-[#F5B738] p-1 flex items-center justify-center shrink-0 shadow-sm overflow-hidden">
               <img
-                src={mainLogoUrl}
+                src={safeMainLogoUrl}
+                onError={() => setMainLogoImgFailed(true)}
                 alt="Boss Aluminium Lion Emblem"
                 className="w-full h-full object-contain rounded-lg"
               />
@@ -6166,10 +6243,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   padding: 0,
                 }}
               >
-              {layoutConfig.showLetterheadBackground && letterheadBgUrl && (
+              {layoutConfig.showLetterheadBackground && safeLetterheadBgUrl && (
                 <>
                   <img
-                    src={letterheadBgUrl}
+                    src={safeLetterheadBgUrl}
+                    onError={() => setLetterheadImgFailed(true)}
                     alt="Official Letterhead Background"
                     style={{
                       opacity: (layoutConfig.watermarkOpacity ?? 95) / 100,
@@ -6234,11 +6312,14 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                     /* Digital Header: Full company logo and contact info */
                     <div className="flex flex-wrap items-center justify-between gap-3 border-b-2 border-[#F5B738]/60 pb-4">
                       <div className="flex items-center gap-3.5">
-                        <img
-                          src={activeShopLogoUrl}
-                          alt="Shop / Company Logo"
-                          className="w-16 h-16 rounded-full object-cover border-2 border-[#F5B738] shadow-md shrink-0"
-                        />
+                        <div className="w-16 h-16 rounded-xl bg-[#0C0F14] border-2 border-[#F5B738] p-1 flex items-center justify-center shadow-md shrink-0 overflow-hidden">
+                          <img
+                            src={activeShopLogoUrl}
+                            onError={() => setShopLogoImgFailed(true)}
+                            alt="Shop / Company Logo"
+                            className="w-full h-full object-contain rounded-lg"
+                          />
+                        </div>
                         <div>
                           <h2 className="text-lg sm:text-xl font-black text-[#F5B738] tracking-wide">
                             {companyName || 'BOSS ALUMINIUM & GLASS'}
@@ -8193,8 +8274,8 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
           onUpdateCompanyInfo={onUpdateCompanyInfo}
           layoutConfig={layoutConfig}
           onUpdateLayoutConfig={onUpdateLayoutConfig}
-          mainLogoUrl={mainLogoUrl}
-          letterheadBgUrl={letterheadBgUrl}
+          mainLogoUrl={safeMainLogoUrl}
+          letterheadBgUrl={safeLetterheadBgUrl}
           isCustomLetterhead={isCustomLetterhead}
           onUpdateLetterheadBgUrl={onUpdateLetterheadBgUrl}
           onRestoreDefaultBrandingAssets={onRestoreDefaultBrandingAssets}
@@ -8359,11 +8440,22 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
 
               {/* A4 Sheet Surface (210:297 Portrait Fit) */}
               <div className="bg-[#0D1118] rounded shadow-[0_14px_45px_rgba(0,0,0,0.65)] ring-1 ring-white/15 p-1.5 sm:p-2 max-w-full max-h-[54vh] md:max-h-[80vh] aspect-[210/297] flex items-center justify-center overflow-hidden">
-                <img
-                  src={printPreviewState.previewImageUrl}
-                  alt="A4 Print Preview"
-                  className="w-full h-full object-contain rounded-sm"
-                />
+                {isValidImageSrc(printPreviewState.previewImageUrl) ? (
+                  <img
+                    src={printPreviewState.previewImageUrl}
+                    onError={() =>
+                      setPrintPreviewState((prev) =>
+                        prev ? { ...prev, previewImageUrl: '' } : null
+                      )
+                    }
+                    alt="A4 Print Preview"
+                    className="w-full h-full object-contain rounded-sm"
+                  />
+                ) : (
+                  <div className="text-center text-xs text-slate-400 px-4">
+                    A4 Preview PDF ready hai — Print / Save PDF par click karein.
+                  </div>
+                )}
               </div>
 
               <div className="mt-2.5 flex items-center gap-2 text-[11px] font-medium text-slate-300 bg-[#202124]/90 px-3 py-1 rounded-full border border-slate-700/70">
