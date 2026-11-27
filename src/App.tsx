@@ -291,11 +291,19 @@ function saveLastSeenSupportMs(ms: number): void {
   }
 }
 
-function isBundledFallbackLetterhead(url: string, bundledAssetUrl: string): boolean {
+function isBundledFallbackLetterhead(url: string, bundledAssetUrl?: string): boolean {
   const s = String(url || '').trim();
   if (!s) return true;
-  if (s === bundledAssetUrl) return true;
-  if (s.includes('boss_letterhead_bg_')) return true;
+  if (bundledAssetUrl && s === bundledAssetUrl) return true;
+  if (s.includes('boss_letterhead_bg_') || s.includes('boss_letterhead_clean_')) return true;
+  return false;
+}
+
+function isBundledFallbackLogo(url: string, bundledLogoUrl?: string): boolean {
+  const s = String(url || '').trim();
+  if (!s) return true;
+  if (bundledLogoUrl && s === bundledLogoUrl) return true;
+  if (s.includes('boss_lion_logo_')) return true;
   return false;
 }
 
@@ -305,34 +313,75 @@ function extractAdminLetterheadBgUrl(
   layoutCfg?: any,
   directRow?: any
 ): string {
+  let parsedDirect: any = directRow;
+  if (typeof directRow === 'string') {
+    const trimmed = directRow.trim();
+    if (trimmed.startsWith('{')) {
+      try {
+        parsedDirect = JSON.parse(trimmed);
+      } catch {
+        parsedDirect = directRow;
+      }
+    }
+  }
   const directVal =
-    typeof directRow === 'string'
-      ? directRow
-      : directRow?.letterhead_bg_url || directRow?.letterheadBgUrl || directRow?.url || '';
+    typeof parsedDirect === 'string'
+      ? parsedDirect
+      : parsedDirect?.letterhead_bg_url ||
+        parsedDirect?.letterheadBgUrl ||
+        parsedDirect?.letterheadUrl ||
+        parsedDirect?.letterhead ||
+        parsedDirect?.imageUrl ||
+        parsedDirect?.bgUrl ||
+        parsedDirect?.dataUrl ||
+        parsedDirect?.src ||
+        parsedDirect?.url ||
+        parsedDirect?.value ||
+        '';
   const candidates = [
     globalCfg?.letterhead_bg_url,
     globalCfg?.letterheadBgUrl,
+    globalCfg?.letterheadUrl,
+    globalCfg?.letterheadImage,
+    globalCfg?.letterheadBg,
+    globalCfg?.letterhead,
+    globalCfg?.defaultLetterheadUrl,
+    globalCfg?.defaultLetterhead,
+    globalCfg?.quotationLetterheadUrl,
+    globalCfg?.quotationLetterhead,
     globalCfg?.companyBranding?.letterhead_bg_url,
     globalCfg?.companyBranding?.letterheadBgUrl,
+    globalCfg?.companyBranding?.letterheadUrl,
+    globalCfg?.companyBranding?.letterhead,
+    globalCfg?.companyBranding?.defaultLetterheadUrl,
     globalCfg?.branding?.letterhead_bg_url,
     globalCfg?.branding?.letterheadBgUrl,
+    globalCfg?.branding?.letterheadUrl,
+    globalCfg?.branding?.letterhead,
     globalCfg?.layoutConfig?.letterhead_bg_url,
     globalCfg?.layoutConfig?.letterheadBgUrl,
+    globalCfg?.layoutConfig?.letterheadUrl,
     brandingCfg?.letterhead_bg_url,
     brandingCfg?.letterheadBgUrl,
+    brandingCfg?.letterheadUrl,
+    brandingCfg?.letterhead,
     brandingCfg?.companyBranding?.letterhead_bg_url,
     brandingCfg?.companyBranding?.letterheadBgUrl,
+    brandingCfg?.companyBranding?.letterheadUrl,
     brandingCfg?.value?.letterhead_bg_url,
     brandingCfg?.value?.letterheadBgUrl,
+    brandingCfg?.value?.letterheadUrl,
     layoutCfg?.letterhead_bg_url,
     layoutCfg?.letterheadBgUrl,
+    layoutCfg?.letterheadUrl,
     layoutCfg?.layoutConfig?.letterhead_bg_url,
     layoutCfg?.layoutConfig?.letterheadBgUrl,
+    layoutCfg?.layoutConfig?.letterheadUrl,
     directVal,
   ];
   for (const c of candidates) {
     const s = sanitizeImageUrl(typeof c === 'string' ? c : '');
-    if (s) return s;
+    if (s && !isBundledFallbackLetterhead(s)) return s;
   }
   return '';
 }
@@ -833,7 +882,9 @@ export default function App() {
         const parsed = JSON.parse(raw);
         if (typeof parsed?.adminLetterheadBgUrl === 'string') {
           const validSaved = sanitizeImageUrl(parsed.adminLetterheadBgUrl);
-          if (validSaved) return validSaved;
+          if (validSaved && !isBundledFallbackLetterhead(validSaved, bossLetterheadCleanImg)) {
+            return validSaved;
+          }
         }
       }
     } catch {}
@@ -845,7 +896,10 @@ export default function App() {
       if (raw) {
         const parsed = JSON.parse(raw);
         if (typeof parsed?.customLetterheadBgUrl === 'string') {
-          return sanitizeImageUrl(parsed.customLetterheadBgUrl);
+          const validCustom = sanitizeImageUrl(parsed.customLetterheadBgUrl);
+          return validCustom && !isBundledFallbackLetterhead(validCustom, bossLetterheadCleanImg)
+            ? validCustom
+            : '';
         }
         const legacyLh = sanitizeImageUrl(String(parsed?.letterheadBgUrl || ''));
         const cachedAdminLh = extractAdminLetterheadBgUrl(loadCachedMasterEngineConfig());
@@ -861,10 +915,18 @@ export default function App() {
     return '';
   });
   const letterheadBgUrl =
-    sanitizeImageUrl(customLetterheadBgUrl) ||
-    sanitizeImageUrl(adminLetterheadBgUrl) ||
+    (customLetterheadBgUrl && !isBundledFallbackLetterhead(customLetterheadBgUrl, bossLetterheadCleanImg)
+      ? sanitizeImageUrl(customLetterheadBgUrl)
+      : '') ||
+    (adminLetterheadBgUrl && !isBundledFallbackLetterhead(adminLetterheadBgUrl, bossLetterheadCleanImg)
+      ? sanitizeImageUrl(adminLetterheadBgUrl)
+      : '') ||
     bossLetterheadCleanImg;
-  const isCustomLetterhead = Boolean(sanitizeImageUrl(customLetterheadBgUrl));
+  const isCustomLetterhead = Boolean(
+    customLetterheadBgUrl &&
+      !isBundledFallbackLetterhead(customLetterheadBgUrl, bossLetterheadCleanImg) &&
+      sanitizeImageUrl(customLetterheadBgUrl)
+  );
   const lastAppliedAdminThemeHashRef = useRef<string>('');
   const hasMigratedDbInSessionRef = useRef<boolean>(false);
   const [rateListSavedAt, setRateListSavedAt] = useState<number | null>(() => {
@@ -1015,7 +1077,7 @@ export default function App() {
         const [cfgRes, multiKeyRes, clientIpAddress, serverNowMs] = await Promise.all([
           fetchAppConfigsSmart({
             forceRefresh: forceRates,
-            alwaysRefreshIds: ['packages_v1', 'global_config'],
+            alwaysRefreshIds: ['packages_v1'],
           }),
           fetchMultiKeyUserRecords({
             deviceId: activeSession?.deviceId || clientDeviceId,
@@ -1221,10 +1283,14 @@ export default function App() {
           ''
       ).trim();
       const validIncomingLogo = sanitizeImageUrl(incomingLogoRaw);
-      if (validIncomingLogo) {
+      if (validIncomingLogo && !isBundledFallbackLogo(validIncomingLogo, bossLionLogoImg)) {
         setMainLogoUrl(validIncomingLogo);
       } else if (incomingLogoRaw) {
-        setMainLogoUrl((prev) => sanitizeImageUrl(prev, bossLionLogoImg));
+        setMainLogoUrl((prev) =>
+          isBundledFallbackLogo(prev, bossLionLogoImg)
+            ? bossLionLogoImg
+            : sanitizeImageUrl(prev, bossLionLogoImg)
+        );
       }
 
       const incomingAdminLetterhead = extractAdminLetterheadBgUrl(
@@ -1241,7 +1307,9 @@ export default function App() {
         brandingCfg.letterhead_bg_url ||
         brandingCfg.letterheadBgUrl
       ) {
-        setAdminLetterheadBgUrl((prev) => sanitizeImageUrl(prev));
+        setAdminLetterheadBgUrl((prev) =>
+          isBundledFallbackLetterhead(prev, bossLetterheadCleanImg) ? '' : sanitizeImageUrl(prev)
+        );
       }
 
       const rawMob =
@@ -1469,7 +1537,14 @@ export default function App() {
                 DG_WINDOWS: true,
                 ...(prev.lockedTabs || {}),
               },
-          shopLogoUrl: prev.shopLogoUrl || incomingLayout.shopLogoUrl || '',
+          shopLogoUrl: (() => {
+            const candidate = sanitizeImageUrl(
+              prev.shopLogoUrl || incomingLayout.shopLogoUrl || ''
+            );
+            return candidate && !isBundledFallbackLogo(candidate, bossLionLogoImg)
+              ? candidate
+              : '';
+          })(),
         }));
       }
 
@@ -2498,7 +2573,11 @@ export default function App() {
         if (parsed.bankAccounts?.length) setBankAccounts(parsed.bankAccounts);
         if (parsed.activeOffer !== undefined) setActiveOffer(parsed.activeOffer);
         if (Array.isArray(parsed.broadcasts)) setBroadcasts(parsed.broadcasts);
-        if (parsed.mainLogoUrl && isValidImageSrc(parsed.mainLogoUrl)) {
+        if (
+          parsed.mainLogoUrl &&
+          isValidImageSrc(parsed.mainLogoUrl) &&
+          !isBundledFallbackLogo(parsed.mainLogoUrl, bossLionLogoImg)
+        ) {
           setMainLogoUrl(sanitizeImageUrl(parsed.mainLogoUrl, bossLionLogoImg));
         }
         if (cachedMobSrc && typeof cachedMobSrc === 'object') {
@@ -2579,11 +2658,24 @@ export default function App() {
             },
           }));
         }
-        if (typeof parsed.adminLetterheadBgUrl === 'string' && isValidImageSrc(parsed.adminLetterheadBgUrl)) {
-          setAdminLetterheadBgUrl((prev) => prev || sanitizeImageUrl(parsed.adminLetterheadBgUrl));
+        if (
+          typeof parsed.adminLetterheadBgUrl === 'string' &&
+          isValidImageSrc(parsed.adminLetterheadBgUrl) &&
+          !isBundledFallbackLetterhead(parsed.adminLetterheadBgUrl, bossLetterheadCleanImg)
+        ) {
+          setAdminLetterheadBgUrl((prev) =>
+            prev && !isBundledFallbackLetterhead(prev, bossLetterheadCleanImg)
+              ? prev
+              : sanitizeImageUrl(parsed.adminLetterheadBgUrl)
+          );
         }
         if (typeof parsed.customLetterheadBgUrl === 'string') {
-          setCustomLetterheadBgUrl(sanitizeImageUrl(parsed.customLetterheadBgUrl));
+          const validCustom = sanitizeImageUrl(parsed.customLetterheadBgUrl);
+          setCustomLetterheadBgUrl(
+            validCustom && !isBundledFallbackLetterhead(validCustom, bossLetterheadCleanImg)
+              ? validCustom
+              : ''
+          );
         } else if (typeof parsed.letterheadBgUrl === 'string') {
           const legacyLh = sanitizeImageUrl(parsed.letterheadBgUrl);
           const cachedAdminLh = extractAdminLetterheadBgUrl(cachedM);
@@ -2782,7 +2874,7 @@ export default function App() {
             'layout_config_v1',
             'letterhead_bg_url',
           ],
-          alwaysRefreshIds: ['packages_v1', 'global_config'],
+          alwaysRefreshIds: ['packages_v1'],
           timeoutMs: 6000,
         })
           .then((cfgOnlyRes) => {
@@ -2830,7 +2922,7 @@ export default function App() {
                 ''
             ).trim();
             const validFoundLogo = sanitizeImageUrl(foundLogoRaw);
-            if (validFoundLogo) {
+            if (validFoundLogo && !isBundledFallbackLogo(validFoundLogo, bossLionLogoImg)) {
               setMainLogoUrl(validFoundLogo);
             }
           })
@@ -3256,14 +3348,26 @@ export default function App() {
           bankAccounts,
           activeOffer,
           broadcasts,
-          mainLogoUrl,
+          mainLogoUrl: isBundledFallbackLogo(mainLogoUrl, bossLionLogoImg) ? '' : mainLogoUrl,
           mobileDownloadConfig,
           cloudAccessInfo,
           supportRequests,
           layoutConfig,
-          letterheadBgUrl,
-          adminLetterheadBgUrl,
-          customLetterheadBgUrl,
+          letterheadBgUrl: isBundledFallbackLetterhead(letterheadBgUrl, bossLetterheadCleanImg)
+            ? ''
+            : letterheadBgUrl,
+          adminLetterheadBgUrl: isBundledFallbackLetterhead(
+            adminLetterheadBgUrl,
+            bossLetterheadCleanImg
+          )
+            ? ''
+            : adminLetterheadBgUrl,
+          customLetterheadBgUrl: isBundledFallbackLetterhead(
+            customLetterheadBgUrl,
+            bossLetterheadCleanImg
+          )
+            ? ''
+            : customLetterheadBgUrl,
           currentTheme,
           downloadedThemes,
           deletedBackupVault,
@@ -4090,10 +4194,20 @@ export default function App() {
               if (parsed.packages) setPackages(parsed.packages);
               if (parsed.layoutConfig) setLayoutConfig(parsed.layoutConfig);
               if (typeof parsed.customLetterheadBgUrl === 'string') {
-                setCustomLetterheadBgUrl(parsed.customLetterheadBgUrl.trim());
+                const validCustom = sanitizeImageUrl(parsed.customLetterheadBgUrl);
+                setCustomLetterheadBgUrl(
+                  validCustom && !isBundledFallbackLetterhead(validCustom, bossLetterheadCleanImg)
+                    ? validCustom
+                    : ''
+                );
               }
-              if (typeof parsed.adminLetterheadBgUrl === 'string' && parsed.adminLetterheadBgUrl.trim()) {
-                setAdminLetterheadBgUrl(parsed.adminLetterheadBgUrl.trim());
+              if (
+                typeof parsed.adminLetterheadBgUrl === 'string' &&
+                parsed.adminLetterheadBgUrl.trim() &&
+                !isBundledFallbackLetterhead(parsed.adminLetterheadBgUrl, bossLetterheadCleanImg)
+              ) {
+                const validAdm = sanitizeImageUrl(parsed.adminLetterheadBgUrl);
+                if (validAdm) setAdminLetterheadBgUrl(validAdm);
               }
               return true;
             } catch {

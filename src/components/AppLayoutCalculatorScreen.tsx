@@ -62,6 +62,7 @@ import {
   ZoomOut,
 } from 'lucide-react';
 import bossLionLogoImg from '../assets/images/boss_lion_logo_1791741005749.jpg';
+import bossLetterheadCleanImg from '../assets/images/boss_letterhead_bg_1791741019302.jpg';
 import {
   BossUserRole,
   ClientAuthSession,
@@ -672,12 +673,14 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   };
 
   const [letterheadImgFailed, setLetterheadImgFailed] = useState(false);
+  const [bundledLetterheadImgFailed, setBundledLetterheadImgFailed] = useState(false);
   const [shopLogoImgFailed, setShopLogoImgFailed] = useState(false);
   const [mainLogoImgFailed, setMainLogoImgFailed] = useState(false);
   const [failedBannerKeys, setFailedBannerKeys] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     setLetterheadImgFailed(false);
+    setBundledLetterheadImgFailed(false);
   }, [letterheadBgUrl]);
 
   useEffect(() => {
@@ -691,7 +694,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   const safeMainLogoUrl =
     !mainLogoImgFailed && isValidImageSrc(mainLogoUrl) ? mainLogoUrl : bossLionLogoImg;
   const safeLetterheadBgUrl =
-    !letterheadImgFailed && isValidImageSrc(letterheadBgUrl) ? letterheadBgUrl : '';
+    !letterheadImgFailed && isValidImageSrc(letterheadBgUrl)
+      ? letterheadBgUrl
+      : !bundledLetterheadImgFailed
+      ? bossLetterheadCleanImg
+      : '';
 
   // Active Shop Logo for Quotation & Charts (falls back to Official Golden Lion Main Icon if no custom Shop Logo is set or URL fails)
   const activeShopLogoUrl = !shopLogoImgFailed
@@ -1497,7 +1504,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
           settled = true;
           resolve(img);
         };
-        const timer = setTimeout(() => done(null), 1500);
+        const timer = setTimeout(() => done(null), 2500);
         const im = new Image();
         im.onload = () => {
           clearTimeout(timer);
@@ -1512,39 +1519,63 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     }
     try {
       const controller = new AbortController();
-      const fetchTimer = setTimeout(() => controller.abort(), 2000);
+      const fetchTimer = setTimeout(() => controller.abort(), 6000);
       const resp = await fetch(src, {
         mode: 'cors',
-        cache: 'no-store',
+        cache: 'default',
         signal: controller.signal,
       });
       clearTimeout(fetchTimer);
-      if (!resp.ok) return null;
-      const blob = await resp.blob();
-      const objUrl = URL.createObjectURL(blob);
-      return await new Promise<HTMLImageElement | null>((resolve) => {
-        let settled = false;
-        const done = (img: HTMLImageElement | null) => {
-          if (settled) return;
-          settled = true;
-          URL.revokeObjectURL(objUrl);
-          resolve(img);
-        };
-        const timer = setTimeout(() => done(null), 1500);
-        const im = new Image();
-        im.onload = () => {
-          clearTimeout(timer);
-          done(im);
-        };
-        im.onerror = () => {
-          clearTimeout(timer);
-          done(null);
-        };
-        im.src = objUrl;
-      });
+      if (resp.ok) {
+        const blob = await resp.blob();
+        const objUrl = URL.createObjectURL(blob);
+        const imgLoaded = await new Promise<HTMLImageElement | null>((resolve) => {
+          let settled = false;
+          const done = (img: HTMLImageElement | null) => {
+            if (settled) return;
+            settled = true;
+            URL.revokeObjectURL(objUrl);
+            resolve(img);
+          };
+          const timer = setTimeout(() => done(null), 2500);
+          const im = new Image();
+          im.onload = () => {
+            clearTimeout(timer);
+            done(im);
+          };
+          im.onerror = () => {
+            clearTimeout(timer);
+            done(null);
+          };
+          im.src = objUrl;
+        });
+        if (imgLoaded) return imgLoaded;
+      }
     } catch {
-      return null;
+      // Fallback below via crossOrigin Image load
     }
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (img: HTMLImageElement | null) => {
+        if (settled) return;
+        settled = true;
+        resolve(img);
+      };
+      const timer = setTimeout(() => done(null), 4000);
+      const im = new Image();
+      if (/^https?:\/\//i.test(src)) {
+        im.crossOrigin = 'anonymous';
+      }
+      im.onload = () => {
+        clearTimeout(timer);
+        done(im);
+      };
+      im.onerror = () => {
+        clearTimeout(timer);
+        done(null);
+      };
+      im.src = src;
+    });
   };
 
   // High-Resolution Canvas Builder for Quotation & All Charts (used for both PNG & PDF)
@@ -1761,14 +1792,32 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     ctx.fillRect(0, 0, width, height);
 
     if (layoutConfig.showLetterheadBackground && safeLetterheadBgUrl) {
-      const bgImg = await loadImg(safeLetterheadBgUrl);
+      let bgImg = await loadImg(safeLetterheadBgUrl);
+      if (!bgImg && safeLetterheadBgUrl !== bossLetterheadCleanImg) {
+        bgImg = await loadImg(bossLetterheadCleanImg);
+      }
       if (bgImg) {
         ctx.save();
         ctx.globalAlpha =
           layoutConfig.watermarkOpacity != null
             ? layoutConfig.watermarkOpacity / 100
             : layoutConfig.letterheadOpacity || 0.28;
-        ctx.drawImage(bgImg, 0, 0, width, height);
+        const fitStyle = layoutConfig.backgroundFitStyle || 'FILL';
+        if (fitStyle === 'FIT' || fitStyle === 'CROP') {
+          const iw = bgImg.naturalWidth || bgImg.width || width;
+          const ih = bgImg.naturalHeight || bgImg.height || height;
+          const scale =
+            fitStyle === 'CROP'
+              ? Math.max(width / iw, height / ih)
+              : Math.min(width / iw, height / ih);
+          const dw = iw * scale;
+          const dh = ih * scale;
+          const dx = (width - dw) / 2;
+          const dy = fitStyle === 'CROP' ? 0 : (height - dh) / 2;
+          ctx.drawImage(bgImg, dx, dy, dw, dh);
+        } else {
+          ctx.drawImage(bgImg, 0, 0, width, height);
+        }
         ctx.restore();
 
         if ((layoutConfig.backgroundDarkness ?? 32) > 0) {
@@ -1967,14 +2016,32 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     ctx.fillRect(0, 0, width, height);
 
     if (layoutConfig.showLetterheadBackground && safeLetterheadBgUrl) {
-      const bgImg = await loadImg(safeLetterheadBgUrl);
+      let bgImg = await loadImg(safeLetterheadBgUrl);
+      if (!bgImg && safeLetterheadBgUrl !== bossLetterheadCleanImg) {
+        bgImg = await loadImg(bossLetterheadCleanImg);
+      }
       if (bgImg) {
         ctx.save();
         ctx.globalAlpha =
           layoutConfig.watermarkOpacity != null
             ? layoutConfig.watermarkOpacity / 100
             : layoutConfig.letterheadOpacity || 0.28;
-        ctx.drawImage(bgImg, 0, 0, width, height);
+        const fitStyle = layoutConfig.backgroundFitStyle || 'FILL';
+        if (fitStyle === 'FIT' || fitStyle === 'CROP') {
+          const iw = bgImg.naturalWidth || bgImg.width || width;
+          const ih = bgImg.naturalHeight || bgImg.height || height;
+          const scale =
+            fitStyle === 'CROP'
+              ? Math.max(width / iw, height / ih)
+              : Math.min(width / iw, height / ih);
+          const dw = iw * scale;
+          const dh = ih * scale;
+          const dx = (width - dw) / 2;
+          const dy = fitStyle === 'CROP' ? 0 : (height - dh) / 2;
+          ctx.drawImage(bgImg, dx, dy, dw, dh);
+        } else {
+          ctx.drawImage(bgImg, 0, 0, width, height);
+        }
         ctx.restore();
 
         if ((layoutConfig.backgroundDarkness ?? 32) > 0) {
@@ -6247,7 +6314,13 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                 <>
                   <img
                     src={safeLetterheadBgUrl}
-                    onError={() => setLetterheadImgFailed(true)}
+                    onError={() => {
+                      if (!letterheadImgFailed && letterheadBgUrl !== bossLetterheadCleanImg) {
+                        setLetterheadImgFailed(true);
+                      } else {
+                        setBundledLetterheadImgFailed(true);
+                      }
+                    }}
                     alt="Official Letterhead Background"
                     style={{
                       opacity: (layoutConfig.watermarkOpacity ?? 95) / 100,

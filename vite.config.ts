@@ -20,13 +20,13 @@ export default defineConfig(() => {
           'icon.svg',
         ],
         manifest: {
-          id: '/',
+          id: './',
           name: 'Boss Aluminium & Glass — Calculator & Quotation App',
           short_name: 'Boss Glass',
           description:
             'Boss Aluminium & Glass Client App with Cutting Charts, Length Optimizer, Glass Chart, and Quotation Calculator.',
-          start_url: '/',
-          scope: '/',
+          start_url: './',
+          scope: './',
           display: 'standalone',
           background_color: '#0C0F14',
           theme_color: '#0C0F14',
@@ -53,6 +53,9 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
+          cleanupOutdatedCaches: true,
+          clientsClaim: true,
+          skipWaiting: true,
           navigateFallback: '/index.html',
           globPatterns: ['**/*.{js,css,html,ico,png,svg,jpg,woff2}'],
           maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,

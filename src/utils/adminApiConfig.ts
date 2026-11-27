@@ -39,9 +39,34 @@ export function getTrialDurationMs(masterCfg?: Record<string, any> | null): numb
   return Math.round(days * 24 * 60 * 60 * 1000);
 }
 
+function normalizeRawBase64OrDataUrl(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  const lower = trimmed.toLowerCase();
+  if (lower.startsWith('data:image/')) {
+    const commaIdx = trimmed.indexOf(',');
+    if (commaIdx === -1) return trimmed;
+    const prefix = trimmed.slice(0, commaIdx + 1);
+    const payload = trimmed.slice(commaIdx + 1).replace(/[\r\n\s]+/g, '');
+    return `${prefix}${payload}`;
+  }
+  if (/^(\/9j\/|iVBORw0KGgo|R0lGOD|UklGR)/i.test(trimmed) && trimmed.length >= 32) {
+    const cleanPayload = trimmed.replace(/[\r\n\s]+/g, '');
+    const mime = cleanPayload.startsWith('/9j/')
+      ? 'image/jpeg'
+      : cleanPayload.startsWith('iVBORw0KGgo')
+      ? 'image/png'
+      : cleanPayload.startsWith('R0lGOD')
+      ? 'image/gif'
+      : 'image/webp';
+    return `data:${mime};base64,${cleanPayload}`;
+  }
+  return trimmed;
+}
+
 export function isValidImageSrc(raw?: string | null): boolean {
   if (typeof raw !== 'string') return false;
-  const trimmed = raw.trim();
+  const trimmed = normalizeRawBase64OrDataUrl(raw);
   if (!trimmed) return false;
   const lower = trimmed.toLowerCase();
   if (
@@ -73,7 +98,7 @@ export function isValidImageSrc(raw?: string | null): boolean {
     return trimmed.length > 8;
   }
   if (lower.startsWith('http://') || lower.startsWith('https://')) {
-    if (/\s/.test(trimmed) || trimmed.endsWith('...')) return false;
+    if (/[\r\n\t]/.test(trimmed) || trimmed.endsWith('...')) return false;
     return trimmed.length >= 12;
   }
   if (
@@ -81,13 +106,20 @@ export function isValidImageSrc(raw?: string | null): boolean {
     trimmed.startsWith('./') ||
     trimmed.startsWith('assets/')
   ) {
-    return !trimmed.endsWith('...');
+    return !/[\r\n\t]/.test(trimmed) && !trimmed.endsWith('...');
   }
   return false;
 }
 
 export function sanitizeImageUrl(raw?: string | null, fallback = ''): string {
-  return isValidImageSrc(raw) ? String(raw).trim() : fallback;
+  if (typeof raw !== 'string') return fallback;
+  const normalized = normalizeRawBase64OrDataUrl(raw);
+  if (!isValidImageSrc(normalized)) return fallback;
+  const lower = normalized.toLowerCase();
+  if ((lower.startsWith('http://') || lower.startsWith('https://')) && /\s/.test(normalized)) {
+    return normalized.replace(/ /g, '%20');
+  }
+  return normalized;
 }
 
 export type BossUserRole = 'OWNER' | 'ADMIN' | 'CLIENT';
@@ -716,12 +748,22 @@ export function saveCachedAppConfigsMap(cfgMap: Record<string, any>): boolean {
     localStorage.setItem(APP_CONFIGS_CACHE_KEY, JSON.stringify(cfgMap));
     return true;
   } catch {
-    // Quota exceeded on large letterhead/branding payloads; keep compact copy without oversized images
+    // Quota exceeded on large letterhead/branding payloads; preserve essential configs & letterhead under safe size limits
     try {
+      const priorityKeys = new Set([
+        'letterhead_bg_url',
+        'company_branding_v1',
+        'company_branding',
+        'packages_v1',
+        'aluminium_rates_v1',
+        'formulas_v1',
+        'layout_config_v1',
+      ]);
       const compacted: Record<string, any> = {};
       Object.entries(cfgMap).forEach(([k, v]) => {
         const serialized = JSON.stringify(v);
-        if (serialized && serialized.length < 450_000) {
+        const limit = priorityKeys.has(k) ? 1_200_000 : 450_000;
+        if (serialized && serialized.length < limit) {
           compacted[k] = v;
         }
       });
