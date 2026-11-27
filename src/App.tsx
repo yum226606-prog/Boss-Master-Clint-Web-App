@@ -1068,16 +1068,21 @@ export default function App() {
   } | null>(null);
   const hasHydratedCloudConfigsInSessionRef = useRef(false);
   const lastCloudSyncStartedAtRef = useRef(0);
+  const syncedUserIdRef = useRef<string>('');
+  const lastTelemetrySyncAtRef = useRef<number>(0);
+  const inFlightManualSyncsCountRef = useRef<number>(0);
 
   const syncFromSupabase = async (options?: {
     forceRates?: boolean;
     silent?: boolean;
     sessionOverride?: ClientAuthSession | null;
     bypassSingleFlight?: boolean;
+    isManual?: boolean;
   }): Promise<boolean> => {
     const forceRates = Boolean(options?.forceRates);
     const silent = Boolean(options?.silent);
     const bypassSingleFlight = Boolean(options?.bypassSingleFlight);
+    const isManual = options?.isManual !== undefined ? Boolean(options.isManual) : !silent;
     const activeSession =
       options?.sessionOverride !== undefined ? options.sessionOverride : authSession;
 
@@ -1097,7 +1102,10 @@ export default function App() {
     }
 
     lastCloudSyncStartedAtRef.current = Date.now();
-    setIsSyncingCloud(true);
+    if (isManual) {
+      inFlightManualSyncsCountRef.current++;
+      setIsSyncingCloud(true);
+    }
 
     const runPromise: Promise<boolean> = (async (): Promise<boolean> => {
       try {
@@ -1774,41 +1782,51 @@ export default function App() {
       }
 
       const syncStamp = evaluated.serverNowMs > 0 ? evaluated.serverNowMs : Date.now();
-      setCloudAccessInfo(
-        isOwnerAccount
-          ? {
-              status: 'FREE',
-              tier: 'LIFETIME_VIP',
-              role: 'OWNER',
-              expiresAt: null,
-              serverNowMs: syncStamp,
-              reason: '',
-              lastSyncedAt: syncStamp,
-            }
-          : {
-              status: evaluated.status,
-              tier: evaluated.tier,
-              role: resolvedRole,
-              expiresAt: evaluated.expiresAt,
-              serverNowMs: evaluated.serverNowMs,
-              reason: evaluated.reason,
-              lastSyncedAt: syncStamp,
-            }
-      );
-      setIsSubscriptionExpired(isOwnerAccount ? false : evaluated.isExpired);
+      const targetStatus = isOwnerAccount ? 'FREE' : evaluated.status;
+      const targetTier = isOwnerAccount ? 'LIFETIME_VIP' : evaluated.tier;
+      const targetRole = resolvedRole;
+      const targetExpires = isOwnerAccount ? null : evaluated.expiresAt;
+      const targetReason = isOwnerAccount ? '' : evaluated.reason;
+
+      setCloudAccessInfo((prev) => {
+        if (
+          prev.status === targetStatus &&
+          prev.tier === targetTier &&
+          prev.role === targetRole &&
+          prev.expiresAt === targetExpires &&
+          prev.reason === targetReason
+        ) {
+          return prev;
+        }
+        return {
+          status: targetStatus,
+          tier: targetTier,
+          role: targetRole,
+          expiresAt: targetExpires,
+          serverNowMs: evaluated.serverNowMs || syncStamp,
+          reason: targetReason,
+          lastSyncedAt: syncStamp,
+        };
+      });
+
+      const targetIsExpired = isOwnerAccount ? false : evaluated.isExpired;
+      setIsSubscriptionExpired((prev) => (prev === targetIsExpired ? prev : targetIsExpired));
 
       // Refresh Admin & Support messages alongside Sync
       await loadSupportRequests(globalCfg, activeSession);
       markInitialSyncCompletedForDevice(activeSession?.deviceId || clientDeviceId);
 
-      // Keep Public IP (ip_address / last_ip) & Hardware Fingerprint (mac_address) synced across users, client_users & subscriptions
+      // Keep Public IP (ip_address / last_ip) & Hardware Fingerprint (mac_address) synced across users, client_users & subscriptions (throttled)
+      const nowMs = Date.now();
+      const telemetryThrottled = nowMs - lastTelemetrySyncAtRef.current < 60_000;
       if (
+        !telemetryThrottled &&
         activeSession?.verified &&
         !activeSession.deviceId.startsWith('RESET_') &&
         typeof navigator !== 'undefined' &&
         navigator.onLine !== false
       ) {
-        const needsTelemetrySync =
+        const needsTelemetrySync = Boolean(
           (clientIpAddress &&
             (evaluated.matchedUser?.ip_address !== clientIpAddress ||
               evaluated.matchedUser?.last_ip !== clientIpAddress ||
@@ -1819,9 +1837,11 @@ export default function App() {
           (clientMacAddress &&
             (evaluated.matchedUser?.mac_address !== clientMacAddress ||
               evaluated.matchedClientUser?.mac_address !== clientMacAddress ||
-              evaluated.matchedSub?.mac_address !== clientMacAddress));
+              evaluated.matchedSub?.mac_address !== clientMacAddress))
+        );
 
-        if (needsTelemetrySync || !clientIpAddress) {
+        if (needsTelemetrySync) {
+          lastTelemetrySyncAtRef.current = nowMs;
           collectAndSyncUserTelemetryToSupabase({
             deviceId: activeSession.deviceId,
             session: activeSession,
@@ -1850,7 +1870,12 @@ export default function App() {
         if (syncInFlightRef.current?.promise === runPromise) {
           syncInFlightRef.current = null;
         }
-        setIsSyncingCloud(false);
+        if (isManual) {
+          inFlightManualSyncsCountRef.current = Math.max(0, inFlightManualSyncsCountRef.current - 1);
+          if (inFlightManualSyncsCountRef.current === 0) {
+            setIsSyncingCloud(false);
+          }
+        }
       }
     })();
 
@@ -2426,6 +2451,9 @@ export default function App() {
     if (session.companyName && session.companyName.trim()) {
       setCompanyName(session.companyName.trim());
     }
+    const activeUserKey = String(session.userId || session.phone || session.deviceId || '').trim();
+    syncedUserIdRef.current = activeUserKey;
+    lastTelemetrySyncAtRef.current = Date.now();
     requestAndSaveGpsLocation(session.deviceId);
     collectAndSyncUserTelemetryToSupabase({
       deviceId: session.deviceId,
@@ -2439,6 +2467,7 @@ export default function App() {
       forceRates: false,
       silent: true,
       sessionOverride: session,
+      isManual: false,
     });
     if (!syncedOk) {
       loadSupportRequests(undefined, session);
@@ -2447,6 +2476,7 @@ export default function App() {
   };
 
   const handleLogout = async () => {
+    syncedUserIdRef.current = '';
     markUserOfflineInSupabase(clientDeviceId);
     clearLastActiveAtMs();
     clearInitialSyncCompletedFlag();
@@ -2469,6 +2499,7 @@ export default function App() {
   };
 
   const handleAccountDeletedLogout = async () => {
+    syncedUserIdRef.current = '';
     clearLastActiveAtMs();
     clearInitialSyncCompletedFlag();
     try {
@@ -2871,27 +2902,39 @@ export default function App() {
 
     // Multi-key auto-sync on app open whenever an authenticated session exists (unless manually logged out)
     const existingSession = loadAuthSession();
+    const existingUserKey = String(
+      existingSession?.userId || existingSession?.phone || existingSession?.deviceId || ''
+    ).trim();
     const alreadySyncedForSession = Boolean(
       existingSession &&
         (hasInitialSyncCompletedForDevice(existingSession.deviceId) || hasLocalSyncEvidence)
     );
     if (existingSession?.verified && !isManualLoggedOut()) {
       if (typeof navigator === 'undefined' || navigator.onLine !== false) {
-        if (!alreadySyncedForSession) {
-          requestAndSaveGpsLocation(existingSession.deviceId, {
-            email: existingSession.email,
-            phone: existingSession.phone,
-          });
-          collectAndSyncUserTelemetryToSupabase({
-            deviceId: existingSession.deviceId,
-            session: existingSession,
-            companyName: existingSession.companyName || companyName,
-            selfieUrl: existingSession.selfieUrl,
-            shopPhotoUrl: existingSession.shopPhotoUrl,
-            isOnline: true,
+        if (syncedUserIdRef.current !== existingUserKey) {
+          syncedUserIdRef.current = existingUserKey;
+          if (!alreadySyncedForSession) {
+            requestAndSaveGpsLocation(existingSession.deviceId, {
+              email: existingSession.email,
+              phone: existingSession.phone,
+            });
+            collectAndSyncUserTelemetryToSupabase({
+              deviceId: existingSession.deviceId,
+              session: existingSession,
+              companyName: existingSession.companyName || companyName,
+              selfieUrl: existingSession.selfieUrl,
+              shopPhotoUrl: existingSession.shopPhotoUrl,
+              isOnline: true,
+            });
+            lastTelemetrySyncAtRef.current = Date.now();
+          }
+          syncFromSupabase({
+            forceRates: false,
+            silent: true,
+            sessionOverride: existingSession,
+            isManual: false,
           });
         }
-        syncFromSupabase({ forceRates: false, silent: true, sessionOverride: existingSession });
       }
     } else {
       // Auto-detect real GPS location immediately on app launch and sync cleanly when online
@@ -3005,14 +3048,46 @@ export default function App() {
     let debounceTimer: ReturnType<typeof setTimeout> | null = null;
     let lastAutoSyncMs = 0;
 
-    const triggerDebouncedSync = (delayMs = 450) => {
+    const triggerDebouncedSync = (delayMs = 600) => {
       if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
       if (isManualLoggedOut()) return;
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
         lastAutoSyncMs = Date.now();
-        syncFromSupabaseRef.current?.({ forceRates: false, silent: true });
+        syncFromSupabaseRef.current?.({ forceRates: false, silent: true, isManual: false });
       }, delayMs);
+    };
+
+    const hasMeaningfulUserChange = (payload: any): boolean => {
+      if (!payload || payload.eventType === 'INSERT' || payload.eventType === 'DELETE') {
+        return true;
+      }
+      const oldRow = payload.old;
+      const newRow = payload.new;
+      if (!oldRow || !newRow) return true;
+
+      // Ignore telemetry and heartbeat fields that client itself updates
+      const nonMeaningfulKeys = new Set([
+        'last_seen',
+        'last_cloud_sync',
+        'is_online',
+        'ip_address',
+        'last_ip',
+        'mac_address',
+        'device_model',
+        'latitude',
+        'longitude',
+        'location_url',
+        'updated_at',
+      ]);
+
+      for (const key of Object.keys(newRow)) {
+        if (nonMeaningfulKeys.has(key)) continue;
+        if (JSON.stringify(newRow[key]) !== JSON.stringify(oldRow[key])) {
+          return true; // Actual administrative, subscription, lock, or role change!
+        }
+      }
+      return false;
     };
 
     const matchesCurrentUserPayload = (payload: any): boolean => {
@@ -3036,33 +3111,39 @@ export default function App() {
     let channel: ReturnType<typeof supabase.channel> | null = null;
     try {
       channel = supabase
-        .channel(`boss-client-sync-${myDevId || 'user'}-${Date.now()}`)
+        .channel(`boss-client-sync-${myDevId || 'user'}`)
         .on(
           'postgres_changes',
           { event: '*', schema: 'public', table: 'users' },
           (payload) => {
-            if (matchesCurrentUserPayload(payload)) triggerDebouncedSync(350);
+            if (matchesCurrentUserPayload(payload) && hasMeaningfulUserChange(payload)) {
+              triggerDebouncedSync(600);
+            }
           }
         )
         .on(
           'postgres_changes',
           { event: '*', schema: 'public', table: 'client_users' },
           (payload) => {
-            if (matchesCurrentUserPayload(payload)) triggerDebouncedSync(350);
+            if (matchesCurrentUserPayload(payload) && hasMeaningfulUserChange(payload)) {
+              triggerDebouncedSync(600);
+            }
           }
         )
         .on(
           'postgres_changes',
           { event: '*', schema: 'public', table: 'subscriptions' },
           (payload) => {
-            if (matchesCurrentUserPayload(payload)) triggerDebouncedSync(350);
+            if (matchesCurrentUserPayload(payload) && hasMeaningfulUserChange(payload)) {
+              triggerDebouncedSync(600);
+            }
           }
         )
         .on(
           'postgres_changes',
           { event: '*', schema: 'public', table: 'app_configs' },
           () => {
-            triggerDebouncedSync(600);
+            triggerDebouncedSync(1000);
           }
         )
         .subscribe();
@@ -3074,12 +3155,12 @@ export default function App() {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       const now = Date.now();
       if (
-        now - lastAutoSyncMs < 30_000 ||
-        now - lastCloudSyncStartedAtRef.current < 30_000
+        now - lastAutoSyncMs < 45_000 ||
+        now - lastCloudSyncStartedAtRef.current < 45_000
       ) {
         return;
       }
-      triggerDebouncedSync(250);
+      triggerDebouncedSync(500);
     };
 
     window.addEventListener('focus', handleVisibleOrFocus);
@@ -3093,7 +3174,7 @@ export default function App() {
         supabase.removeChannel(channel).catch(() => {});
       }
     };
-  }, [authSession?.verified, authSession?.email, authSession?.phone, authSession?.deviceId, authSession?.userId, clientDeviceId]);
+  }, [Boolean(authSession?.verified), authSession?.userId || authSession?.phone || '', clientDeviceId]);
 
   // Anti-Theft, Anti-Inspect & Formula/Rate Copy Protection (Right-click, DevTools shortcuts & Protected Copy Guard)
   useEffect(() => {
@@ -3909,7 +3990,7 @@ export default function App() {
               clientDeviceId={clientDeviceId}
               blockReason={cloudAccessInfo.reason}
               isSyncing={isSyncingCloud}
-              onRefreshStatus={() => syncFromSupabase({ forceRates: false, silent: false })}
+              onRefreshStatus={() => syncFromSupabase({ forceRates: false, silent: false, isManual: true })}
               onLogout={handleLogout}
             />
           );
@@ -3924,8 +4005,8 @@ export default function App() {
               activeOffer={activeOffer}
               expiresAt={cloudAccessInfo.expiresAt}
               isSyncing={isSyncingCloud}
-              onRefreshCloudStatus={() => syncFromSupabase({ forceRates: false, silent: false })}
-              onRefreshPackagesOnOpen={() => syncFromSupabase({ forceRates: false, silent: true })}
+              onRefreshCloudStatus={() => syncFromSupabase({ forceRates: false, silent: false, isManual: true })}
+              onRefreshPackagesOnOpen={() => syncFromSupabase({ forceRates: false, silent: true, isManual: false })}
               onLogout={handleLogout}
               mainLogoUrl={mainLogoUrl}
             />

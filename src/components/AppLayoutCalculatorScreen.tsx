@@ -275,7 +275,11 @@ interface AppLayoutCalculatorScreenProps {
   authSession?: ClientAuthSession | null;
   onLogout?: () => void;
   onAccountDeletedLogout?: () => void;
-  onSyncFromSupabase?: (options?: { forceRates?: boolean; silent?: boolean }) => Promise<boolean>;
+  onSyncFromSupabase?: (options?: {
+    forceRates?: boolean;
+    silent?: boolean;
+    isManual?: boolean;
+  }) => Promise<boolean>;
   onSyncUserProfileToCloud?: (profilePatch: {
     companyName?: string;
     companyAddress?: string;
@@ -2918,7 +2922,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
             <button
               type="button"
               disabled={isSyncingCloud}
-              onClick={() => onSyncFromSupabase?.({ forceRates: true, silent: false })}
+              onClick={() => onSyncFromSupabase?.({ forceRates: true, silent: false, isManual: true })}
               className="boss-flat-btn h-6 px-2 rounded-full bg-sky-500/15 border border-sky-500/50 text-sky-300 hover:bg-sky-500 hover:text-black flex items-center gap-1 cursor-pointer text-[9px] font-black shrink-0"
               title="Sync / Check Updates from Admin Cloud"
               aria-label="Sync / Check Updates"
@@ -3045,7 +3049,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
           </div>
           <button
             type="button"
-            onClick={() => onSyncFromSupabase?.({ forceRates: false, silent: false })}
+            onClick={() => onSyncFromSupabase?.({ forceRates: false, silent: false, isManual: true })}
             disabled={isSyncingCloud}
             className="boss-flat-btn px-4 py-2 rounded-xl bg-[#F5B738] hover:bg-amber-400 text-black text-xs font-extrabold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
           >
@@ -6855,7 +6859,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   <button
                     type="button"
                     disabled={isSyncingCloud}
-                    onClick={() => onSyncFromSupabase?.({ forceRates: true, silent: false })}
+                    onClick={() => onSyncFromSupabase?.({ forceRates: true, silent: false, isManual: true })}
                     className="boss-flat-btn w-8 h-8 rounded-lg bg-sky-500/20 border border-sky-500/60 text-sky-300 hover:bg-sky-500 hover:text-black flex items-center justify-center cursor-pointer"
                     title={isSyncingCloud ? 'Syncing Updates...' : 'Sync / Check Updates'}
                     aria-label="Sync / Check Updates"

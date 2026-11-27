@@ -85,7 +85,11 @@ interface ClientProfileHubModalProps {
     lastSyncedAt: number | null;
   };
   isSyncingCloud?: boolean;
-  onSyncFromSupabase?: (options?: { forceRates?: boolean; silent?: boolean }) => Promise<boolean>;
+  onSyncFromSupabase?: (options?: {
+    forceRates?: boolean;
+    silent?: boolean;
+    isManual?: boolean;
+  }) => Promise<boolean>;
   // Package & Payments
   packages: SubscriptionPackageConfig[];
   bankAccounts: BankAccountConfig[];
@@ -1071,7 +1075,7 @@ export const ClientProfileHubModal: React.FC<ClientProfileHubModalProps> = ({
               <button
                 type="button"
                 disabled={isSyncingCloud}
-                onClick={() => onSyncFromSupabase({ forceRates: true, silent: false })}
+                onClick={() => onSyncFromSupabase({ forceRates: true, silent: false, isManual: true })}
                 className="boss-flat-btn px-2.5 py-1.5 rounded-lg bg-sky-500/15 border border-sky-500/50 text-sky-300 hover:bg-sky-500 hover:text-black text-[10.5px] font-bold flex items-center gap-1 cursor-pointer"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${isSyncingCloud ? 'animate-spin' : ''}`} />

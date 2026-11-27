@@ -974,7 +974,24 @@ export async function fetchAppConfigsSmart(options?: {
 
     if (!metaRes.ok) {
       if (metaRes.status === 400) {
-        // Older table without updated_at column -> graceful fallback
+        // Older table without updated_at column -> smart cache guard
+        const hasCached = Object.keys(cachedMap).length > 0;
+        const now = Date.now();
+        const checkedRecently =
+          hasCached && now - Number(cachedMeta.lastCheckedAt || 0) < 30_000;
+        if (checkedRecently && !forceRefresh) {
+          if (alwaysIds.length > 0) {
+            return fetchRowsFull(alwaysIds);
+          }
+          return {
+            ok: true,
+            changed: false,
+            fromCache: true,
+            cfgMap: cachedMap,
+            changedIds: [],
+            timestamps: cachedMeta.timestamps,
+          };
+        }
         return fetchRowsFull();
       }
       return {
