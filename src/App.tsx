@@ -860,9 +860,36 @@ export default function App() {
   const [broadcasts, setBroadcasts] = useState<AppOfferBanner[]>([]);
   const [mobileDownloadConfig, setMobileDownloadConfig] = useState<MobileDownloadConfig | null>(null);
   const [packages, setPackages] = useState<SubscriptionPackage[]>(() => getStarterPackages());
-  const [layoutConfig, setLayoutConfig] = useState<ClientAppLayoutControlConfig>(() =>
-    getDefaultLayoutControlConfig()
-  );
+  const [layoutConfig, setLayoutConfig] = useState<ClientAppLayoutControlConfig>(() => {
+    try {
+      const rawUser = localStorage.getItem('boss_user_sheet_adjustments_v1');
+      if (rawUser) {
+        const parsedUser = JSON.parse(rawUser);
+        if (parsedUser && typeof parsedUser === 'object') {
+          return {
+            ...getDefaultLayoutControlConfig(),
+            ...parsedUser,
+          };
+        }
+      }
+      const rawStorage = localStorage.getItem(STORAGE_KEY);
+      if (rawStorage) {
+        const parsedStorage = JSON.parse(rawStorage);
+        if (parsedStorage?.layoutConfig && typeof parsedStorage.layoutConfig === 'object') {
+          return {
+            ...getDefaultLayoutControlConfig(),
+            ...parsedStorage.layoutConfig,
+          };
+        }
+      }
+    } catch {}
+    return getDefaultLayoutControlConfig();
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem('boss_user_sheet_adjustments_v1', JSON.stringify(layoutConfig));
+    } catch {}
+  }, [layoutConfig]);
   const [userLockedTabs, setUserLockedTabs] = useState<Record<string, boolean>>(() => {
     try {
       const rawUl = localStorage.getItem(USER_LOCKED_TABS_KEY);
@@ -1511,6 +1538,16 @@ export default function App() {
         setLayoutConfig((prev) => ({
           ...prev,
           ...incomingLayout,
+          topHeaderOffset: prev.topHeaderOffset,
+          backgroundDarkness: prev.backgroundDarkness,
+          watermarkOpacity: prev.watermarkOpacity,
+          letterheadOpacity: prev.letterheadOpacity,
+          innerFrameMargin: prev.innerFrameMargin,
+          contentRowSpacing: prev.contentRowSpacing,
+          headerStyle: prev.headerStyle,
+          showLetterheadBackground: prev.showLetterheadBackground,
+          backgroundFitStyle: prev.backgroundFitStyle,
+          keepFullLetterheadProportions: prev.keepFullLetterheadProportions,
           enabledTabs: {
             ...(prev.enabledTabs || {}),
             ...(incomingLayout.enabledTabs || {}),
@@ -3048,18 +3085,10 @@ export default function App() {
     window.addEventListener('focus', handleVisibleOrFocus);
     document.addEventListener('visibilitychange', handleVisibleOrFocus);
 
-    const pollInterval = setInterval(() => {
-      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
-      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
-      lastAutoSyncMs = Date.now();
-      syncFromSupabaseRef.current?.({ forceRates: false, silent: true });
-    }, 60_000);
-
     return () => {
       if (debounceTimer) clearTimeout(debounceTimer);
       window.removeEventListener('focus', handleVisibleOrFocus);
       document.removeEventListener('visibilitychange', handleVisibleOrFocus);
-      clearInterval(pollInterval);
       if (channel) {
         supabase.removeChannel(channel).catch(() => {});
       }

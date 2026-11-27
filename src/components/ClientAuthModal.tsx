@@ -5231,17 +5231,6 @@ export const ClientAuthModal: React.FC<ClientAuthModalProps> = ({
                       <strong>{biometricBinding.userName}</strong> ({biometricBinding.identifier})
                     </span>
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      clearBiometricBinding();
-                      setBiometricBinding(null);
-                      setPinModalState(null);
-                    }}
-                    className="text-[10px] font-bold text-amber-300 hover:underline shrink-0 cursor-pointer"
-                  >
-                    Reset
-                  </button>
                 </div>
               )}
 
