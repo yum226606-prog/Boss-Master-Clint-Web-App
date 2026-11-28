@@ -104,7 +104,7 @@ app.post('/api/scan-rate-list', async (req: Request, res: Response) => {
         parts.push({ text: promptText });
 
         const modelRes = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
+          model: 'gemini-3.8-flash',
           contents: parts,
           config: {
             responseMimeType: 'application/json',
