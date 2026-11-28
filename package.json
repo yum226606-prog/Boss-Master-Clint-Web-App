@@ -11,6 +11,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@aparajita/capacitor-biometric-auth": "^10.0.0",
     "@bcyesil/capacitor-plugin-printer": "^0.0.6",
     "@capacitor/app": "^8.1.2",
     "@capacitor/browser": "^8.0.5",

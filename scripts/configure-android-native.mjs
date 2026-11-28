@@ -31,6 +31,8 @@ const requiredPermissions = [
   '<uses-permission android:name="android.permission.CAMERA" />',
   '<uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />',
   '<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />',
+  '<uses-permission android:name="android.permission.USE_BIOMETRIC" />',
+  '<uses-permission android:name="android.permission.USE_FINGERPRINT" />',
   '<uses-feature android:name="android.hardware.camera" android:required="false" />',
   '<uses-feature android:name="android.hardware.location.gps" android:required="false" />',
 ];
@@ -43,6 +45,8 @@ const permNamesToCheck = [
   'android.permission.CAMERA',
   'android.permission.READ_MEDIA_IMAGES',
   'android.permission.READ_EXTERNAL_STORAGE',
+  'android.permission.USE_BIOMETRIC',
+  'android.permission.USE_FINGERPRINT',
   'android.hardware.camera',
   'android.hardware.location.gps',
 ];

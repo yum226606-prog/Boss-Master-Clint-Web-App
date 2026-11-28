@@ -6,6 +6,8 @@ import {
   SmsOtpGatewayConfig,
   supabase,
 } from './supabaseClientConfig';
+import { BiometricAuth, BiometryErrorType } from '@aparajita/capacitor-biometric-auth';
+import { Capacitor } from '@capacitor/core';
 
 export const ADMIN_SERVER_PRIMARY =
   'https://ais-pre-72tiaznwblmandwk4bf3zz-734807725133.asia-southeast1.run.app';
@@ -2789,6 +2791,33 @@ export async function enrollBiometricPasskey(params: {
   cancelled?: boolean;
   error?: string;
 }> {
+  if (Capacitor.isNativePlatform()) {
+    try {
+      const check = await BiometricAuth.checkBiometry();
+      if (check.isAvailable) {
+        await BiometricAuth.authenticate({
+          reason: 'Verify your identity to enable Fingerprint unlock for BOSS Aluminium',
+          allowDeviceCredential: true,
+        });
+        return {
+          ok: true,
+          credentialId: `NATIVE-BIO-${generateSafeUUID()}`,
+          mode: 'WEBAUTHN',
+        };
+      } else {
+        try {
+          await (BiometricAuth as any).openSettings?.();
+        } catch {}
+      }
+    } catch (err: any) {
+      if (err?.code === BiometryErrorType.biometryNotEnrolled) {
+        try {
+          await (BiometricAuth as any).openSettings?.();
+        } catch {}
+      }
+    }
+  }
+
   const platformOk = await isPlatformWebAuthnAvailable();
   if (platformOk) {
     const startedAt = Date.now();
@@ -2905,6 +2934,30 @@ export async function verifyBiometricPasskey(
       error:
         'Biometric / Fingerprint is device par linked nahi hai. Pehle Password se Verify & Enable karein.',
     };
+  }
+
+  if (Capacitor.isNativePlatform() && !targetCred.startsWith('PIN-') && saved?.mode !== 'PIN') {
+    try {
+      await BiometricAuth.authenticate({
+        reason: 'Verify your identity to unlock BOSS Aluminium',
+        allowDeviceCredential: true,
+      });
+      return { ok: true, mode: 'WEBAUTHN' };
+    } catch (err: any) {
+      if (err?.code === BiometryErrorType.userCancel || err?.code === BiometryErrorType.appCancel) {
+        return { ok: false, cancelled: true, mode: 'WEBAUTHN', error: 'Biometric prompt cancel kar diya gaya.' };
+      }
+      if (err?.code === BiometryErrorType.biometryNotEnrolled) {
+        try {
+          await (BiometricAuth as any).openSettings?.();
+        } catch {}
+        return {
+          ok: false,
+          mode: 'WEBAUTHN',
+          error: 'Device par Fingerprint / Lock enrolled nahi hai. Settings kholi gayi hain.',
+        };
+      }
+    }
   }
 
   // Legacy zero-prompt DEVICE_KEY bindings are rejected cleanly (security hardening)
