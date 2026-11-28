@@ -22,7 +22,7 @@ import {
   WindowFormulaSettings,
   WindowItem,
 } from '../types/bossModels';
-import { MASTER_PASSCODES, normalizeSectionCode } from './bossDefaultRates';
+import { MASTER_PASSCODES, normalizeGauge, normalizeSectionCode } from './bossDefaultRates';
 
 export const ELEVEN_FT_IN = 132.0; // 11 ft
 export const BAR_EXTRA_IN = 1.0; // 1 inch extra stock margin
@@ -113,9 +113,9 @@ export function pricingGaugeForSection(section: string, fallbackGauge: string): 
     k === 'DG29' ||
     k === 'DG31'
   ) {
-    return '1.2';
+    return '1.2mm';
   }
-  return fallbackGauge && fallbackGauge.trim() ? fallbackGauge.trim() : '1.2';
+  return fallbackGauge && fallbackGauge.trim() ? normalizeGauge(fallbackGauge) : '1.2mm';
 }
 
 export function formatDim(inches: number, unit: MeasurementUnit = 'INCH_SUTAR'): string {
@@ -299,7 +299,7 @@ export function computeSlidingWindowPieces(
   const q = Math.max(1, w.qty);
   const pieces: CutPiece[] = [];
   const src = 'Window';
-  const g = w.sectionGauge;
+  const g = normalizeGauge(w.sectionGauge || '1.6mm');
 
   const isPair = ft.includes('/');
   const topSec = isPair ? ft.split('/')[0].trim() : isCustom ? ft : `DC30${c}`;
@@ -490,17 +490,17 @@ export function computeSlidingWindowPieces(
   const jaliWLabel = w.lockType === 'PUSH_HANDLE' ? 'Jali width (D29) [Push Handle]' : 'Jali width (D29)';
 
   if (d29HPcs > 0) {
-    pieces.push({ section: 'D29', length: jaliH, qty: d29HPcs * q, source: src, label: 'Jali height (D29)', gauge: '1.2' });
+    pieces.push({ section: 'D29', length: jaliH, qty: d29HPcs * q, source: src, label: 'Jali height (D29)', gauge: '1.2mm' });
   }
   if (d29WPcs > 0) {
-    pieces.push({ section: 'D29', length: jaliW, qty: d29WPcs * q, source: src, label: jaliWLabel, gauge: '1.2' });
+    pieces.push({ section: 'D29', length: jaliW, qty: d29WPcs * q, source: src, label: jaliWLabel, gauge: '1.2mm' });
   }
 
   // D31 Interlock for 4-Palay
   if (panels === 4) {
     const d31Ded = dimToInches(formula.d31HeightDeduction4 ?? { inch: 0, sutar: 0 });
     const d31H = Math.max(0, h - d31Ded);
-    pieces.push({ section: 'D31', length: d31H, qty: 1 * q, source: src, label: 'D31 Height (4-Palay)', gauge: '1.2' });
+    pieces.push({ section: 'D31', length: d31H, qty: 1 * q, source: src, label: 'D31 Height (4-Palay)', gauge: '1.2mm' });
   }
 
   // Evaluate any custom per-section Height & Width formula boxes added in Window Formulas (skipping core sliding sections already added above)
@@ -580,7 +580,7 @@ export function computeDgWindowPieces(
   const h = w.height;
   const width = w.width;
   const q = Math.max(1, w.qty);
-  const g = w.sectionGauge || '1.6';
+  const g = normalizeGauge(w.sectionGauge || '1.6mm');
   const src = 'DG.Window';
   const pieces: CutPiece[] = [];
 
@@ -770,7 +770,7 @@ export function computeDgWindowPieces(
       qty: dg29HPcs * q,
       source: src,
       label: 'Jali height (DG.29)',
-      gauge: '1.2',
+      gauge: '1.2mm',
     });
   }
   if (dg29WPcs > 0) {
@@ -780,7 +780,7 @@ export function computeDgWindowPieces(
       qty: dg29WPcs * q,
       source: src,
       label: w.lockType === 'PUSH_HANDLE' ? 'Jali width (DG.29) [Push Handle]' : 'Jali width (DG.29)',
-      gauge: '1.2',
+      gauge: '1.2mm',
     });
   }
 
@@ -793,7 +793,7 @@ export function computeDgWindowPieces(
       qty: 1 * q,
       source: src,
       label: 'DG.31 Height (4-Palay)',
-      gauge: '1.2',
+      gauge: '1.2mm',
     });
   }
 
@@ -962,7 +962,7 @@ export function computeSlidingDoorPieces(
   const q = Math.max(1, it.qty);
   const pieces: CutPiece[] = [];
   const src = 'Sliding Door';
-  const g = it.sectionGauge || '1.6';
+  const g = normalizeGauge(it.sectionGauge || '1.6mm');
 
   if (isF && fFormula.enabled) {
     const hLen = calcFHeight(fFormula, h);
@@ -1059,16 +1059,16 @@ export function computeSlidingDoorPieces(
     }
     const jaliWLabel = it.lockType === 'PUSH_HANDLE' ? 'Jali width (D29) [Push Handle]' : 'Jali width (D29)';
     if (d29HPcs > 0) {
-      pieces.push({ section: 'D29', length: jaliH, qty: d29HPcs * q, source: src, label: 'Jali height (D29)', gauge: '1.2' });
+      pieces.push({ section: 'D29', length: jaliH, qty: d29HPcs * q, source: src, label: 'Jali height (D29)', gauge: '1.2mm' });
     }
     if (d29WPcs > 0) {
-      pieces.push({ section: 'D29', length: jaliW, qty: d29WPcs * q, source: src, label: jaliWLabel, gauge: '1.2' });
+      pieces.push({ section: 'D29', length: jaliW, qty: d29WPcs * q, source: src, label: jaliWLabel, gauge: '1.2mm' });
     }
   }
 
   if (panels === 4) {
     const d31Ded = dimToInches(formula.d31HeightDeduction4 ?? { inch: 0, sutar: 0 });
-    pieces.push({ section: 'D31', length: Math.max(0, h - d31Ded), qty: 1 * q, source: src, label: 'D31 Height (4-Palay)', gauge: '1.2' });
+    pieces.push({ section: 'D31', length: Math.max(0, h - d31Ded), qty: 1 * q, source: src, label: 'D31 Height (4-Palay)', gauge: '1.2mm' });
   }
 
   // Evaluate any custom per-section Height & Width formula boxes added in Sliding Door Formulas (skipping core sliding sections already added above)

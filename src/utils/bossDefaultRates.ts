@@ -24,57 +24,23 @@ export const THREE_MONTH_FEE = 8000;
 export const SECURITY_MASTER_PIN = '';
 export const MASTER_PASSCODES = ['BOSS2796', 'SABOOR2796'];
 
-export const GAUGES = [
-  '1.2',
-  '1.4',
-  '1.5',
-  '1.6',
-  '2',
-  '2.5',
-  '2.75',
-  '2.85',
-  '3',
-  '3.2',
-  '3.5',
-  '3.8',
-  '4',
-  '6',
-  'Std',
-];
+export const OFFICIAL_GAUGES = ['1.2mm', '1.6mm', '2mm', '3mm', '6mm'] as const;
+export type OfficialGauge = (typeof OFFICIAL_GAUGES)[number];
 
-// Default finish colors ensuring H.23, BLACK, BROWN, SAHARA, PC-RAL, WOOD COAT, ANODIZED, CHAMPAGNE are always available
-export const REQUIRED_DEFAULT_FINISH_COLORS = [
-  'DULL',
-  'H.23',
-  'BLACK',
-  'BROWN',
-  'SAHARA',
-  'PC-RAL',
-  'WOOD COAT',
-  'ANODIZED',
-  'CHAMPAGNE',
-];
+export const GAUGES: string[] = [...OFFICIAL_GAUGES];
 
-// Supports both required defaults, legacy grouped colors, and individual fixed colors from the Industrial Rate Scanner
-export const DEFAULT_COLORS = [
+export const OFFICIAL_COLORS = [
   'DULL',
-  'H.23',
+  'H-23 / RAL/PC',
+  'SAHARA / BROWN',
   'BLACK',
-  'BROWN',
-  'SAHARA',
-  'PC-RAL',
-  'WOOD COAT',
-  'ANODIZED',
-  'CHAMPAGNE',
-  'H23',
-  'H23/PC-RAL',
-  'SAHARA/BROWN',
-  'BLACK/MULTI',
-  'MULTI',
-  'NATURAL',
-  'D.SHINE',
-  'SS DESIGNER',
-];
+  'ALU WOOD',
+] as const;
+export type OfficialColor = (typeof OFFICIAL_COLORS)[number];
+
+export const REQUIRED_DEFAULT_FINISH_COLORS: string[] = [...OFFICIAL_COLORS];
+
+export const DEFAULT_COLORS: string[] = [...OFFICIAL_COLORS];
 
 export const INDUSTRIAL_FIXED_CATEGORIES = [
   'CURTAIN WALL SECTIONS',
@@ -99,20 +65,7 @@ export const INDUSTRIAL_FIXED_CATEGORIES = [
   'VALIDATED SERIES PROFILES / PN SERIES / BF SERIES / WAW PROFILES',
 ];
 
-export const INDUSTRIAL_FIXED_COLORS = [
-  'DULL',
-  'H23',
-  'PC-RAL',
-  'SAHARA',
-  'BROWN',
-  'BLACK',
-  'MULTI',
-  'WOOD COAT',
-  'NATURAL',
-  'D.SHINE',
-  'SS DESIGNER',
-  'ANODIZED',
-];
+export const INDUSTRIAL_FIXED_COLORS: string[] = [...OFFICIAL_COLORS];
 
 export const DEFAULT_GLASS_COLORS_5MM = ['CLEAR', 'GREEN', 'BLUE', 'BRONZE', 'GREY', 'REFLECTIVE'];
 export const DEFAULT_GLASS_COLORS_8MM = ['CLEAR', 'GREEN', 'BLUE', 'BRONZE', 'GREY', 'FROSTED'];
@@ -219,11 +172,145 @@ export const SECTION_LABELS: Record<string, string> = {
   Z2: 'Netting Section 2 (Z-2)',
 };
 
-export function normalizeSectionCode(code: string | number | null | undefined): string {
+export function stripTrailingGaugeFromSectionCode(
+  code: string | number | null | undefined
+): string {
   return String(code ?? '')
+    .trim()
+    .replace(/\s+(?:1\.2|1\.4|1\.5|1\.6|2\.0|2|3\.0|3|6\.0|6)\s*(?:M{1,4})?$/i, '')
+    .replace(/(?:1\.2|1\.6|2\.0|3\.0|6\.0)\s*(?:MM|M)$/i, '')
+    .trim();
+}
+
+export function normalizeSectionCode(code: string | number | null | undefined): string {
+  return stripTrailingGaugeFromSectionCode(code)
     .replace(/[\s.\-_]+/g, '')
     .trim()
     .toUpperCase();
+}
+
+export function normalizeGauge(raw: string | number | null | undefined): OfficialGauge {
+  const s = String(raw ?? '')
+    .trim()
+    .toUpperCase()
+    .replace(/M+$/g, '')
+    .trim();
+  if (!s || s === 'STD' || s === 'NORMAL' || s === 'EC.NORMAL') return '1.2mm';
+  const numMatch = s.match(/(\d+(?:\.\d+)?)/);
+  if (!numMatch) return '1.2mm';
+  const val = parseFloat(numMatch[1]);
+  if (Number.isNaN(val)) return '1.2mm';
+  if (Math.abs(val - 1.2) < 0.08) return '1.2mm';
+  if (Math.abs(val - 1.6) < 0.08) return '1.6mm';
+  if (Math.abs(val - 2.0) < 0.15) return '2mm';
+  if (Math.abs(val - 3.0) < 0.25) return '3mm';
+  if (Math.abs(val - 6.0) < 0.5) return '6mm';
+  if (val < 1.45) return '1.2mm';
+  if (val < 1.85) return '1.6mm';
+  if (val < 2.55) return '2mm';
+  if (val < 4.5) return '3mm';
+  return '6mm';
+}
+
+export function formatGaugeLabel(raw: string | number | null | undefined): OfficialGauge {
+  return normalizeGauge(raw);
+}
+
+const COLOR_MAP_EXACT: Record<string, OfficialColor> = {
+  DULL: 'DULL',
+  DUL: 'DULL',
+  NATURAL: 'DULL',
+  ANODIZED: 'DULL',
+  MILL: 'DULL',
+  'MILL FINISH': 'DULL',
+  SILVER: 'DULL',
+  'H-23 / RAL/PC': 'H-23 / RAL/PC',
+  'H-23/RAL/PC': 'H-23 / RAL/PC',
+  'H23 / RAL/PC': 'H-23 / RAL/PC',
+  'H23/RAL/PC': 'H-23 / RAL/PC',
+  'H.23': 'H-23 / RAL/PC',
+  H23: 'H-23 / RAL/PC',
+  'H-23': 'H-23 / RAL/PC',
+  'PC-RAL': 'H-23 / RAL/PC',
+  PCRAL: 'H-23 / RAL/PC',
+  'PC / RAL': 'H-23 / RAL/PC',
+  'RAL P.C': 'H-23 / RAL/PC',
+  'RAL.PC': 'H-23 / RAL/PC',
+  'RAL PC': 'H-23 / RAL/PC',
+  RAL: 'H-23 / RAL/PC',
+  'H23/PC-RAL': 'H-23 / RAL/PC',
+  'H23-PC/RAL': 'H-23 / RAL/PC',
+  'H23 / PC-RAL': 'H-23 / RAL/PC',
+  'H.23 / PC-RAL': 'H-23 / RAL/PC',
+  CHAMPAGNE: 'H-23 / RAL/PC',
+  'D.SHINE': 'H-23 / RAL/PC',
+  DSHINE: 'H-23 / RAL/PC',
+  'SAHARA / BROWN': 'SAHARA / BROWN',
+  'SAHARA/BROWN': 'SAHARA / BROWN',
+  'SAHARA BROWN': 'SAHARA / BROWN',
+  SAHARA: 'SAHARA / BROWN',
+  SHARA: 'SAHARA / BROWN',
+  SHR: 'SAHARA / BROWN',
+  BROWN: 'SAHARA / BROWN',
+  BRO: 'SAHARA / BROWN',
+  BRN: 'SAHARA / BROWN',
+  BRONZE: 'SAHARA / BROWN',
+  BLACK: 'BLACK',
+  BLK: 'BLACK',
+  BLAK: 'BLACK',
+  'BLACK/MULTI': 'BLACK',
+  'BLACK / MULTI': 'BLACK',
+  MULTI: 'BLACK',
+  'SS DESIGNER': 'BLACK',
+  'ALU WOOD': 'ALU WOOD',
+  ALUWOOD: 'ALU WOOD',
+  'ALU-WOOD': 'ALU WOOD',
+  'ALU / WOOD': 'ALU WOOD',
+  'WOOD COAT': 'ALU WOOD',
+  WOODCOAT: 'ALU WOOD',
+  WOOD: 'ALU WOOD',
+  WOODEN: 'ALU WOOD',
+  WOODGRAIN: 'ALU WOOD',
+};
+
+export function normalizeOfficialColor(raw: string | number | null | undefined): OfficialColor {
+  const clean = String(raw ?? '')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, ' ');
+  if (!clean) return 'DULL';
+  if (COLOR_MAP_EXACT[clean]) return COLOR_MAP_EXACT[clean];
+  const compact = clean.replace(/[\s./_-]+/g, '');
+  if (compact.includes('WOOD')) return 'ALU WOOD';
+  if (compact.includes('SAHARA') || compact.includes('SHARA') || compact.includes('BROWN') || compact === 'BRN' || compact === 'BRO') {
+    return 'SAHARA / BROWN';
+  }
+  if (compact.includes('H23') || compact.includes('PCRAL') || compact.includes('RAL') || compact.includes('CHAMPAGNE') || compact.includes('SHINE')) {
+    return 'H-23 / RAL/PC';
+  }
+  if (compact.includes('BLACK') || compact.includes('MULTI') || compact === 'BLK' || compact === 'BLAK') {
+    return 'BLACK';
+  }
+  return 'DULL';
+}
+
+export function extractEffectiveDateFromConfigs(...sources: any[]): string {
+  for (const src of sources) {
+    if (!src || typeof src !== 'object') continue;
+    const candidate =
+      src.rateListEffectiveDate ??
+      src.effectiveDate ??
+      src.effective_date ??
+      src.rateEffectiveDate ??
+      src.effectiveFrom ??
+      src.rateListDate ??
+      src.meta?.effectiveDate ??
+      src.pricingMeta?.effectiveDate;
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return '';
 }
 
 export function isSectionCodeMatch(
@@ -264,15 +351,18 @@ export function findMatchingSectionRate(
   section: string
 ): number | undefined {
   if (!sectionMap || !section) return undefined;
-  if (typeof sectionMap[section] === 'number' && !Number.isNaN(sectionMap[section])) {
+  if (typeof sectionMap[section] === 'number' && !Number.isNaN(sectionMap[section]) && sectionMap[section] > 0) {
     return sectionMap[section];
   }
   const trimmedUp = section.trim().toUpperCase();
-  if (typeof sectionMap[trimmedUp] === 'number' && !Number.isNaN(sectionMap[trimmedUp])) {
+  if (typeof sectionMap[trimmedUp] === 'number' && !Number.isNaN(sectionMap[trimmedUp]) && sectionMap[trimmedUp] > 0) {
     return sectionMap[trimmedUp];
   }
   const targetNorm = normalizeSectionCode(section);
   if (!targetNorm) return undefined;
+  if (typeof sectionMap[targetNorm] === 'number' && !Number.isNaN(sectionMap[targetNorm]) && sectionMap[targetNorm] > 0) {
+    return sectionMap[targetNorm];
+  }
 
   let zeroMatch: number | undefined = undefined;
   for (const [rateListCode, val] of Object.entries(sectionMap)) {
@@ -285,13 +375,88 @@ export function findMatchingSectionRate(
   return zeroMatch;
 }
 
+const NON_OFFICIAL_INTERMEDIATE_GAUGE_KEYS = new Set([
+  '1.4',
+  '1.4MM',
+  '1.5',
+  '1.5MM',
+  '2.5',
+  '2.5MM',
+  '2.75',
+  '2.75MM',
+  '2.85',
+  '2.85MM',
+  '3.2',
+  '3.2MM',
+  '3.5',
+  '3.5MM',
+  '3.8',
+  '3.8MM',
+  '4',
+  '4MM',
+  'STD',
+]);
+
+export function normalizeRatesMatrix(
+  rawRates: Record<string, Record<string, Record<string, number>>> | null | undefined
+): Record<string, Record<string, Record<string, number>>> {
+  const out: Record<string, Record<string, Record<string, number>>> = {};
+  OFFICIAL_GAUGES.forEach((g) => {
+    out[g] = {};
+    OFFICIAL_COLORS.forEach((c) => {
+      out[g][c] = {};
+    });
+  });
+
+  if (!rawRates || typeof rawRates !== 'object') return out;
+
+  // Prefer canonical color names over legacy aliases if both exist in the incoming gauge bucket
+  const colorPriority = (colKey: string): number => {
+    const clean = colKey.trim().toUpperCase();
+    if ((OFFICIAL_COLORS as readonly string[]).includes(clean)) return 3;
+    if (clean === 'H23/PC-RAL' || clean === 'SAHARA/BROWN' || clean === 'WOOD COAT') return 2;
+    return 1;
+  };
+
+  Object.entries(rawRates).forEach(([rawGaugeKey, colMap]) => {
+    if (!colMap || typeof colMap !== 'object') return;
+    const rawGaugeUpper = String(rawGaugeKey || '').trim().toUpperCase().replace(/\s+/g, '');
+    if (NON_OFFICIAL_INTERMEDIATE_GAUGE_KEYS.has(rawGaugeUpper)) {
+      return;
+    }
+    const normG = normalizeGauge(rawGaugeKey);
+    const sortedColors = Object.entries(colMap).sort(
+      ([a], [b]) => colorPriority(a) - colorPriority(b)
+    );
+    sortedColors.forEach(([rawColKey, secMap]) => {
+      if (!secMap || typeof secMap !== 'object') return;
+      const normCol = normalizeOfficialColor(rawColKey);
+      Object.entries(secMap).forEach(([rawSec, rawVal]) => {
+        const num = Number(rawVal);
+        if (!Number.isFinite(num) || num <= 0) return;
+        const normSec = normalizeSectionCode(rawSec);
+        if (!normSec) return;
+        out[normG][normCol][normSec] = Math.round(num);
+      });
+    });
+  });
+
+  return out;
+}
+
 export function getInitialRates(): Record<string, Record<string, Record<string, number>>> {
   const root: Record<string, Record<string, Record<string, number>>> = {};
+  OFFICIAL_GAUGES.forEach((g) => {
+    root[g] = {};
+    OFFICIAL_COLORS.forEach((c) => {
+      root[g][c] = {};
+    });
+  });
 
-  const setRate = (gauge: string, color: string, section: string, rate: number) => {
-    if (!root[gauge]) root[gauge] = {};
-    if (!root[gauge][color]) root[gauge][color] = {};
-    root[gauge][color][section] = rate;
+  const setRate = (gauge: OfficialGauge, color: OfficialColor, section: string, rate: number) => {
+    const normSec = normalizeSectionCode(section);
+    if (!normSec || !(rate > 0)) return;
+    root[gauge][color][normSec] = Math.round(rate);
   };
 
   const base12Rates: Record<string, number> = {
@@ -318,49 +483,31 @@ export function getInitialRates(): Record<string, Record<string, Record<string, 
     L39: 221, Z1: 294, Z2: 339,
   };
 
-  const colorMultipliers: Record<string, number> = {
+  const colorMultipliers: Record<OfficialColor, number> = {
     DULL: 1.0,
-    'H23/PC-RAL': 1.05,
-    'H.23': 1.05,
-    H23: 1.05,
-    'PC-RAL': 1.05,
-    'SAHARA/BROWN': 1.07,
-    SAHARA: 1.07,
-    BROWN: 1.07,
-    'BLACK/MULTI': 1.12,
+    'H-23 / RAL/PC': 1.05,
+    'SAHARA / BROWN': 1.07,
     BLACK: 1.12,
-    MULTI: 1.12,
-    'WOOD COAT': 1.25,
-    NATURAL: 1.0,
-    'D.SHINE': 1.1,
-    'SS DESIGNER': 1.18,
-    ANODIZED: 1.06,
-    CHAMPAGNE: 1.08,
+    'ALU WOOD': 1.25,
   };
 
-  GAUGES.forEach((g) => {
-    const gaugeMultiplier =
-      g === '1.4'
-        ? 1.15
-        : g === '1.5'
-        ? 1.21
-        : g === '1.6'
-        ? 1.28
-        : g === '2'
-        ? 1.55
-        : g === '2.5'
-        ? 1.85
-        : g === '3'
-        ? 2.15
-        : g === '3.5'
-        ? 2.45
-        : g === '4'
-        ? 2.8
-        : 1.0;
+  // Populate clean standard defaults for 1.2mm, 1.6mm, and 2mm only (keep 3mm and 6mm strictly isolated until scanned/synced)
+  const seededGauges: { gauge: OfficialGauge; mult: number }[] = [
+    { gauge: '1.2mm', mult: 1.0 },
+    { gauge: '1.6mm', mult: 1.28 },
+    { gauge: '2mm', mult: 1.55 },
+  ];
 
-    DEFAULT_COLORS.forEach((c) => {
+  const cleanDefaultSecs = Array.from(
+    new Set(
+      DEFAULT_SECTIONS.map((s) => normalizeSectionCode(s)).filter(Boolean)
+    )
+  );
+
+  seededGauges.forEach(({ gauge, mult }) => {
+    OFFICIAL_COLORS.forEach((c) => {
       const cm = colorMultipliers[c] ?? 1.0;
-      DEFAULT_SECTIONS.forEach((sec) => {
+      cleanDefaultSecs.forEach((sec) => {
         const fallbackBase =
           sec.startsWith('CW') || sec.startsWith('SG')
             ? 820
@@ -374,12 +521,12 @@ export function getInitialRates(): Record<string, Record<string, Record<string, 
             ? 510
             : 380;
         const baseRate = base12Rates[sec] ?? fallbackBase;
-        setRate(g, c, sec, Math.round(baseRate * cm * gaugeMultiplier));
+        setRate(gauge, c, sec, Math.round(baseRate * cm * mult));
       });
     });
   });
 
-  // Specific adjustments for 1.6mm DULL from Android App
+  // Specific adjustments for 1.6mm DULL from official rate sheet
   const exact16Dull: Record<string, number> = {
     DC30C: 815, DC26C: 955, DC30F: 909, DC26F: 1047,
     M23: 443, M24: 495, M28: 532, D29: 351,
@@ -387,7 +534,7 @@ export function getInitialRates(): Record<string, Record<string, Record<string, 
     D59A: 674, D46: 1085,
   };
   Object.entries(exact16Dull).forEach(([sec, rate]) => {
-    setRate('1.6', 'DULL', sec, rate);
+    setRate('1.6mm', 'DULL', sec, rate);
   });
 
   return mergeDgSeriesRates(root);
@@ -410,105 +557,51 @@ export interface DgScannedRateItem {
 
 // Ground truth extracted directly from User Scanned Official DG.SERIES Rate Sheet (Effected from 03-April)
 export const DG_SERIES_SCANNED_RATES: DgScannedRateItem[] = [
-  { sec: 'DG.26F', fullCode: 'DG.26F 1.6M', gauge: '1.6', rates: { DULL: 1231, BROWN: 1319, H23: 1233, 'PC-RAL': 1233, BLACK: 1381, SAHARA: 1319, 'WOOD COAT': 1541 } },
-  { sec: 'DG.26F', fullCode: 'DG.26F 2MM', gauge: '2', rates: { DULL: 1482, BROWN: 1588, H23: 1484, 'PC-RAL': 1484, BLACK: 1662, SAHARA: 1588, 'WOOD COAT': 1855 } },
-  { sec: 'DG.26', fullCode: 'DG.26', gauge: '1.2', rates: { DULL: 865, BROWN: 928, H23: 867, 'PC-RAL': 867, BLACK: 971, SAHARA: 928, 'WOOD COAT': 1084 } },
-  { sec: 'DG.23', fullCode: 'DG.23', gauge: '1.2', rates: { DULL: 511, BROWN: 549, H23: 513, 'PC-RAL': 513, BLACK: 575, SAHARA: 549, 'WOOD COAT': 641 } },
-  { sec: 'DG.28', fullCode: 'DG.28', gauge: '1.2', rates: { DULL: 220, BROWN: 238, H23: 222, 'PC-RAL': 222, BLACK: 249, SAHARA: 238, 'WOOD COAT': 278 } },
-  { sec: 'DG.24A', fullCode: 'DG.24A', gauge: '1.2', rates: { DULL: 406, BROWN: 429, H23: 408, 'PC-RAL': 408, BLACK: 470, SAHARA: 429, 'WOOD COAT': 503 } },
-  { sec: 'DG.25', fullCode: 'DG.25', gauge: '1.2', rates: { DULL: 181, BROWN: 202, H23: 185, 'PC-RAL': 185, BLACK: 221, SAHARA: 202, 'WOOD COAT': 250 } },
-  { sec: 'DG.23A', fullCode: 'DG.23A', gauge: '1.2', rates: { DULL: 570, BROWN: 612, H23: 572, 'PC-RAL': 572, BLACK: 641, SAHARA: 612, 'WOOD COAT': 715 } },
-  { sec: 'DG.29', fullCode: 'DG.29', gauge: '1.2', rates: { DULL: 351, BROWN: 377, H23: 352, 'PC-RAL': 352, BLACK: 394, SAHARA: 377, 'WOOD COAT': 440 } },
-  { sec: 'DG.29', fullCode: 'DG.29 2MM', gauge: '2', rates: { DULL: 568, BROWN: 605, H23: 571, 'PC-RAL': 571, BLACK: 635, SAHARA: 605, 'WOOD COAT': 710 } },
-  { sec: 'DG.26', fullCode: 'DG.26 2MM', gauge: '2', rates: { DULL: 1349, BROWN: 1446, H23: 1351, 'PC-RAL': 1351, BLACK: 1513, SAHARA: 1446, 'WOOD COAT': 1689 } },
-  { sec: 'DG.23', fullCode: 'DG.23 2MM', gauge: '2', rates: { DULL: 757, BROWN: 812, H23: 759, 'PC-RAL': 759, BLACK: 850, SAHARA: 812, 'WOOD COAT': 949 } },
-  { sec: 'DG.23A', fullCode: 'DG.23A 2MM', gauge: '2', rates: { DULL: 819, BROWN: 878, H23: 821, 'PC-RAL': 821, BLACK: 920, SAHARA: 878, 'WOOD COAT': 1026 } },
-  { sec: 'GSPR.1', fullCode: 'GSPR.1 1.6M', gauge: '1.6', rates: { DULL: 1285, BROWN: 1377, H23: 1287, 'PC-RAL': 1287, BLACK: 1441, SAHARA: 1377, 'WOOD COAT': 1609 } },
-  { sec: 'GSPR.1', fullCode: 'GSPR.1 2MM', gauge: '2', rates: { DULL: 1560, BROWN: 1671, H23: 1562, 'PC-RAL': 1562, BLACK: 1749, SAHARA: 1671, 'WOOD COAT': 1953 } },
-  { sec: 'GSPR.16', fullCode: 'GSPR.16 1.6M', gauge: '1.6', rates: { DULL: 805, BROWN: 864, H23: 808, 'PC-RAL': 808, BLACK: 909, SAHARA: 864, 'WOOD COAT': 1017 } },
-  { sec: 'DG.26', fullCode: 'DG.26 1.6MM', gauge: '1.6', rates: { DULL: 1118, BROWN: 1198, H23: 1120, 'PC-RAL': 1120, BLACK: 1254, SAHARA: 1198, 'WOOD COAT': 1400 } },
-  { sec: 'DG.23L', fullCode: 'DG.23L 1.6M', gauge: '1.6', rates: { DULL: 885, BROWN: 942, H23: 888, 'PC-RAL': 888, BLACK: 978, SAHARA: 942, 'WOOD COAT': 1065 } },
-  { sec: 'DG.23', fullCode: 'DG.23 1.6MM', gauge: '1.6', rates: { DULL: 636, BROWN: 683, H23: 638, 'PC-RAL': 638, BLACK: 715, SAHARA: 683, 'WOOD COAT': 798 } },
-  { sec: 'DG.3', fullCode: 'DG.3', gauge: '1.2', rates: { DULL: 136, BROWN: 147, H23: 137, 'PC-RAL': 137, BLACK: 153, SAHARA: 147, 'WOOD COAT': 171 } },
-  { sec: 'DG.31', fullCode: 'DG.31', gauge: '1.2', rates: { DULL: 373, BROWN: 403, H23: 377, 'PC-RAL': 377, BLACK: 424, SAHARA: 403, 'WOOD COAT': 472 } },
-  { sec: 'DG.23A', fullCode: 'DG.23A 1.6M', gauge: '1.6', rates: { DULL: 689, BROWN: 739, H23: 691, 'PC-RAL': 691, BLACK: 774, SAHARA: 739, 'WOOD COAT': 864 } },
+  { sec: 'DG.26F', fullCode: 'DG.26F 1.6M', gauge: '1.6mm', rates: { DULL: 1231, BROWN: 1319, H23: 1233, 'PC-RAL': 1233, BLACK: 1381, SAHARA: 1319, 'WOOD COAT': 1541 } },
+  { sec: 'DG.26F', fullCode: 'DG.26F 2MM', gauge: '2mm', rates: { DULL: 1482, BROWN: 1588, H23: 1484, 'PC-RAL': 1484, BLACK: 1662, SAHARA: 1588, 'WOOD COAT': 1855 } },
+  { sec: 'DG.26', fullCode: 'DG.26', gauge: '1.2mm', rates: { DULL: 865, BROWN: 928, H23: 867, 'PC-RAL': 867, BLACK: 971, SAHARA: 928, 'WOOD COAT': 1084 } },
+  { sec: 'DG.23', fullCode: 'DG.23', gauge: '1.2mm', rates: { DULL: 511, BROWN: 549, H23: 513, 'PC-RAL': 513, BLACK: 575, SAHARA: 549, 'WOOD COAT': 641 } },
+  { sec: 'DG.28', fullCode: 'DG.28', gauge: '1.2mm', rates: { DULL: 220, BROWN: 238, H23: 222, 'PC-RAL': 222, BLACK: 249, SAHARA: 238, 'WOOD COAT': 278 } },
+  { sec: 'DG.24A', fullCode: 'DG.24A', gauge: '1.2mm', rates: { DULL: 406, BROWN: 429, H23: 408, 'PC-RAL': 408, BLACK: 470, SAHARA: 429, 'WOOD COAT': 503 } },
+  { sec: 'DG.25', fullCode: 'DG.25', gauge: '1.2mm', rates: { DULL: 181, BROWN: 202, H23: 185, 'PC-RAL': 185, BLACK: 221, SAHARA: 202, 'WOOD COAT': 250 } },
+  { sec: 'DG.23A', fullCode: 'DG.23A', gauge: '1.2mm', rates: { DULL: 570, BROWN: 612, H23: 572, 'PC-RAL': 572, BLACK: 641, SAHARA: 612, 'WOOD COAT': 715 } },
+  { sec: 'DG.29', fullCode: 'DG.29', gauge: '1.2mm', rates: { DULL: 351, BROWN: 377, H23: 352, 'PC-RAL': 352, BLACK: 394, SAHARA: 377, 'WOOD COAT': 440 } },
+  { sec: 'DG.29', fullCode: 'DG.29 2MM', gauge: '2mm', rates: { DULL: 568, BROWN: 605, H23: 571, 'PC-RAL': 571, BLACK: 635, SAHARA: 605, 'WOOD COAT': 710 } },
+  { sec: 'DG.26', fullCode: 'DG.26 2MM', gauge: '2mm', rates: { DULL: 1349, BROWN: 1446, H23: 1351, 'PC-RAL': 1351, BLACK: 1513, SAHARA: 1446, 'WOOD COAT': 1689 } },
+  { sec: 'DG.23', fullCode: 'DG.23 2MM', gauge: '2mm', rates: { DULL: 757, BROWN: 812, H23: 759, 'PC-RAL': 759, BLACK: 850, SAHARA: 812, 'WOOD COAT': 949 } },
+  { sec: 'DG.23A', fullCode: 'DG.23A 2MM', gauge: '2mm', rates: { DULL: 819, BROWN: 878, H23: 821, 'PC-RAL': 821, BLACK: 920, SAHARA: 878, 'WOOD COAT': 1026 } },
+  { sec: 'GSPR.1', fullCode: 'GSPR.1 1.6M', gauge: '1.6mm', rates: { DULL: 1285, BROWN: 1377, H23: 1287, 'PC-RAL': 1287, BLACK: 1441, SAHARA: 1377, 'WOOD COAT': 1609 } },
+  { sec: 'GSPR.1', fullCode: 'GSPR.1 2MM', gauge: '2mm', rates: { DULL: 1560, BROWN: 1671, H23: 1562, 'PC-RAL': 1562, BLACK: 1749, SAHARA: 1671, 'WOOD COAT': 1953 } },
+  { sec: 'GSPR.16', fullCode: 'GSPR.16 1.6M', gauge: '1.6mm', rates: { DULL: 805, BROWN: 864, H23: 808, 'PC-RAL': 808, BLACK: 909, SAHARA: 864, 'WOOD COAT': 1017 } },
+  { sec: 'DG.26', fullCode: 'DG.26 1.6MM', gauge: '1.6mm', rates: { DULL: 1118, BROWN: 1198, H23: 1120, 'PC-RAL': 1120, BLACK: 1254, SAHARA: 1198, 'WOOD COAT': 1400 } },
+  { sec: 'DG.23L', fullCode: 'DG.23L 1.6M', gauge: '1.6mm', rates: { DULL: 885, BROWN: 942, H23: 888, 'PC-RAL': 888, BLACK: 978, SAHARA: 942, 'WOOD COAT': 1065 } },
+  { sec: 'DG.23', fullCode: 'DG.23 1.6MM', gauge: '1.6mm', rates: { DULL: 636, BROWN: 683, H23: 638, 'PC-RAL': 638, BLACK: 715, SAHARA: 683, 'WOOD COAT': 798 } },
+  { sec: 'DG.3', fullCode: 'DG.3', gauge: '1.2mm', rates: { DULL: 136, BROWN: 147, H23: 137, 'PC-RAL': 137, BLACK: 153, SAHARA: 147, 'WOOD COAT': 171 } },
+  { sec: 'DG.31', fullCode: 'DG.31', gauge: '1.2mm', rates: { DULL: 373, BROWN: 403, H23: 377, 'PC-RAL': 377, BLACK: 424, SAHARA: 403, 'WOOD COAT': 472 } },
+  { sec: 'DG.23A', fullCode: 'DG.23A 1.6M', gauge: '1.6mm', rates: { DULL: 689, BROWN: 739, H23: 691, 'PC-RAL': 691, BLACK: 774, SAHARA: 739, 'WOOD COAT': 864 } },
 ];
 
 export function mergeDgSeriesRates(
   currentRates: Record<string, Record<string, Record<string, number>>> = {}
 ): Record<string, Record<string, Record<string, number>>> {
-  const merged: Record<string, Record<string, Record<string, number>>> = JSON.parse(
-    JSON.stringify(currentRates || {})
-  );
+  const merged = normalizeRatesMatrix(currentRates);
 
-  const applyRate = (gauge: string, color: string, code: string, rate: number) => {
+  const applyRate = (gauge: OfficialGauge, color: OfficialColor, code: string, rate: number) => {
+    const normCode = normalizeSectionCode(code);
+    if (!normCode || !(rate > 0)) return;
     if (!merged[gauge]) merged[gauge] = {};
     if (!merged[gauge][color]) merged[gauge][color] = {};
-    merged[gauge][color][code] = rate;
+    merged[gauge][color][normCode] = Math.round(rate);
   };
 
-  // Ensure all standard gauges exist
-  GAUGES.forEach((g) => {
-    if (!merged[g]) merged[g] = {};
-  });
-
-  // Apply ground-truth rates for all items across colors, gauges and code aliases
+  // Strict gauge isolation: only apply each DG item to its authentic gauge (1.2mm / 1.6mm / 2mm) and official 5 colors
   DG_SERIES_SCANNED_RATES.forEach((item) => {
-    const codes = Array.from(
-      new Set([
-        item.sec,
-        item.fullCode,
-        item.sec.replace(/\./g, ''), // e.g. DG26
-        item.fullCode.replace(/\./g, ''),
-      ])
-    );
-
-    const primaryGauge = item.gauge; // '1.2', '1.6', or '2'
-
-    // Multipliers for other gauges based on ratio to primaryGauge
-    const gaugeFactors: Record<string, number> = {
-      '1.2': primaryGauge === '1.2' ? 1.0 : primaryGauge === '1.6' ? 0.78 : 0.65,
-      '1.4': primaryGauge === '1.6' ? 0.88 : primaryGauge === '2' ? 0.74 : 1.15,
-      '1.5': primaryGauge === '1.6' ? 0.94 : primaryGauge === '2' ? 0.79 : 1.21,
-      '1.6': primaryGauge === '1.6' ? 1.0 : primaryGauge === '2' ? 0.83 : 1.28,
-      '2': primaryGauge === '2' ? 1.0 : primaryGauge === '1.6' ? 1.21 : 1.55,
-      '2.5': primaryGauge === '2' ? 1.2 : 1.85,
-      '2.75': primaryGauge === '2' ? 1.3 : 2.0,
-      '2.85': primaryGauge === '2' ? 1.35 : 2.08,
-      '3': primaryGauge === '2' ? 1.42 : 2.15,
-      '3.2': primaryGauge === '2' ? 1.5 : 2.3,
-      '3.5': primaryGauge === '2' ? 1.6 : 2.45,
-      '3.8': primaryGauge === '2' ? 1.7 : 2.65,
-      '4': primaryGauge === '2' ? 1.8 : 2.8,
-      '6': primaryGauge === '2' ? 2.5 : 3.8,
-      Std: 1.0,
-    };
-
-    GAUGES.forEach((g) => {
-      const factor = g === primaryGauge ? 1.0 : gaugeFactors[g] ?? 1.0;
-      codes.forEach((code) => {
-        // Direct colors from rate sheet
-        applyRate(g, 'DULL', code, Math.round(item.rates.DULL * factor));
-        applyRate(g, 'BROWN', code, Math.round(item.rates.BROWN * factor));
-        applyRate(g, 'H.23', code, Math.round(item.rates.H23 * factor));
-        applyRate(g, 'H23', code, Math.round(item.rates.H23 * factor));
-        applyRate(g, 'PC-RAL', code, Math.round(item.rates['PC-RAL'] * factor));
-        applyRate(g, 'BLACK', code, Math.round(item.rates.BLACK * factor));
-        applyRate(g, 'SAHARA', code, Math.round(item.rates.SAHARA * factor));
-        applyRate(g, 'WOOD COAT', code, Math.round(item.rates['WOOD COAT'] * factor));
-        applyRate(g, 'CHAMPAGNE', code, Math.round(item.rates.H23 * 1.04 * factor));
-
-        // Combined / legacy color chip aliases
-        applyRate(g, 'H23/PC-RAL', code, Math.round(item.rates.H23 * factor));
-        applyRate(g, 'SAHARA/BROWN', code, Math.round(item.rates.BROWN * factor));
-        applyRate(g, 'BLACK/MULTI', code, Math.round(item.rates.BLACK * factor));
-        applyRate(g, 'MULTI', code, Math.round(item.rates.BLACK * factor));
-        applyRate(g, 'NATURAL', code, Math.round(item.rates.DULL * factor));
-        applyRate(g, 'D.SHINE', code, Math.round(item.rates.H23 * factor));
-        applyRate(g, 'SS DESIGNER', code, Math.round(item.rates.BLACK * factor));
-        applyRate(g, 'ANODIZED', code, Math.round(item.rates.DULL * factor));
-      });
-    });
+    const g = normalizeGauge(item.gauge);
+    applyRate(g, 'DULL', item.sec, item.rates.DULL);
+    applyRate(g, 'H-23 / RAL/PC', item.sec, item.rates.H23);
+    applyRate(g, 'SAHARA / BROWN', item.sec, item.rates.SAHARA || item.rates.BROWN);
+    applyRate(g, 'BLACK', item.sec, item.rates.BLACK);
+    applyRate(g, 'ALU WOOD', item.sec, item.rates['WOOD COAT']);
   });
 
   return merged;
@@ -516,16 +609,19 @@ export function mergeDgSeriesRates(
 
 export function getClearedZeroRates(
   sectionsList: string[] = DEFAULT_SECTIONS,
-  colorsList: string[] = DEFAULT_COLORS
+  _colorsList: string[] = OFFICIAL_COLORS as unknown as string[]
 ): Record<string, Record<string, Record<string, number>>> {
   const root: Record<string, Record<string, Record<string, number>>> = {};
-  GAUGES.forEach((g) => {
+  OFFICIAL_GAUGES.forEach((g) => {
     root[g] = {};
-    colorsList.forEach((c) => {
+    OFFICIAL_COLORS.forEach((c) => {
       root[g][c] = {};
-      sectionsList.forEach((sec) => {
-        root[g][c][sec] = 0;
-      });
+      if (sectionsList.length > 0 && (g === '1.2mm' || g === '1.6mm' || g === '2mm')) {
+        sectionsList.forEach((sec) => {
+          const norm = normalizeSectionCode(sec);
+          if (norm) root[g][c][norm] = 0;
+        });
+      }
     });
   });
   return root;
@@ -582,15 +678,9 @@ export function mergeGlassRatesWithDefaults(
   return next;
 }
 
-export function mergeAvailableColorsWithDefaults(colors?: string[] | null): string[] {
-  const set = new Set<string>();
-  const addClean = (val: string) => {
-    const clean = String(val || '').trim().toUpperCase();
-    if (clean) set.add(clean);
-  };
-  (colors || []).forEach(addClean);
-  REQUIRED_DEFAULT_FINISH_COLORS.forEach(addClean);
-  return Array.from(set);
+export function mergeAvailableColorsWithDefaults(_colors?: string[] | null): string[] {
+  // Strictly locked to the 5 official ITTEHAD ALUMINIUM colors
+  return [...OFFICIAL_COLORS];
 }
 
 export function resolveSectionRate(
@@ -603,57 +693,32 @@ export function resolveSectionRate(
   const targetNorm = normalizeSectionCode(section);
   if (!targetNorm) return 0;
 
-  const col = String(color || 'DULL').trim().toUpperCase();
-  const colNorm = normalizeSectionCode(col);
-  const colorCandidates = Array.from(
-    new Set(
-      [
-        col,
-        col === 'H.23' ? 'H23' : col === 'H23' ? 'H.23' : '',
-        col.replace(/\./g, ''),
-        col === 'H.23' || col === 'H23' || col === 'PC-RAL' ? 'H23/PC-RAL' : '',
-        col === 'SAHARA' || col === 'BROWN' ? 'SAHARA/BROWN' : '',
-        col === 'BLACK' || col === 'MULTI' ? 'BLACK/MULTI' : '',
-        'DULL',
-      ].filter(Boolean)
-    )
-  );
-  const gaugeCandidates = Array.from(
-    new Set([gauge, '1.6', '1.2', '2', 'Std', ...Object.keys(rates)].filter(Boolean))
-  );
+  // Strict Gauge Isolation + Official 5-Color Lookup (no cross-gauge or cross-color fallback)
+  const targetGauge = normalizeGauge(gauge);
+  const bareGauge = targetGauge.replace(/mm$/i, '');
+  const targetColor = normalizeOfficialColor(color);
 
-  const lookupInGaugeColor = (gMap: Record<string, Record<string, number>>, cKey: string) => {
-    const directMap = gMap[cKey];
-    if (directMap) {
-      const hit = findMatchingSectionRate(directMap, section);
-      if (typeof hit === 'number') return hit;
-    }
-    const cKeyNorm = normalizeSectionCode(cKey);
-    for (const [actualColor, cMap] of Object.entries(gMap)) {
-      if (normalizeSectionCode(actualColor) === cKeyNorm || normalizeSectionCode(actualColor) === colNorm) {
-        const hit = findMatchingSectionRate(cMap, section);
-        if (typeof hit === 'number') return hit;
-      }
-    }
-    return undefined;
-  };
+  const gaugeMap =
+    rates[targetGauge] ||
+    rates[bareGauge] ||
+    Object.entries(rates).find(([gk]) => normalizeGauge(gk) === targetGauge)?.[1];
 
-  let firstZeroSeen: number | undefined = undefined;
+  if (!gaugeMap || typeof gaugeMap !== 'object') return 0;
 
-  // Pass 1: Prefer positive (> 0) rates matching normalized section code
-  for (const g of gaugeCandidates) {
-    const gMap = rates[g];
-    if (!gMap) continue;
-    for (const c of colorCandidates) {
-      const hit = lookupInGaugeColor(gMap, c);
-      if (typeof hit === 'number') {
-        if (hit > 0) return hit;
-        if (firstZeroSeen === undefined) firstZeroSeen = hit;
-      }
+  const directColorMap = gaugeMap[targetColor];
+  if (directColorMap) {
+    const hit = findMatchingSectionRate(directColorMap, targetNorm);
+    if (typeof hit === 'number' && hit > 0) return hit;
+  }
+
+  for (const [rawColKey, secMap] of Object.entries(gaugeMap)) {
+    if (normalizeOfficialColor(rawColKey) === targetColor) {
+      const hit = findMatchingSectionRate(secMap, targetNorm);
+      if (typeof hit === 'number' && hit > 0) return hit;
     }
   }
 
-  return firstZeroSeen ?? 0;
+  return 0;
 }
 
 export function getDefaultWindowFormula(): WindowFormulaSettings {
@@ -893,7 +958,7 @@ export function getStarterDynamicSections(): DynamicMasterSection[] {
       code: 'CW50-MULLION',
       title: 'Curtain Wall Mullion 50mm',
       category: 'Curtain Wall',
-      defaultGauge: '1.6',
+      defaultGauge: '1.6mm',
       defaultColor: 'DULL',
       defaultRate: 850,
       weightPerFoot: 0.95,
@@ -924,7 +989,7 @@ export function getStarterDynamicSections(): DynamicMasterSection[] {
       code: 'CW50-TRANSOM',
       title: 'Curtain Wall Transom 50mm',
       category: 'Curtain Wall',
-      defaultGauge: '1.6',
+      defaultGauge: '1.6mm',
       defaultColor: 'DULL',
       defaultRate: 820,
       weightPerFoot: 0.85,
@@ -955,8 +1020,8 @@ export function getStarterDynamicSections(): DynamicMasterSection[] {
       code: 'TH70-FRAME',
       title: 'Thermal Break Outer Frame 70mm',
       category: 'Thermal Break',
-      defaultGauge: '2',
-      defaultColor: 'SAHARA/BROWN',
+      defaultGauge: '2mm',
+      defaultColor: 'SAHARA / BROWN',
       defaultRate: 950,
       weightPerFoot: 1.1,
       formulaWidthDeduction: 0,

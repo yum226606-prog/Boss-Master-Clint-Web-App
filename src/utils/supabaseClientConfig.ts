@@ -1,13 +1,28 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-export const DEFAULT_SUPABASE_URL = (
-  import.meta.env.VITE_SUPABASE_URL || 'https://sumeemoqtnveiftzjhsl.supabase.co'
-).trim();
-export const DEFAULT_PUBLISHABLE_KEY = (
-  import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
-  import.meta.env.VITE_SUPABASE_ANON_KEY ||
-  'sb_publishable_rEQFsCRG9_kjgPvauNvocg_hhxDPjOd'
-).trim();
+const getEnvSafe = (key: string, fallback: string): string => {
+  try {
+    if (typeof import.meta !== 'undefined' && (import.meta as any).env) {
+      const val = (import.meta as any).env[key];
+      if (typeof val === 'string' && val.trim()) return val.trim();
+    }
+  } catch {}
+  try {
+    if (typeof process !== 'undefined' && process.env) {
+      const val = process.env[key];
+      if (typeof val === 'string' && val.trim()) return val.trim();
+    }
+  } catch {}
+  return fallback;
+};
+
+export const DEFAULT_SUPABASE_URL = normalizeSupabaseUrl(
+  getEnvSafe('VITE_SUPABASE_URL', 'https://sumeemoqtnveiftzjhsl.supabase.co')
+);
+export const DEFAULT_PUBLISHABLE_KEY = getEnvSafe(
+  'VITE_SUPABASE_PUBLISHABLE_KEY',
+  getEnvSafe('VITE_SUPABASE_ANON_KEY', 'sb_publishable_rEQFsCRG9_kjgPvauNvocg_hhxDPjOd')
+);
 
 export function normalizeSupabaseUrl(raw: string): string {
   return String(raw || '')

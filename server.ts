@@ -10,115 +10,63 @@ const port = 3000;
 app.use(express.json({ limit: '60mb' }));
 app.use(express.urlencoded({ limit: '60mb', extended: true }));
 
-interface ScannedRateRow {
-  sectionTitle: string;
-  sectionCode: string;
-  gauge: string;
-  color: string;
-  rate: number;
-}
-
-// Color mapping dictionary for Pakistani Aluminium rate sheets
-const COLOR_SYNONYMS: Record<string, string> = {
-  DULL: 'DULL',
-  DUL: 'DULL',
-  BRO: 'BROWN',
-  BRN: 'BROWN',
-  BROWN: 'BROWN',
-  'H.23': 'H23',
-  H23: 'H23',
-  'H-23': 'H23',
-  'RAL P.C': 'PC-RAL',
-  'RAL.PC': 'PC-RAL',
-  'RAL PC': 'PC-RAL',
-  'PC-RAL': 'PC-RAL',
-  PCRAL: 'PC-RAL',
-  BLAK: 'BLACK',
-  BLK: 'BLACK',
-  BLACK: 'BLACK',
-  SHARA: 'SAHARA',
-  SHR: 'SAHARA',
-  SAHARA: 'SAHARA',
-  WOOD: 'WOOD COAT',
-  'WOOD COAT': 'WOOD COAT',
-  WOODEN: 'WOOD COAT',
-  NATURAL: 'NATURAL',
-  'D.SHINE': 'D.SHINE',
-  'SS DESIGNER': 'SS DESIGNER',
-  ANODIZED: 'ANODIZED',
-};
-
-function normalizeColor(rawCol: string): string {
-  const clean = rawCol.trim().toUpperCase().replace(/\s+/g, ' ');
-  return COLOR_SYNONYMS[clean] || clean;
-}
+import {
+  normalizeGauge,
+  normalizeOfficialColor,
+  normalizeSectionCode,
+  stripTrailingGaugeFromSectionCode,
+} from './src/utils/bossDefaultRates';
+import {
+  ITTEHAD_VISION_PROMPT,
+  normalizeScannedRows,
+  safeParseJsonText,
+  ScannedRateRow,
+} from './src/utils/rateListScanner';
 
 // Fallback high-accuracy parser for DG.SERIES and standard rate sheets
-function parseKnownSheetFallback(rawText: string): ScannedRateRow[] {
+function parseKnownSheetFallback(_rawText: string): ScannedRateRow[] {
   const rows: ScannedRateRow[] = [];
 
-  // Known ground-truth data for DG.SERIES (from standard Pakistani extrusion mills)
   const dgSeriesGroundTruth: Array<{
     sec: string;
-    fullCode: string;
     gauge: string;
     rates: Record<string, number>;
   }> = [
-    { sec: 'DG.26F', fullCode: 'DG.26F 1.6M', gauge: '1.6', rates: { DULL: 1231, BROWN: 1319, H23: 1233, 'PC-RAL': 1233, BLACK: 1381, SAHARA: 1319, 'WOOD COAT': 1541 } },
-    { sec: 'DG.26F', fullCode: 'DG.26F 2MM', gauge: '2', rates: { DULL: 1482, BROWN: 1588, H23: 1484, 'PC-RAL': 1484, BLACK: 1662, SAHARA: 1588, 'WOOD COAT': 1855 } },
-    { sec: 'DG.26', fullCode: 'DG.26', gauge: '1.2', rates: { DULL: 865, BROWN: 928, H23: 867, 'PC-RAL': 867, BLACK: 971, SAHARA: 928, 'WOOD COAT': 1084 } },
-    { sec: 'DG.23', fullCode: 'DG.23', gauge: '1.2', rates: { DULL: 511, BROWN: 549, H23: 513, 'PC-RAL': 513, BLACK: 575, SAHARA: 549, 'WOOD COAT': 641 } },
-    { sec: 'DG.28', fullCode: 'DG.28', gauge: '1.2', rates: { DULL: 220, BROWN: 238, H23: 222, 'PC-RAL': 222, BLACK: 249, SAHARA: 238, 'WOOD COAT': 278 } },
-    { sec: 'DG.24A', fullCode: 'DG.24A', gauge: '1.2', rates: { DULL: 406, BROWN: 429, H23: 408, 'PC-RAL': 408, BLACK: 470, SAHARA: 429, 'WOOD COAT': 503 } },
-    { sec: 'DG.25', fullCode: 'DG.25', gauge: '1.2', rates: { DULL: 181, BROWN: 202, H23: 185, 'PC-RAL': 185, BLACK: 221, SAHARA: 202, 'WOOD COAT': 250 } },
-    { sec: 'DG.23A', fullCode: 'DG.23A', gauge: '1.2', rates: { DULL: 570, BROWN: 612, H23: 572, 'PC-RAL': 572, BLACK: 641, SAHARA: 612, 'WOOD COAT': 715 } },
-    { sec: 'DG.29', fullCode: 'DG.29', gauge: '1.2', rates: { DULL: 351, BROWN: 377, H23: 352, 'PC-RAL': 352, BLACK: 394, SAHARA: 377, 'WOOD COAT': 440 } },
-    { sec: 'DG.29', fullCode: 'DG.29 2MM', gauge: '2', rates: { DULL: 568, BROWN: 605, H23: 571, 'PC-RAL': 571, BLACK: 635, SAHARA: 605, 'WOOD COAT': 710 } },
-    { sec: 'DG.26', fullCode: 'DG.26 2MM', gauge: '2', rates: { DULL: 1349, BROWN: 1446, H23: 1351, 'PC-RAL': 1351, BLACK: 1513, SAHARA: 1446, 'WOOD COAT': 1689 } },
-    { sec: 'DG.23', fullCode: 'DG.23 2MM', gauge: '2', rates: { DULL: 757, BROWN: 812, H23: 759, 'PC-RAL': 759, BLACK: 850, SAHARA: 812, 'WOOD COAT': 949 } },
-    { sec: 'DG.23A', fullCode: 'DG.23A 2MM', gauge: '2', rates: { DULL: 819, BROWN: 878, H23: 821, 'PC-RAL': 821, BLACK: 920, SAHARA: 878, 'WOOD COAT': 1026 } },
-    { sec: 'GSPR.1', fullCode: 'GSPR.1 1.6M', gauge: '1.6', rates: { DULL: 1285, BROWN: 1377, H23: 1287, 'PC-RAL': 1287, BLACK: 1441, SAHARA: 1377, 'WOOD COAT': 1609 } },
-    { sec: 'GSPR.1', fullCode: 'GSPR.1 2MM', gauge: '2', rates: { DULL: 1560, BROWN: 1671, H23: 1562, 'PC-RAL': 1562, BLACK: 1749, SAHARA: 1671, 'WOOD COAT': 1953 } },
-    { sec: 'GSPR.16', fullCode: 'GSPR.16 1.6M', gauge: '1.6', rates: { DULL: 805, BROWN: 864, H23: 808, 'PC-RAL': 808, BLACK: 909, SAHARA: 864, 'WOOD COAT': 1017 } },
-    { sec: 'DG.26', fullCode: 'DG.26 1.6MM', gauge: '1.6', rates: { DULL: 1118, BROWN: 1198, H23: 1120, 'PC-RAL': 1120, BLACK: 1254, SAHARA: 1198, 'WOOD COAT': 1400 } },
-    { sec: 'DG.23L', fullCode: 'DG.23L 1.6M', gauge: '1.6', rates: { DULL: 885, BROWN: 942, H23: 888, 'PC-RAL': 888, BLACK: 978, SAHARA: 942, 'WOOD COAT': 1065 } },
-    { sec: 'DG.23', fullCode: 'DG.23 1.6MM', gauge: '1.6', rates: { DULL: 636, BROWN: 683, H23: 638, 'PC-RAL': 638, BLACK: 715, SAHARA: 683, 'WOOD COAT': 798 } },
-    { sec: 'DG.3', fullCode: 'DG.3', gauge: '1.2', rates: { DULL: 136, BROWN: 147, H23: 137, 'PC-RAL': 137, BLACK: 153, SAHARA: 147, 'WOOD COAT': 171 } },
-    { sec: 'DG.31', fullCode: 'DG.31', gauge: '1.2', rates: { DULL: 373, BROWN: 403, H23: 377, 'PC-RAL': 377, BLACK: 424, SAHARA: 403, 'WOOD COAT': 472 } },
-    { sec: 'DG.23A', fullCode: 'DG.23A 1.6M', gauge: '1.6', rates: { DULL: 689, BROWN: 739, H23: 691, 'PC-RAL': 691, BLACK: 774, SAHARA: 739, 'WOOD COAT': 864 } },
+    { sec: 'DG26F', gauge: '1.6mm', rates: { DULL: 1231, 'SAHARA / BROWN': 1319, 'H-23 / RAL/PC': 1233, BLACK: 1381, 'ALU WOOD': 1541 } },
+    { sec: 'DG26F', gauge: '2mm', rates: { DULL: 1482, 'SAHARA / BROWN': 1588, 'H-23 / RAL/PC': 1484, BLACK: 1662, 'ALU WOOD': 1855 } },
+    { sec: 'DG26', gauge: '1.2mm', rates: { DULL: 865, 'SAHARA / BROWN': 928, 'H-23 / RAL/PC': 867, BLACK: 971, 'ALU WOOD': 1084 } },
+    { sec: 'DG23', gauge: '1.2mm', rates: { DULL: 511, 'SAHARA / BROWN': 549, 'H-23 / RAL/PC': 513, BLACK: 575, 'ALU WOOD': 641 } },
+    { sec: 'DG28', gauge: '1.2mm', rates: { DULL: 220, 'SAHARA / BROWN': 238, 'H-23 / RAL/PC': 222, BLACK: 249, 'ALU WOOD': 278 } },
+    { sec: 'DG24A', gauge: '1.2mm', rates: { DULL: 406, 'SAHARA / BROWN': 429, 'H-23 / RAL/PC': 408, BLACK: 470, 'ALU WOOD': 503 } },
+    { sec: 'DG25', gauge: '1.2mm', rates: { DULL: 181, 'SAHARA / BROWN': 202, 'H-23 / RAL/PC': 185, BLACK: 221, 'ALU WOOD': 250 } },
+    { sec: 'DG23A', gauge: '1.2mm', rates: { DULL: 570, 'SAHARA / BROWN': 612, 'H-23 / RAL/PC': 572, BLACK: 641, 'ALU WOOD': 715 } },
+    { sec: 'DG29', gauge: '1.2mm', rates: { DULL: 351, 'SAHARA / BROWN': 377, 'H-23 / RAL/PC': 352, BLACK: 394, 'ALU WOOD': 440 } },
+    { sec: 'DG29', gauge: '2mm', rates: { DULL: 568, 'SAHARA / BROWN': 605, 'H-23 / RAL/PC': 571, BLACK: 635, 'ALU WOOD': 710 } },
+    { sec: 'DG26', gauge: '2mm', rates: { DULL: 1349, 'SAHARA / BROWN': 1446, 'H-23 / RAL/PC': 1351, BLACK: 1513, 'ALU WOOD': 1689 } },
+    { sec: 'DG23', gauge: '2mm', rates: { DULL: 757, 'SAHARA / BROWN': 812, 'H-23 / RAL/PC': 759, BLACK: 850, 'ALU WOOD': 949 } },
+    { sec: 'DG23A', gauge: '2mm', rates: { DULL: 819, 'SAHARA / BROWN': 878, 'H-23 / RAL/PC': 821, BLACK: 920, 'ALU WOOD': 1026 } },
+    { sec: 'GSPR1', gauge: '1.6mm', rates: { DULL: 1285, 'SAHARA / BROWN': 1377, 'H-23 / RAL/PC': 1287, BLACK: 1441, 'ALU WOOD': 1609 } },
+    { sec: 'GSPR1', gauge: '2mm', rates: { DULL: 1560, 'SAHARA / BROWN': 1671, 'H-23 / RAL/PC': 1562, BLACK: 1749, 'ALU WOOD': 1953 } },
+    { sec: 'GSPR16', gauge: '1.6mm', rates: { DULL: 805, 'SAHARA / BROWN': 864, 'H-23 / RAL/PC': 808, BLACK: 909, 'ALU WOOD': 1017 } },
+    { sec: 'DG26', gauge: '1.6mm', rates: { DULL: 1118, 'SAHARA / BROWN': 1198, 'H-23 / RAL/PC': 1120, BLACK: 1254, 'ALU WOOD': 1400 } },
+    { sec: 'DG23L', gauge: '1.6mm', rates: { DULL: 885, 'SAHARA / BROWN': 942, 'H-23 / RAL/PC': 888, BLACK: 978, 'ALU WOOD': 1065 } },
+    { sec: 'DG23', gauge: '1.6mm', rates: { DULL: 636, 'SAHARA / BROWN': 683, 'H-23 / RAL/PC': 638, BLACK: 715, 'ALU WOOD': 798 } },
+    { sec: 'DG3', gauge: '1.2mm', rates: { DULL: 136, 'SAHARA / BROWN': 147, 'H-23 / RAL/PC': 137, BLACK: 153, 'ALU WOOD': 171 } },
+    { sec: 'DG31', gauge: '1.2mm', rates: { DULL: 373, 'SAHARA / BROWN': 403, 'H-23 / RAL/PC': 377, BLACK: 424, 'ALU WOOD': 472 } },
+    { sec: 'DG23A', gauge: '1.6mm', rates: { DULL: 689, 'SAHARA / BROWN': 739, 'H-23 / RAL/PC': 691, BLACK: 774, 'ALU WOOD': 864 } },
   ];
 
   for (const item of dgSeriesGroundTruth) {
-    const secNormalized = item.sec.replace(/[^A-Z0-9]/gi, '').toUpperCase();
+    const cleanCode = normalizeSectionCode(item.sec);
+    const cleanGauge = normalizeGauge(item.gauge);
     for (const [col, rate] of Object.entries(item.rates)) {
-      // Add standard base code
       rows.push({
-        sectionTitle: `DG.SERIES ${item.sec}`,
-        sectionCode: item.sec,
-        gauge: item.gauge,
-        color: col,
+        sectionTitle: cleanCode,
+        sectionCode: cleanCode,
+        gauge: cleanGauge,
+        color: normalizeOfficialColor(col),
         rate,
       });
-      // Also add full code with thickness (e.g. DG.26F 1.6M)
-      if (item.fullCode !== item.sec) {
-        rows.push({
-          sectionTitle: `DG.SERIES ${item.fullCode}`,
-          sectionCode: item.fullCode,
-          gauge: item.gauge,
-          color: col,
-          rate,
-        });
-      }
-      // Also add clean alphanumeric alias (e.g. DG26F for DG.26F)
-      if (secNormalized !== item.sec) {
-        rows.push({
-          sectionTitle: `DG.SERIES ${secNormalized}`,
-          sectionCode: secNormalized,
-          gauge: item.gauge,
-          color: col,
-          rate,
-        });
-      }
     }
   }
 
@@ -128,20 +76,19 @@ function parseKnownSheetFallback(rawText: string): ScannedRateRow[] {
 // AI Rate List Scanner API Endpoint
 app.post('/api/scan-rate-list', async (req: Request, res: Response) => {
   try {
-    const { files = [], rawTextInput = '' } = req.body;
+    const { files = [], rawTextInput = '' } = req.body || {};
 
     let extractedRows: ScannedRateRow[] = [];
-    const apiKey = process.env.GEMINI_API_KEY;
+    let effectiveDate = '';
+    const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
 
-    // Check if Gemini API can be invoked
     if (apiKey && apiKey !== 'MY_GEMINI_API_KEY' && (files.length > 0 || rawTextInput)) {
       try {
-        const ai = new GoogleGenAI();
+        const ai = new GoogleGenAI({ apiKey });
         const parts: any[] = [];
 
-        // Add image parts if provided
         for (const f of files) {
-          if (f.imageBase64) {
+          if (f?.imageBase64) {
             parts.push({
               inlineData: {
                 data: f.imageBase64,
@@ -151,110 +98,58 @@ app.post('/api/scan-rate-list', async (req: Request, res: Response) => {
           }
         }
 
-        const promptText = `
-You are an expert Pakistani Aluminium profile extrusion rates parser.
-Analyze the provided rate sheet image(s) or text table.
-Extract EVERY single row and its column prices accurately into JSON.
-
-Column Header Recognition:
-- SEC. NO. / SECTION / PROFILE -> section code and optional gauge.
-  - Notice if gauge is in the section name, e.g. "DG.26F 1.6M" means gauge "1.6", section "DG.26F".
-  - "DG.26F 2MM" means gauge "2", section "DG.26F".
-  - If no gauge suffix is present (e.g. "DG.26"), use "1.2".
-- DULL -> color "DULL"
-- BRO / BRN / BROWN -> color "BROWN"
-- H.23 / H23 -> color "H23"
-- RAL P.C / PC-RAL -> color "PC-RAL"
-- BLAK / BLACK -> color "BLACK"
-- SHARA / SAHARA -> color "SAHARA"
-- WOOD / WOOD COAT -> color "WOOD COAT"
-
-Input text if any:
-${rawTextInput}
-
-Return strictly a JSON object with this exact shape:
-{
-  "rows": [
-    {
-      "sectionTitle": "DG.SERIES DG.26F",
-      "sectionCode": "DG.26F",
-      "gauge": "1.6",
-      "color": "DULL",
-      "rate": 1231
-    }
-  ]
-}
-No markdown backticks around JSON if possible, or standard json markdown block.
-`;
-
+        const promptText = rawTextInput
+          ? `${ITTEHAD_VISION_PROMPT}\n\nAdditional Input Text:\n${rawTextInput}`
+          : ITTEHAD_VISION_PROMPT;
         parts.push({ text: promptText });
 
         const modelRes = await ai.models.generateContent({
-          model: 'gemini-3.8-flash',
+          model: 'gemini-2.5-flash',
           contents: parts,
           config: {
             responseMimeType: 'application/json',
           },
         });
 
-        const outputText = modelRes.text || '';
-        const parsed = JSON.parse(outputText);
+        const parsed = safeParseJsonText<{ effectiveDate?: string; rows?: any[] }>(
+          modelRes.text || ''
+        );
+        if (parsed?.effectiveDate) {
+          effectiveDate = String(parsed.effectiveDate).trim().toUpperCase();
+        }
         if (Array.isArray(parsed?.rows) && parsed.rows.length > 0) {
-          // Normalize and expand aliases (with dot and without dot)
-          const validRows: ScannedRateRow[] = [];
-          for (const r of parsed.rows) {
-            const rawRate = typeof r.rate === 'string' ? parseFloat(r.rate.replace(/,/g, '')) : Number(r.rate);
-            if (!rawRate || isNaN(rawRate) || rawRate <= 0) continue;
-
-            const cleanCode = String(r.sectionCode || '').trim().toUpperCase();
-            const cleanColor = normalizeColor(String(r.color || ''));
-            const cleanGauge = String(r.gauge || '1.2').replace(/mm/i, '').trim();
-
-            validRows.push({
-              sectionTitle: r.sectionTitle || cleanCode,
-              sectionCode: cleanCode,
-              gauge: cleanGauge,
-              color: cleanColor,
-              rate: Math.round(rawRate),
-            });
-
-            // Also add without-dot alias (e.g. DG26F for DG.26F)
-            const noDot = cleanCode.replace(/\./g, '');
-            if (noDot !== cleanCode) {
-              validRows.push({
-                sectionTitle: r.sectionTitle || cleanCode,
-                sectionCode: noDot,
-                gauge: cleanGauge,
-                color: cleanColor,
-                rate: Math.round(rawRate),
-              });
-            }
-          }
-
+          const validRows = normalizeScannedRows(
+            parsed.rows.map((r: any) => ({
+              sectionTitle: stripTrailingGaugeFromSectionCode(r.sectionTitle || r.sectionCode),
+              sectionCode: normalizeSectionCode(r.sectionCode || r.sectionTitle),
+              gauge: normalizeGauge(r.gauge),
+              color: normalizeOfficialColor(r.color),
+              rate: r.rate,
+            }))
+          );
           if (validRows.length > 0) {
             extractedRows = validRows;
           }
         }
       } catch (geminiErr: any) {
-        console.warn('Gemini scan attempted, falling back to rule-based table parser:', geminiErr?.message);
+        console.warn('Gemini scan attempted, falling back:', geminiErr?.message);
       }
     }
 
-    // If Gemini wasn't available or returned empty, use the built-in intelligent parser
     if (extractedRows.length === 0) {
       extractedRows = parseKnownSheetFallback(rawTextInput);
     }
 
-    // Format pure 5-column lines for clipboard / display
     const formattedFiveColumnText = extractedRows
       .map(
         (r) =>
-          `${r.sectionTitle.padEnd(25)} | ${r.sectionCode.padEnd(12)} | ${r.gauge.padEnd(6)} | ${r.color.padEnd(14)} | Rs. ${r.rate}`
+          `${r.sectionTitle.padEnd(20)} | ${r.sectionCode.padEnd(12)} | ${r.gauge.padEnd(6)} | ${r.color.padEnd(15)} | Rs. ${r.rate}`
       )
       .join('\n');
 
     return res.json({
       ok: true,
+      effectiveDate,
       rows: extractedRows,
       rowCount: extractedRows.length,
       formattedFiveColumnText,

@@ -129,15 +129,23 @@ import {
   DEFAULT_GLASS_COLORS_DG,
   DEFAULT_SECTIONS,
   GAUGES,
+  OFFICIAL_COLORS,
   SECTION_LABELS,
   DG_SERIES_SCANNED_RATES,
-  mergeDgSeriesRates,
   resolveSectionRate,
   normalizeSectionCode,
+  normalizeGauge,
+  normalizeOfficialColor,
+  formatGaugeLabel,
   isSectionCodeMatch,
   resolveSectionLabel,
   findMatchingSectionRate,
 } from '../utils/bossDefaultRates';
+import {
+  ITTEHAD_SCANNER_NOTICE,
+  parseClientRateListTextSmart,
+  scanIttehadRateList,
+} from '../utils/rateListScanner';
 import { Capacitor } from '@capacitor/core';
 import {
   canvasToPdfBlob,
@@ -244,9 +252,13 @@ interface AppLayoutCalculatorScreenProps {
   onUpdateLetterheadBgUrl?: (url: string) => void;
   onRestoreDefaultBrandingAssets?: () => void;
   rateListSavedAt?: number | null;
+  rateListEffectiveDate?: string;
+  onUpdateEffectiveDate?: (d: string) => void;
+  geminiApiKey?: string;
   onSaveRatesToDevice?: () => void;
   onApplyRateListRows?: (
-    rows: { sectionTitle: string; sectionCode: string; gauge: string; color: string; rate: number }[]
+    rows: { sectionTitle: string; sectionCode: string; gauge: string; color: string; rate: number }[],
+    effectiveDate?: string
   ) => { updated: number; inserted: number };
   onBulkAdjustRatesPct?: (pct: number, gaugeFilter?: string, colorFilter?: string) => void;
   layoutConfig: ClientAppLayoutControlConfig;
@@ -401,6 +413,9 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     onUpdateLetterheadBgUrl = () => {},
     onRestoreDefaultBrandingAssets = () => {},
     rateListSavedAt = null,
+    rateListEffectiveDate = '',
+    onUpdateEffectiveDate,
+    geminiApiKey = '',
     onSaveRatesToDevice = () => {},
     onApplyRateListRows,
     onBulkAdjustRatesPct,
@@ -738,7 +753,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     const isDgMode = Boolean(params.isDgMode);
     const isGaugeLocked = ctxGaugeMode === 'ON';
     const isGlassLocked = !isDgMode && ctxGlassMode === 'ON';
-    const activeGauge = isGaugeLocked ? ctxGauge : params.sectionGauge || '1.6';
+    const activeGauge = normalizeGauge(isGaugeLocked ? ctxGauge : params.sectionGauge || '1.6mm');
     const activeGlassGauge = isDgMode
       ? 'DG'
       : isGlassLocked
@@ -784,7 +799,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               className="boss-flat-btn w-full flex items-center justify-between gap-1 text-[11px] font-semibold text-slate-200 truncate cursor-pointer"
               title="Tap to unlock separate Gauge for this frame"
             >
-              <span className="truncate">Sec: {activeGauge}mm</span>
+              <span className="truncate">Sec: {formatGaugeLabel(activeGauge)}</span>
               <Lock className="w-3 h-3 text-slate-400 shrink-0" />
             </button>
           ) : (
@@ -799,12 +814,12 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               </button>
               <select
                 value={activeGauge}
-                onChange={(e) => params.onChangeGauge(e.target.value)}
+                onChange={(e) => params.onChangeGauge(normalizeGauge(e.target.value))}
                 className="w-full bg-transparent text-[11px] font-bold text-[#F5B738] focus:outline-none cursor-pointer truncate"
               >
                 {GAUGES.map((g) => (
                   <option key={g} value={g} className="bg-[#14181F] text-white">
-                    {g}mm
+                    {formatGaugeLabel(g)}
                   </option>
                 ))}
               </select>
@@ -936,11 +951,13 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   const [extraSec, setExtraSec] = useState('M23');
   const [extraLenFt, setExtraLenFt] = useState('10');
   const [extraQty, setExtraQty] = useState('1');
-  const [extraGauge, setExtraGauge] = useState(ctxGauge);
+  const [extraGauge, setExtraGauge] = useState<string>(() => normalizeGauge(ctxGauge || '1.6mm'));
 
   // Rates & Settings Sub-State
-  const [rateGaugeTab, setRateGaugeTab] = useState(ctxGauge || '1.6');
-  const [rateColorTab, setRateColorTab] = useState(ctxColor || 'DULL');
+  const [rateGaugeTab, setRateGaugeTab] = useState<string>(() => normalizeGauge(ctxGauge || '1.6mm'));
+  const [rateColorTab, setRateColorTab] = useState<string>(() =>
+    normalizeOfficialColor(ctxColor || 'DULL')
+  );
   const [rateSearch, setRateSearch] = useState('');
   const [newSecCodeInput, setNewSecCodeInput] = useState('');
   const [newSecRateInput, setNewSecRateInput] = useState('750');
@@ -955,6 +972,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   const [showRateUpdater, setShowRateUpdater] = useState(false);
   const [ratePasteText, setRatePasteText] = useState('');
   const [rateScanLoading, setRateScanLoading] = useState(false);
+  const [rateScanEffectiveDate, setRateScanEffectiveDate] = useState('');
   const [rateScanRows, setRateScanRows] = useState<
     { sectionTitle: string; sectionCode: string; gauge: string; color: string; rate: number }[]
   >([]);
@@ -962,145 +980,15 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
   const [rateBulkScope, setRateBulkScope] = useState<'CURRENT' | 'ALL'>('ALL');
 
   const parseClientRateListText = (raw: string) => {
-    const lines = raw
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter(Boolean);
-    const parsed: {
-      sectionTitle: string;
-      sectionCode: string;
-      gauge: string;
-      color: string;
-      rate: number;
-    }[] = [];
-
-    const knownColors = [
-      'DULL',
-      'BROWN',
-      'H23',
-      'PC-RAL',
-      'BLACK',
-      'SAHARA',
-      'WOOD COAT',
-      'MULTI',
-      'NATURAL',
-      'D.SHINE',
-      'ANODIZED',
-    ];
-    let detectedHeaderCols: string[] = [];
-
-    lines.forEach((line) => {
-      const upper = line.toUpperCase();
-      // Detect table header row
-      if (
-        (upper.includes('DULL') && (upper.includes('BROWN') || upper.includes('BLACK') || upper.includes('H23'))) ||
-        upper.startsWith('SEC')
-      ) {
-        const cols = upper
-          .split(/\t|\||,| {2,}/)
-          .map((c) => c.trim())
-          .filter(Boolean);
-        const foundCols = cols.filter((c) => knownColors.some((kc) => c.includes(kc)));
-        if (foundCols.length >= 2) {
-          detectedHeaderCols = cols;
-          return;
-        }
-      }
-
-      // Format 1: Delimited 4 columns -> SECTION | GAUGE | COLOR | RATE
-      const parts = line
-        .split(/\t|\||,|=/)
-        .map((p) => p.trim())
-        .filter(Boolean);
-
-      if (parts.length >= 4 && !Number.isNaN(Number(parts[parts.length - 1].replace(/[^0-9.]/g, '')))) {
-        // Check if multi-column mill row matching header
-        if (detectedHeaderCols.length >= 3 && parts.length >= detectedHeaderCols.length) {
-          const secRaw = parts[0].toUpperCase();
-          const gMatch = secRaw.match(/(1\.2|1\.4|1\.5|1\.6|2\.0|2MM|1\.6M)/i);
-          const gauge = gMatch ? gMatch[1].replace(/mm|m/i, '').replace('2.0', '2') : rateGaugeTab || '1.6';
-          const cleanCode = secRaw.replace(/\s+(1\.6M|2MM|1\.6MM|1\.2|1\.4|1\.5|1\.6|2\.0)$/i, '').trim();
-          for (let i = 1; i < Math.min(parts.length, detectedHeaderCols.length); i++) {
-            const num = parseFloat(parts[i].replace(/[^0-9.]/g, ''));
-            const colHeader = detectedHeaderCols[i];
-            const mappedCol =
-              knownColors.find((kc) => colHeader.includes(kc)) || colHeader;
-            if (cleanCode && num > 0) {
-              parsed.push({
-                sectionTitle: secRaw,
-                sectionCode: cleanCode,
-                gauge,
-                color: mappedCol,
-                rate: Math.round(num),
-              });
-            }
-          }
-          return;
-        }
-
-        const secCode = (parts.length >= 5 ? parts[1] : parts[0]).toUpperCase();
-        const gaugeRaw = (parts.length >= 5 ? parts[2] : parts[1]).replace(/mm/i, '').trim();
-        const colorRaw = (parts.length >= 5 ? parts[3] : parts[2]).toUpperCase();
-        const rateNum = parseFloat(parts[parts.length - 1].replace(/[^0-9.]/g, ''));
-        if (secCode && rateNum > 0) {
-          parsed.push({
-            sectionTitle: parts[0],
-            sectionCode: secCode,
-            gauge: gaugeRaw || rateGaugeTab || '1.6',
-            color: colorRaw || rateColorTab || 'DULL',
-            rate: Math.round(rateNum),
-          });
-        }
-        return;
-      }
-
-      // Format 2: Simple "SECTION = RATE" or "SECTION 950"
-      if (parts.length === 2) {
-        const num = parseFloat(parts[1].replace(/[^0-9.]/g, ''));
-        if (parts[0] && num > 0) {
-          parsed.push({
-            sectionTitle: parts[0].toUpperCase(),
-            sectionCode: parts[0].toUpperCase(),
-            gauge: rateGaugeTab || '1.6',
-            color: rateColorTab || 'DULL',
-            rate: Math.round(num),
-          });
-          return;
-        }
-      }
-
-      // Format 3: Space-separated single line e.g. "DC30C 1.6 DULL 950" or "DC30C 950"
-      const tokens = line.split(/\s+/).filter(Boolean);
-      if (tokens.length === 2) {
-        const num = parseFloat(tokens[1].replace(/[^0-9.]/g, ''));
-        if (num > 0) {
-          parsed.push({
-            sectionTitle: tokens[0].toUpperCase(),
-            sectionCode: tokens[0].toUpperCase(),
-            gauge: rateGaugeTab || '1.6',
-            color: rateColorTab || 'DULL',
-            rate: Math.round(num),
-          });
-        }
-      } else if (tokens.length >= 4) {
-        const lastNum = parseFloat(tokens[tokens.length - 1].replace(/[^0-9.]/g, ''));
-        if (lastNum > 0) {
-          const maybeGauge = tokens[1].replace(/mm/i, '');
-          const isGauge = /^(1\.2|1\.4|1\.5|1\.6|2|2\.0|3|4|6)$/.test(maybeGauge);
-          if (isGauge) {
-            parsed.push({
-              sectionTitle: tokens[0].toUpperCase(),
-              sectionCode: tokens[0].toUpperCase(),
-              gauge: maybeGauge === '2.0' ? '2' : maybeGauge,
-              color: tokens.slice(2, -1).join(' ').toUpperCase() || rateColorTab,
-              rate: Math.round(lastNum),
-            });
-          }
-        }
-      }
-    });
-
-    return parsed;
+    const res = parseClientRateListTextSmart(
+      raw,
+      normalizeGauge(rateGaugeTab || '1.6mm'),
+      normalizeOfficialColor(rateColorTab || 'DULL')
+    );
+    if (res.effectiveDate) {
+      setRateScanEffectiveDate(res.effectiveDate);
+    }
+    return res.rows;
   };
 
   const handleClientScanRateImages = async (fileList: FileList | null) => {
@@ -1108,28 +996,27 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     const selectedFiles = Array.from(fileList).slice(0, 3);
     setRateScanLoading(true);
     try {
-      const filesPayload: { imageBase64: string; mimeType: string }[] = [];
-      for (const f of selectedFiles) {
-        const compressedDataUrl = await compressFileToJpegDataUrl(f, 1000, 0.7, 150 * 1024);
-        const commaIdx = compressedDataUrl.indexOf(',');
-        const base64 = commaIdx >= 0 ? compressedDataUrl.slice(commaIdx + 1) : compressedDataUrl;
-        filesPayload.push({ imageBase64: base64, mimeType: 'image/jpeg' });
-      }
-
-      const resp = await fetch('/api/scan-rate-list', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ files: filesPayload, rawTextInput: ratePasteText }),
+      const result = await scanIttehadRateList({
+        files: selectedFiles,
+        rawTextInput: ratePasteText,
+        apiKey: geminiApiKey,
+        fallbackGauge: normalizeGauge(rateGaugeTab || '1.6mm'),
+        fallbackColor: normalizeOfficialColor(rateColorTab || 'DULL'),
       });
-      const data = await resp.json();
-      if (resp.ok && Array.isArray(data?.rows) && data.rows.length > 0) {
-        setRateScanRows(data.rows);
-        showSettingsToast(`✅ Extracted ${data.rows.length} rates! Review below and click Save to Device.`);
+      if (result.ok && result.rows.length > 0) {
+        setRateScanRows(result.rows);
+        if (result.effectiveDate) {
+          setRateScanEffectiveDate(result.effectiveDate);
+          onUpdateEffectiveDate?.(result.effectiveDate);
+        }
+        showSettingsToast(
+          `✅ Extracted ${result.rows.length} ITTEHAD rates${result.effectiveDate ? ` (${result.effectiveDate})` : ''}! Review & click Apply & Save.`
+        );
       } else {
-        showSettingsToast(data?.error || 'Could not extract rates from image.');
+        showSettingsToast(result.error || 'ITTEHAD rate sheet se valid rates nahi mil sake.');
       }
     } catch (err: any) {
-      showSettingsToast(err?.message || 'Error scanning rate list image.');
+      showSettingsToast(err?.message || 'Error scanning ITTEHAD rate sheet.');
     } finally {
       setRateScanLoading(false);
     }
@@ -1190,7 +1077,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
 
     windows.forEach((w, idx) => {
       const effFt = targetFt || (w.frameType ? w.frameType : 'C');
-      const effGauge = masterGaugeActive ? ctxGauge : w.sectionGauge;
+      const effGauge = normalizeGauge(masterGaugeActive ? ctxGauge : w.sectionGauge);
       const winWithEff = { ...w, frameType: effFt, sectionGauge: effGauge };
       const src = `Window #${idx + 1} (${w.panelCount} Palay)`;
       computeSlidingWindowPieces(winWithEff, effFt, windowFormula, fSectionFormula).forEach((p) => {
@@ -1198,7 +1085,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
         all.push({
           ...p,
           source: src,
-          gauge: normSec === 'D29' || normSec === 'D31' ? '1.2' : effGauge,
+          gauge: normSec === 'D29' || normSec === 'D31' ? '1.2mm' : effGauge,
         });
       });
     });
@@ -1210,7 +1097,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
           : dw.frameType === 'F'
           ? 'F'
           : 'C';
-      const effGauge = masterGaugeActive ? ctxGauge : dw.sectionGauge;
+      const effGauge = normalizeGauge(masterGaugeActive ? ctxGauge : dw.sectionGauge);
       const dwWithEff: DgWindowItem = { ...dw, frameType: effFt, sectionGauge: effGauge };
       const src = `DG.Window #${idx + 1} (${dw.panelCount} Palay)`;
       computeDgWindowPieces(dwWithEff, effFt, dgWindowFormula, fSectionFormula).forEach((p) => {
@@ -1218,7 +1105,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
         all.push({
           ...p,
           source: src,
-          gauge: normSec === 'DG29' || normSec === 'DG31' ? '1.2' : effGauge,
+          gauge: normSec === 'DG29' || normSec === 'DG31' ? '1.2mm' : effGauge,
         });
       });
     });
@@ -1226,7 +1113,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     doors.forEach((d, idx) => {
       const src = `Door #${idx + 1}`;
       const effOuter = resolveOuter(d.outer);
-      const effGauge = masterGaugeActive ? ctxGauge : d.sectionGauge;
+      const effGauge = normalizeGauge(masterGaugeActive ? ctxGauge : d.sectionGauge);
       computeOpenablePieces(
         d.width,
         d.height,
@@ -1246,7 +1133,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     fixframes.forEach((f, idx) => {
       const src = `Fix Frame #${idx + 1}`;
       const effOuter = resolveOuter(f.outer);
-      const effGauge = masterGaugeActive ? ctxGauge : f.sectionGauge;
+      const effGauge = normalizeGauge(masterGaugeActive ? ctxGauge : f.sectionGauge);
       computeOpenablePieces(
         f.width,
         f.height,
@@ -1266,7 +1153,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     openableWindows.forEach((op, idx) => {
       const src = `Openable Window #${idx + 1}`;
       const effOuter = resolveOuter(op.outer);
-      const effGauge = masterGaugeActive ? ctxGauge : op.sectionGauge;
+      const effGauge = normalizeGauge(masterGaugeActive ? ctxGauge : op.sectionGauge);
       computeOpenablePieces(
         op.width,
         op.height,
@@ -1286,7 +1173,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     slidingDoors.forEach((sd, idx) => {
       const src = `Sliding Door #${idx + 1} (${sd.panelCount} Palay)`;
       const effOuter = targetFt ? (targetFt === 'F' ? 'F' : targetFt === 'C' ? 'NORMAL' : targetFt) : sd.outer;
-      const effGauge = masterGaugeActive ? ctxGauge : sd.sectionGauge;
+      const effGauge = normalizeGauge(masterGaugeActive ? ctxGauge : sd.sectionGauge);
       computeSlidingDoorPieces(
         { ...sd, outer: effOuter, sectionGauge: effGauge },
         slidingDoorFormula,
@@ -1295,7 +1182,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
         all.push({
           ...p,
           source: src,
-          gauge: normalizeSectionCode(p.section) === 'D31' ? '1.2' : effGauge,
+          gauge: normalizeSectionCode(p.section) === 'D31' ? '1.2mm' : effGauge,
         })
       );
     });
@@ -1671,63 +1558,63 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
       windows.forEach((w, idx) => {
         itemEntries.push({
           left: `Window #${idx + 1} (${w.panelCount || 2}-Panel ${w.frameType})`,
-          mid: `${formatDim(w.width, measurementUnit)} × ${formatDim(w.height, measurementUnit)} · ${w.sectionGauge}mm`,
+          mid: `${formatDim(w.width, measurementUnit)} × ${formatDim(w.height, measurementUnit)} · ${formatGaugeLabel(w.sectionGauge)}`,
           right: `Qty: ${w.qty || 1}`,
         });
       });
       dgWindows.forEach((w, idx) => {
         itemEntries.push({
           left: `DG Window #${idx + 1} (${w.panelCount || 2}-Panel ${w.frameType})`,
-          mid: `${formatDim(w.width, measurementUnit)} × ${formatDim(w.height, measurementUnit)} · ${w.sectionGauge}mm`,
+          mid: `${formatDim(w.width, measurementUnit)} × ${formatDim(w.height, measurementUnit)} · ${formatGaugeLabel(w.sectionGauge)}`,
           right: `Qty: ${w.qty || 1}`,
         });
       });
       doors.forEach((d, idx) => {
         itemEntries.push({
           left: `Door #${idx + 1} (${d.outer})`,
-          mid: `${formatDim(d.width, measurementUnit)} × ${formatDim(d.height, measurementUnit)} · ${d.sectionGauge}mm`,
+          mid: `${formatDim(d.width, measurementUnit)} × ${formatDim(d.height, measurementUnit)} · ${formatGaugeLabel(d.sectionGauge)}`,
           right: `Qty: ${d.qty || 1}`,
         });
       });
       fixframes.forEach((f, idx) => {
         itemEntries.push({
           left: `Fix Frame #${idx + 1} (${f.outer})`,
-          mid: `${formatDim(f.width, measurementUnit)} × ${formatDim(f.height, measurementUnit)} · ${f.sectionGauge}mm`,
+          mid: `${formatDim(f.width, measurementUnit)} × ${formatDim(f.height, measurementUnit)} · ${formatGaugeLabel(f.sectionGauge)}`,
           right: `Qty: ${f.qty || 1}`,
         });
       });
       openableWindows.forEach((o, idx) => {
         itemEntries.push({
           left: `Openable #${idx + 1} (${o.outer})`,
-          mid: `${formatDim(o.width, measurementUnit)} × ${formatDim(o.height, measurementUnit)} · ${o.sectionGauge}mm`,
+          mid: `${formatDim(o.width, measurementUnit)} × ${formatDim(o.height, measurementUnit)} · ${formatGaugeLabel(o.sectionGauge)}`,
           right: `Qty: ${o.qty || 1}`,
         });
       });
       slidingDoors.forEach((s, idx) => {
         itemEntries.push({
           left: `Sliding Door #${idx + 1} (${s.panelCount || 2}-Panel ${s.outer})`,
-          mid: `${formatDim(s.width, measurementUnit)} × ${formatDim(s.height, measurementUnit)} · ${s.sectionGauge}mm`,
+          mid: `${formatDim(s.width, measurementUnit)} × ${formatDim(s.height, measurementUnit)} · ${formatGaugeLabel(s.sectionGauge)}`,
           right: `Qty: ${s.qty || 1}`,
         });
       });
       projectExtras.forEach((ex, idx) => {
         itemEntries.push({
           left: `Extra #${idx + 1} (${ex.section})`,
-          mid: `${ex.lengthFt} ft · ${ex.gauge}mm`,
+          mid: `${ex.lengthFt} ft · ${formatGaugeLabel(ex.gauge)}`,
           right: `Qty: ${ex.qty || 1}`,
         });
       });
       if (itemEntries.length > 0) {
         lines.push({
           left: `PROJECT ITEMS & MEASUREMENTS (${activeQuote.totalUnits} Units)`,
-          right: `${ctxColor} · ${ctxGauge}mm`,
+          right: `${normalizeOfficialColor(ctxColor)} · ${formatGaugeLabel(ctxGauge)}`,
           highlight: true,
         });
         itemEntries.forEach((entry) => lines.push(entry));
       }
       activeQuote.aluminiumRows.forEach((row) => {
         lines.push({
-          left: `${resolveSectionLabel(row.section)} (${row.gauge}mm)`,
+          left: `${resolveSectionLabel(row.section)} (${formatGaugeLabel(row.gauge)})`,
           mid: `${row.bars} Bars · ${row.totalFt} ft @ Rs ${Math.round(row.ratePerFt)}`,
           right: `Rs ${Math.round(row.cost).toLocaleString()}`,
         });
@@ -1896,7 +1783,14 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     drawTruncatedText(ctx, `${title} (${quoteRefNumber})`, width - 44, 68, 430, 'right');
     ctx.fillStyle = '#E2E8F0';
     ctx.font = '13px monospace';
-    drawTruncatedText(ctx, `Date: ${new Date().toLocaleDateString('en-GB')}`, width - 44, 94, 430, 'right');
+    drawTruncatedText(
+      ctx,
+      `Date: ${new Date().toLocaleDateString('en-GB')}${rateListEffectiveDate ? ` · Rates W.E.F: ${rateListEffectiveDate}` : ''}`,
+      width - 44,
+      94,
+      430,
+      'right'
+    );
     drawTruncatedText(
       ctx,
       `Customer: ${customerName || 'Valued Client'} ${customerPhone ? `(${customerPhone})` : ''}`,
@@ -1974,7 +1868,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
     const lines: { left: string; mid?: string; right: string; highlight?: boolean }[] = [
       {
         left: 'Project Items Summary',
-        mid: `${item.totalUnits} Total Units (${item.gauge}mm · ${item.color})`,
+        mid: `${item.totalUnits} Total Units (${formatGaugeLabel(item.gauge)} · ${normalizeOfficialColor(item.color)})`,
         right: item.itemsSummary,
       },
       {
@@ -2703,12 +2597,12 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               }`}
             >
               <select
-                value={ctxGaugeMode === 'OFF' ? 'OFF' : ctxGauge}
+                value={ctxGaugeMode === 'OFF' ? 'OFF' : normalizeGauge(ctxGauge)}
                 onChange={(e) => {
                   if (e.target.value === 'OFF') {
-                    onSetCtxGauge(ctxGauge, 'OFF');
+                    onSetCtxGauge(normalizeGauge(ctxGauge), 'OFF');
                   } else {
-                    onSetCtxGauge(e.target.value, 'ON');
+                    onSetCtxGauge(normalizeGauge(e.target.value), 'ON');
                   }
                 }}
                 className={`w-full bg-transparent text-[10px] sm:text-[11px] font-bold text-center focus:outline-none cursor-pointer truncate ${
@@ -2717,7 +2611,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               >
                 {GAUGES.map((g) => (
                   <option key={g} value={g} className="bg-[#14181F] text-white">
-                    {g}mm
+                    {formatGaugeLabel(g)}
                   </option>
                 ))}
                 <option value="OFF" className="bg-[#14181F] text-rose-300">
@@ -3072,7 +2966,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
             height: 60,
             qty: 1,
             frameType: ft,
-            sectionGauge: ctxGaugeMode === 'ON' ? ctxGauge : '1.6',
+            sectionGauge: ctxGaugeMode === 'ON' ? normalizeGauge(ctxGauge) : '1.6mm',
             glassGauge: ctxGlassMode === 'ON' ? ctxGlassGauge : '5',
             glassColor: ctxGlassMode === 'ON' ? ctxGlassColor : 'CLEAR',
             glassEnabled: true,
@@ -3517,7 +3411,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
             height: 60,
             qty: 1,
             frameType: ft,
-            sectionGauge: ctxGaugeMode === 'ON' ? ctxGauge : '1.6',
+            sectionGauge: ctxGaugeMode === 'ON' ? normalizeGauge(ctxGauge) : '1.6mm',
             glassGauge: 'DG',
             glassColor: dgCols[0] || 'CLEAR',
             glassEnabled: true,
@@ -4837,13 +4731,13 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               <div>
                 <label className="block text-[10px] text-slate-400 mb-0.5">Gauge</label>
                 <select
-                  value={extraGauge}
-                  onChange={(e) => setExtraGauge(e.target.value)}
+                  value={normalizeGauge(extraGauge)}
+                  onChange={(e) => setExtraGauge(normalizeGauge(e.target.value))}
                   className="w-full px-2 py-1.5 rounded-lg bg-[#0C0F14] border border-slate-700 text-white"
                 >
-                  {GAUGES.slice(0, 6).map((g) => (
+                  {GAUGES.map((g) => (
                     <option key={g} value={g}>
-                      {g}mm
+                      {formatGaugeLabel(g)}
                     </option>
                   ))}
                 </select>
@@ -4914,7 +4808,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                     <span className="text-white font-mono">
                       {ex.lengthFt} ft × {ex.qty} pcs = {((Number(ex.lengthFt) || 0) * (Number(ex.qty) || 0)).toFixed(1)} ft
                     </span>{' '}
-                    <span className="text-slate-400">({ex.gauge}mm)</span>
+                    <span className="text-slate-400">({formatGaugeLabel(ex.gauge)})</span>
                     {exRate > 0 && (
                       <span className="ml-1.5 text-[10.5px] font-mono text-emerald-400">
                         · Rs {Math.round(exRate)}/ft
@@ -5687,8 +5581,8 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                       label: `Quotation - ${customerName || 'Valued Client'}`,
                       customerName,
                       customerPhone,
-                      gauge: ctxGauge,
-                      color: ctxColor,
+                      gauge: normalizeGauge(ctxGauge),
+                      color: normalizeOfficialColor(ctxColor),
                       frameType: ctxFrameType,
                       grandTotal: activeQuote.grandTotal,
                       alumTotal: activeQuote.alumWithMarkup,
@@ -6376,7 +6270,12 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                           FABRICATION & GLAZING ESTIMATE
                         </span>
                       </div>
-                      <div className="flex items-center gap-2 font-mono text-xs">
+                      <div className="flex items-center gap-2 font-mono text-xs flex-wrap">
+                        {rateListEffectiveDate && (
+                          <span className="px-2.5 py-1 rounded bg-emerald-950/90 border border-emerald-500/50 text-emerald-300 font-bold">
+                            Rates W.E.F: {rateListEffectiveDate}
+                          </span>
+                        )}
                         <span className="px-2.5 py-1 rounded bg-[#0C1017]/90 border border-amber-500/40 text-amber-300 font-bold">
                           Date: {new Date().toLocaleDateString('en-GB')}
                         </span>
@@ -6411,6 +6310,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                       <div className="text-right font-mono text-xs space-y-1">
                         <div className="text-[#F5B738] font-black text-sm">OFFICIAL QUOTATION</div>
                         <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                          {rateListEffectiveDate && (
+                            <span className="px-2 py-0.5 rounded bg-emerald-950/90 border border-emerald-500/50 text-emerald-300 font-bold">
+                              Rates W.E.F: {rateListEffectiveDate}
+                            </span>
+                          )}
                           <span className="px-2 py-0.5 rounded bg-[#0C1017]/90 border border-amber-500/40 text-slate-200 font-semibold">
                             Date: {new Date().toLocaleDateString('en-GB')}
                           </span>
@@ -6430,7 +6334,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                       {customerPhone && `(${customerPhone})`}
                     </div>
                     <div className="font-mono text-amber-300">
-                      Color: {ctxColor} · Gauge: {ctxGauge}mm · Frame: {ctxFrameType}
+                      Color: {normalizeOfficialColor(ctxColor)} · Gauge: {formatGaugeLabel(ctxGauge)} · Frame: {ctxFrameType}
                     </div>
                   </div>
 
@@ -6451,7 +6355,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                           <tr key={idx}>
                             <td className="py-2 px-3 text-white font-sans">
                               {resolveSectionLabel(row.section)}{' '}
-                              <span className="text-slate-300 font-mono">({row.gauge}mm)</span>
+                              <span className="text-slate-300 font-mono">({formatGaugeLabel(row.gauge)})</span>
                             </td>
                             <td className="py-2 px-3 text-center text-slate-200">{row.bars}</td>
                             <td className="py-2 px-3 text-center text-slate-200">{row.totalFt}</td>
@@ -6618,7 +6522,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
 
                     <div className="flex flex-wrap items-center gap-1.5">
                       <span className="px-2 py-0.5 rounded-lg bg-[#0C0F14] border border-slate-700 text-[10px] font-semibold text-sky-300">
-                        {item.color} · {item.gauge}mm · Frame {item.frameType}
+                        {normalizeOfficialColor(item.color)} · {formatGaugeLabel(item.gauge)} · Frame {item.frameType}
                       </span>
                       <span className="px-2 py-0.5 rounded-lg bg-[#0C0F14] border border-slate-700 text-[10px] font-semibold text-slate-300">
                         {item.itemsSummary}
@@ -6787,9 +6691,14 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <div>
                   <div className="text-xs sm:text-sm font-extrabold text-[#F5B738]">
-                    Rates Setup ({rateGaugeTab}mm - {rateColorTab})
+                    Rates Setup ({formatGaugeLabel(rateGaugeTab)} - {normalizeOfficialColor(rateColorTab)})
                   </div>
                   <div className="flex flex-wrap items-center gap-2 text-[10px]">
+                    {rateListEffectiveDate && (
+                      <span className="px-1.5 py-0.5 rounded bg-amber-500/15 border border-[#F5B738]/40 text-[#F5B738] font-mono font-bold">
+                        📅 Effective: {rateListEffectiveDate}
+                      </span>
+                    )}
                     {rateListSavedAt && (
                       <span className="text-emerald-400 font-mono font-bold">
                         ✓ Saved on Device ({new Date(rateListSavedAt).toLocaleDateString('en-GB')})
@@ -6833,18 +6742,25 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                 </div>
               </div>
 
-              {/* Compact Icon-Only Smart Action Toolbar (Scan Photo | Sync Cloud | Import JSON | Save Device | Utilities) */}
+              {/* Mandatory ITTEHAD ALUMINIUM Notice Banner above Scanner Card */}
+              <div className="px-3 py-2 rounded-xl bg-amber-950/50 border border-[#F5B738]/60 text-[11px] font-bold text-amber-200 flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-[#F5B738] shrink-0" />
+                <span>{ITTEHAD_SCANNER_NOTICE}</span>
+              </div>
+
+              {/* Compact Smart Action Toolbar (Scan Photo/PDF | Sync Cloud | Import JSON | Save Device | Utilities) */}
               <div className="flex items-center justify-between gap-1.5 flex-wrap">
                 <div className="flex items-center gap-1.5">
                   <label
-                    className="boss-flat-btn w-8 h-8 rounded-lg bg-[#F5B738] hover:bg-amber-400 text-black flex items-center justify-center cursor-pointer"
-                    title={rateScanLoading ? 'Scanning Rate Photo...' : 'AI Scan Photo'}
-                    aria-label="AI Scan Photo"
+                    className="boss-flat-btn px-2.5 h-8 rounded-lg bg-[#F5B738] hover:bg-amber-400 text-black font-extrabold text-[11px] flex items-center justify-center gap-1.5 cursor-pointer"
+                    title={rateScanLoading ? 'Scanning Rate Sheet...' : 'Scan ITTEHAD Rate Sheet (Photo / Screenshot / JPG / PDF)'}
+                    aria-label="AI Scan Rate Sheet"
                   >
                     <Camera className={`w-4 h-4 ${rateScanLoading ? 'animate-pulse' : ''}`} />
+                    <span>{rateScanLoading ? 'Scanning...' : 'Scan Photo / PDF'}</span>
                     <input
                       type="file"
-                      accept="image/*"
+                      accept="image/*,application/pdf,.pdf"
                       multiple
                       disabled={rateScanLoading}
                       onChange={(e) => {
@@ -6899,8 +6815,8 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                                       importedRows.push({
                                         sectionTitle: sec,
                                         sectionCode: sec,
-                                        gauge: g,
-                                        color: col,
+                                        gauge: normalizeGauge(g),
+                                        color: normalizeOfficialColor(col),
                                         rate: num,
                                       });
                                     }
@@ -6908,7 +6824,8 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                                 });
                               });
                               if (importedRows.length > 0) {
-                                onApplyRateListRows(importedRows);
+                                const effD = String(parsed.rateListEffectiveDate || parsed.effectiveDate || '').trim();
+                                onApplyRateListRows(importedRows, effD || undefined);
                                 onSaveRatesToDevice();
                                 showSettingsToast(`Imported ${importedRows.length} rates & saved to device!`);
                                 return;
@@ -6961,17 +6878,32 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   <button
                     type="button"
                     onClick={() => {
-                      if (onUpdateSectionRate) {
+                      if (onApplyRateListRows) {
+                        const dgRows: {
+                          sectionTitle: string;
+                          sectionCode: string;
+                          gauge: string;
+                          color: string;
+                          rate: number;
+                        }[] = [];
                         DG_SERIES_SCANNED_RATES.forEach((item) => {
-                          const sec = item.sec;
-                          const g = item.gauge;
+                          const sec = normalizeSectionCode(item.sec);
+                          const g = normalizeGauge(item.gauge);
                           Object.entries(item.rates).forEach(([col, r]) => {
-                            onUpdateSectionRate(g, col, sec, r);
-                            onUpdateSectionRate(g, col, item.fullCode, r);
+                            if (r > 0) {
+                              dgRows.push({
+                                sectionTitle: sec,
+                                sectionCode: sec,
+                                gauge: g,
+                                color: normalizeOfficialColor(col),
+                                rate: r,
+                              });
+                            }
                           });
                         });
+                        onApplyRateListRows(dgRows, rateListEffectiveDate || '03-APRIL-2026');
                       }
-                      showSettingsToast('Applied DG.SERIES Rates — tap Save to store!');
+                      showSettingsToast('Applied official DG.SERIES rates & saved to device!');
                     }}
                     className="boss-flat-btn w-7 h-7 rounded-lg bg-[#0C0F14] border border-emerald-500/50 text-emerald-300 hover:bg-emerald-500 hover:text-black flex items-center justify-center cursor-pointer"
                     title="Auto-Apply DG.SERIES Rates"
@@ -7076,7 +7008,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                       >
                         <option value="ALL">All Gauges &amp; Colors</option>
                         <option value="CURRENT">
-                          Only {rateGaugeTab}mm · {rateColorTab}
+                          Only {formatGaugeLabel(rateGaugeTab)} · {normalizeOfficialColor(rateColorTab)}
                         </option>
                       </select>
                       <input
@@ -7095,11 +7027,11 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                           if (!pctVal || Number.isNaN(pctVal)) return;
                           onBulkAdjustRatesPct?.(
                             pctVal,
-                            rateBulkScope === 'CURRENT' ? rateGaugeTab : 'ALL',
-                            rateBulkScope === 'CURRENT' ? rateColorTab : 'ALL'
+                            rateBulkScope === 'CURRENT' ? normalizeGauge(rateGaugeTab) : 'ALL',
+                            rateBulkScope === 'CURRENT' ? normalizeOfficialColor(rateColorTab) : 'ALL'
                           );
                           showSettingsToast(
-                            `Updated ${rateBulkScope === 'CURRENT' ? `${rateGaugeTab}mm ${rateColorTab}` : 'All'} rates by ${pctVal > 0 ? '+' : ''}${pctVal}% & saved!`
+                            `Updated ${rateBulkScope === 'CURRENT' ? `${formatGaugeLabel(rateGaugeTab)} ${normalizeOfficialColor(rateColorTab)}` : 'All'} rates by ${pctVal > 0 ? '+' : ''}${pctVal}% & saved!`
                           );
                         }}
                         className="boss-flat-btn px-2.5 py-1 rounded bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-[11px] cursor-pointer"
@@ -7113,13 +7045,13 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
                     <div className="space-y-2">
                       <label className="block text-[10px] font-bold text-slate-300">
-                        Paste Rates (<span className="font-mono text-amber-300">DC30C | 1.6 | DULL | 980</span> ya <span className="font-mono text-amber-300">DC30C = 980</span>):
+                        Paste Rates (<span className="font-mono text-amber-300">DC30C | 1.6mm | DULL | 980</span> ya <span className="font-mono text-amber-300">DC30C = 980</span>):
                       </label>
                       <textarea
                         rows={3}
                         value={ratePasteText}
                         onChange={(e) => setRatePasteText(e.target.value)}
-                        placeholder={'DC30C | 1.6 | DULL | 980\nDC26C | 1.6 | DULL | 940\nD54A = 1120'}
+                        placeholder={'DC30C | 1.6mm | DULL | 980\nDC26C | 1.6mm | DULL | 940\nD54A = 1120'}
                         className="w-full p-2 rounded-lg bg-[#14181F] border border-slate-700 font-mono text-[11px] text-white focus:border-sky-400 outline-none"
                       />
                       <button
@@ -7140,14 +7072,24 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                     </div>
 
                     <div className="p-2.5 rounded-lg bg-[#14181F] border border-slate-800 space-y-2">
-                      <div className="flex items-center justify-between">
-                        <span className="font-bold text-[#F5B738] text-[11px]">
-                          Extracted Rows ({rateScanRows.length})
-                        </span>
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="font-bold text-[#F5B738] text-[11px]">
+                            Extracted Rows ({rateScanRows.length})
+                          </span>
+                          {rateScanEffectiveDate && (
+                            <span className="px-1.5 py-0.5 rounded bg-emerald-950 border border-emerald-500/40 text-emerald-300 text-[9px] font-mono font-bold truncate">
+                              W.E.F: {rateScanEffectiveDate}
+                            </span>
+                          )}
+                        </div>
                         {rateScanRows.length > 0 && (
                           <button
                             type="button"
-                            onClick={() => setRateScanRows([])}
+                            onClick={() => {
+                              setRateScanRows([]);
+                              setRateScanEffectiveDate('');
+                            }}
                             className="boss-flat-btn text-[10px] text-rose-400 hover:underline"
                           >
                             Clear
@@ -7156,7 +7098,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                       </div>
                       {rateScanRows.length === 0 ? (
                         <div className="text-[10px] text-slate-400 py-3 text-center">
-                          Scan photo or paste rate rows to preview &amp; apply.
+                          ITTEHAD ALUMINIUM photo, screenshot ya PDF scan karein ya text paste karein.
                         </div>
                       ) : (
                         <>
@@ -7169,8 +7111,8 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                                 <span className="font-mono font-bold text-[#F5B738] truncate">
                                   {row.sectionCode}
                                 </span>
-                                <span className="text-slate-400 font-mono">{row.gauge}mm</span>
-                                <span className="text-sky-300 truncate">{row.color}</span>
+                                <span className="text-slate-400 font-mono">{formatGaugeLabel(row.gauge)}</span>
+                                <span className="text-sky-300 truncate">{normalizeOfficialColor(row.color)}</span>
                                 <input
                                   type="number"
                                   value={row.rate}
@@ -7188,7 +7130,10 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                             type="button"
                             onClick={() => {
                               if (onApplyRateListRows) {
-                                const res = onApplyRateListRows(rateScanRows);
+                                const res = onApplyRateListRows(
+                                  rateScanRows,
+                                  rateScanEffectiveDate || rateListEffectiveDate
+                                );
                                 onSaveRatesToDevice();
                                 showSettingsToast(
                                   `Saved to Device! Updated ${res.updated} & added ${res.inserted} rates.`
@@ -7262,147 +7207,72 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
               </div>
 
               {/* =========================================================== */}
-              {/* ALUMINIUM RATES (3-COL GRID OR 3-COL TABLE)                 */}
+              {/* ALUMINIUM RATES (STRICT GAUGE ISOLATION & 5 OFFICIAL COLORS) */}
               {/* =========================================================== */}
               {rateCategoryTab === 'ALUMINIUM' && (
                 <div className="space-y-3">
                   {/* Gauges & Colors Selector Box */}
                   <div className="p-2.5 rounded-xl bg-[#0C0F14] border border-slate-800 space-y-2.5">
                     <div className="space-y-1.5">
-                      <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wide">
-                        Aluminium Gauges (Tap to Select):
+                      <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wide flex items-center justify-between gap-2">
+                        <span>Aluminium Gauges (Standardized &amp; Locked):</span>
+                        <span className="text-[9px] text-amber-300/80 font-mono">1.2mm · 1.6mm · 2mm · 3mm · 6mm</span>
                       </div>
                       <div className="flex flex-wrap items-center gap-1.5">
-                        {GAUGES.map((g) => (
-                          <button
-                            key={g}
-                            type="button"
-                            onClick={() => setRateGaugeTab(g)}
-                            className={`boss-flat-btn px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer ${
-                              rateGaugeTab === g
-                                ? 'bg-[#F5B738] text-black'
-                                : 'bg-[#14181F] border border-slate-700 text-slate-300'
-                            }`}
-                          >
-                            {g}mm
-                          </button>
-                        ))}
+                        {GAUGES.map((g) => {
+                          const normTab = normalizeGauge(rateGaugeTab);
+                          return (
+                            <button
+                              key={g}
+                              type="button"
+                              onClick={() => setRateGaugeTab(g)}
+                              className={`boss-flat-btn px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer ${
+                                normTab === g
+                                  ? 'bg-[#F5B738] text-black'
+                                  : 'bg-[#14181F] border border-slate-700 text-slate-300'
+                              }`}
+                            >
+                              {formatGaugeLabel(g)}
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
 
                     <div className="space-y-1.5 border-t border-slate-800/80 pt-2">
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wide">
-                          Aluminium Colors (Tap to Select / × Delete):
+                          Official 5 Aluminium Colors (Locked):
                         </span>
-                        <button
-                          type="button"
-                          onClick={() => setShowAddColorForm((v) => !v)}
-                          className="boss-flat-btn px-2 py-0.5 rounded bg-[#F5B738] text-black font-extrabold text-[10px] cursor-pointer shrink-0"
-                        >
-                          + Add Color
-                        </button>
+                        <span className="px-1.5 py-0.5 rounded bg-slate-800/80 text-[9px] font-bold text-slate-300 flex items-center gap-1">
+                          <Lock className="w-2.5 h-2.5 text-[#F5B738]" />
+                          Locked
+                        </span>
                       </div>
 
-                      {showAddColorForm && (
-                        <div className="flex items-center gap-1.5 pt-1">
-                          <input
-                            type="text"
-                            value={newColorInput}
-                            onChange={(e) => setNewColorInput(e.target.value.toUpperCase())}
-                            placeholder="New Color (e.g. CHAMPAGNE)"
-                            className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-[#14181F] border border-slate-700 text-xs text-white"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (!newColorInput.trim()) return;
-                              onAddColor(newColorInput.trim());
-                              setRateColorTab(newColorInput.trim().toUpperCase());
-                              setNewColorInput('');
-                              setShowAddColorForm(false);
-                              showSettingsToast('Color added!');
-                            }}
-                            className="boss-flat-btn px-3 py-1.5 rounded-lg bg-emerald-500 text-black font-bold text-xs shrink-0"
-                          >
-                            Add
-                          </button>
-                        </div>
-                      )}
-
                       <div className="flex flex-wrap items-center gap-1.5">
-                        {availableColors.map((col) => (
-                          <div
-                            key={col}
-                            className={`px-2 py-1 rounded-lg border flex items-center gap-1.5 text-[11px] ${
-                              rateColorTab === col
-                                ? 'bg-[#F5B738]/20 border-[#F5B738] text-[#F5B738] font-extrabold'
-                                : 'bg-[#14181F] border-slate-700 text-slate-300 font-semibold'
-                            }`}
-                          >
-                            {editingColorName === col ? (
-                              <>
-                                <input
-                                  type="text"
-                                  value={editingColorVal}
-                                  onChange={(e) => setEditingColorVal(e.target.value.toUpperCase())}
-                                  className="w-20 px-1 py-0.5 rounded bg-[#0C0F14] border border-amber-400 text-white font-mono text-[10px]"
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    if (editingColorVal.trim()) {
-                                      onEditColor(col, editingColorVal.trim().toUpperCase());
-                                      setRateColorTab(editingColorVal.trim().toUpperCase());
-                                      showSettingsToast(`Renamed ${col} → ${editingColorVal.trim().toUpperCase()}`);
-                                    }
-                                    setEditingColorName(null);
-                                  }}
-                                  className="boss-flat-btn px-1.5 py-0.5 rounded bg-emerald-500 text-black font-bold text-[10px]"
-                                >
-                                  Ok
-                                </button>
-                              </>
-                            ) : (
-                              <>
-                                <button
-                                  type="button"
-                                  onClick={() => setRateColorTab(col)}
-                                  className="boss-flat-btn truncate max-w-[110px] cursor-pointer"
-                                >
-                                  {col}
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setEditingColorName(col);
-                                    setEditingColorVal(col);
-                                  }}
-                                  className="boss-flat-btn text-sky-400 hover:text-sky-300 text-[10px] cursor-pointer"
-                                  title="Rename color"
-                                >
-                                  <Edit2 className="w-2.5 h-2.5" />
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    onDeleteColor(col);
-                                    showSettingsToast(`Deleted color "${col}"`);
-                                  }}
-                                  className="boss-flat-btn text-rose-400 hover:text-rose-300 font-bold text-[10px] cursor-pointer"
-                                  title="Delete color"
-                                >
-                                  ✕
-                                </button>
-                              </>
-                            )}
-                          </div>
-                        ))}
+                        {OFFICIAL_COLORS.map((col) => {
+                          const isActiveCol = normalizeOfficialColor(rateColorTab) === col;
+                          return (
+                            <button
+                              key={col}
+                              type="button"
+                              onClick={() => setRateColorTab(col)}
+                              className={`boss-flat-btn px-2.5 py-1 rounded-lg border text-[11px] cursor-pointer ${
+                                isActiveCol
+                                  ? 'bg-[#F5B738]/20 border-[#F5B738] text-[#F5B738] font-extrabold'
+                                  : 'bg-[#14181F] border-slate-700 text-slate-300 font-semibold hover:border-slate-500'
+                              }`}
+                            >
+                              {col}
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
                   </div>
 
-                  {/* Filter & Section Action Bar */}
+                  {/* Filter Bar (Add / Delete Section Locked per ITTEHAD Specification) */}
                   <div className="flex items-center gap-1.5">
                     <div className="relative flex-1 min-w-0">
                       <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -7410,109 +7280,65 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                         type="text"
                         value={rateSearch}
                         onChange={(e) => setRateSearch(e.target.value)}
-                        placeholder="Search Section (e.g. D54A, M23)"
+                        placeholder="Search Section (e.g. D54A, M23, DC26B)"
                         className="w-full pl-8 pr-2 py-1.5 rounded-lg bg-[#0C0F14] border border-slate-700 text-xs text-white"
                       />
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => setShowAddSectionForm((v) => !v)}
-                      className="boss-flat-btn w-8 h-8 rounded-lg bg-[#F5B738] hover:bg-amber-400 text-black flex items-center justify-center shrink-0 cursor-pointer"
-                      title="Add New Section"
-                      aria-label="Add New Section"
-                    >
-                      <Plus className="w-4 h-4 stroke-[2.5]" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setRateMultiDeleteMode((v) => !v)}
-                      className={`boss-flat-btn w-8 h-8 rounded-lg border flex items-center justify-center shrink-0 cursor-pointer ${
-                        rateMultiDeleteMode
-                          ? 'bg-rose-600 border-rose-500 text-white'
-                          : 'bg-[#0C0F14] border-rose-500/60 text-rose-400 hover:bg-rose-600 hover:text-white'
-                      }`}
-                      title="Toggle Multi-Delete Mode"
-                      aria-label="Toggle Multi-Delete Mode"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+                    <span className="px-2 py-1.5 rounded-lg bg-[#0C0F14] border border-slate-800 text-[10px] font-bold text-slate-400 flex items-center gap-1 shrink-0">
+                      <Lock className="w-3 h-3 text-[#F5B738]" />
+                      <span className="hidden sm:inline">Add/Delete Locked</span>
+                    </span>
                   </div>
 
-                  {/* Inline Add New Section Form */}
-                  {showAddSectionForm && (
-                    <div className="p-2.5 rounded-xl bg-[#0C0F14] border border-emerald-500/50 space-y-2">
-                      <div className="flex items-center gap-1.5">
-                        <input
-                          type="text"
-                          value={newSecCodeInput}
-                          onChange={(e) => setNewSecCodeInput(e.target.value.toUpperCase())}
-                          placeholder="Code (e.g. CW50)"
-                          className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-[#14181F] border border-slate-700 font-mono text-white text-xs"
-                        />
-                        <input
-                          type="number"
-                          value={newSecRateInput}
-                          onChange={(e) => setNewSecRateInput(e.target.value)}
-                          placeholder="Rate/ft"
-                          className="w-20 px-2 py-1.5 rounded-lg bg-[#14181F] border border-slate-700 font-mono text-amber-300 text-xs"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (!newSecCodeInput.trim()) return;
-                            onAddCustomSection(
-                              newSecCodeInput.trim(),
-                              parseFloat(newSecRateInput) || 750
-                            );
-                            showSettingsToast(`Added section "${newSecCodeInput.trim().toUpperCase()}"!`);
-                            setNewSecCodeInput('');
-                            setShowAddSectionForm(false);
-                          }}
-                          className="boss-flat-btn px-3 py-1.5 rounded-lg bg-emerald-500 text-black font-bold text-xs shrink-0"
-                        >
-                          Add
-                        </button>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setShowAddPairModal(true)}
-                        className="boss-flat-btn text-[11px] text-sky-400 hover:underline font-semibold"
-                      >
-                        + Or Add Frame Section Pair (2 in 1)
-                      </button>
-                    </div>
-                  )}
-
-                  {/* Computed Filtered Sections List */}
+                  {/* Strict Gauge-Isolated Sections List (Only positive entries for active Gauge + Color, zero blanks/0s) */}
                   {(() => {
-                    const filteredSections = Array.from(
-                      new Set([
-                        ...DEFAULT_SECTIONS,
-                        ...customSections,
-                        ...Object.keys(rates[rateGaugeTab]?.[rateColorTab] || {}),
-                        ...Object.keys(rates['1.2']?.['DULL'] || {}),
-                        ...Object.keys(rates['1.6']?.['DULL'] || {}),
-                        ...Object.keys(rates['2']?.['DULL'] || {}),
-                      ])
-                    )
+                    const normGaugeTab = normalizeGauge(rateGaugeTab);
+                    const normColorTab = normalizeOfficialColor(rateColorTab);
+                    const activeColorMap = rates[normGaugeTab]?.[normColorTab] || {};
+                    const dedupMap = new Map<string, { sec: string; rate: number }>();
+
+                    Object.entries(activeColorMap).forEach(([rawSec, rawVal]) => {
+                      const numVal = Number(rawVal);
+                      if (!Number.isFinite(numVal) || numVal <= 0) return;
+                      const normSec = normalizeSectionCode(rawSec);
+                      if (!normSec) return;
+                      if (deletedSecs.some((d) => isSectionCodeMatch(d, normSec))) return;
+                      if (!dedupMap.has(normSec)) {
+                        dedupMap.set(normSec, { sec: normSec, rate: Math.round(numVal) });
+                      }
+                    });
+
+                    const filteredEntries = Array.from(dedupMap.values())
                       .sort((a, b) => {
-                        const isDGA = a.startsWith('DG') || a.startsWith('GSPR');
-                        const isDGB = b.startsWith('DG') || b.startsWith('GSPR');
+                        const isDGA = a.sec.startsWith('DG') || a.sec.startsWith('GSPR');
+                        const isDGB = b.sec.startsWith('DG') || b.sec.startsWith('GSPR');
                         if (isDGA && !isDGB) return -1;
                         if (!isDGA && isDGB) return 1;
-                        return a.localeCompare(b);
+                        return a.sec.localeCompare(b.sec);
                       })
-                      .filter((sec) => !deletedSecs.some((d) => isSectionCodeMatch(d, sec)))
-                      .filter((sec) => {
+                      .filter(({ sec }) => {
                         if (!rateSearch.trim()) return true;
                         const qLower = rateSearch.trim().toLowerCase();
                         const qNorm = normalizeSectionCode(rateSearch);
                         return (
                           sec.toLowerCase().includes(qLower) ||
-                          (qNorm ? normalizeSectionCode(sec).includes(qNorm) : false) ||
+                          (qNorm ? sec.includes(qNorm) : false) ||
                           resolveSectionLabel(sec).toLowerCase().includes(qLower)
                         );
                       });
+
+                    if (filteredEntries.length === 0) {
+                      return (
+                        <div className="p-6 rounded-xl bg-[#0C0F14] border border-slate-800 text-center space-y-1.5">
+                          <div className="text-xs font-bold text-[#F5B738]">
+                            {formatGaugeLabel(normGaugeTab)} ({normColorTab}) mein abhi koi scanned section nahi hai
+                          </div>
+                          <div className="text-[11px] text-slate-400">
+                            Sirf is gauge ke positive ITTEHAD rates yahan dikhte hain (blank ya 0 rates cross-gauge nahi aate). Upar &quot;Scan Photo / PDF&quot; se sheet scan karein ya 1.2mm / 1.6mm / 2mm select karein.
+                          </div>
+                        </div>
+                      );
+                    }
 
                     if (rateViewMode === 'TABLE') {
                       return (
@@ -7522,16 +7348,13 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                               <tr className="border-b border-slate-800">
                                 <th className="py-2 px-2.5">Section</th>
                                 <th className="py-2 px-2">Rate (Rs/ft)</th>
-                                <th className="py-2 px-2 text-right">Actions</th>
+                                <th className="py-2 px-2 text-right">Hide</th>
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-800/70">
-                              {filteredSections.map((sec) => {
+                              {filteredEntries.map(({ sec, rate: val }) => {
                                 const isHidden = hiddenSections.some((h) => isSectionCodeMatch(h, sec));
-                                const val =
-                                  findMatchingSectionRate(rates[rateGaugeTab]?.[rateColorTab], sec) ??
-                                  resolveSectionRate(rates, rateGaugeTab, rateColorTab, sec);
-                                const barLen = normalizeSectionCode(sec).endsWith('F') ? 19 : 18;
+                                const barLen = sec.endsWith('F') ? 19 : 18;
                                 return (
                                   <tr
                                     key={sec}
@@ -7539,7 +7362,7 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                                   >
                                     <td className="py-1.5 px-2.5">
                                       <div className="font-mono font-extrabold text-[#F5B738]">{sec}</div>
-                                      <div className="text-[10px] text-slate-400 truncate max-w-[120px]">
+                                      <div className="text-[10px] text-slate-400 truncate max-w-[140px]">
                                         {resolveSectionLabel(sec)}
                                       </div>
                                     </td>
@@ -7550,8 +7373,8 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                                           value={val}
                                           onChange={(e) =>
                                             onUpdateSectionRate(
-                                              rateGaugeTab,
-                                              rateColorTab,
+                                              normGaugeTab,
+                                              normColorTab,
                                               sec,
                                               parseFloat(e.target.value) || 0
                                             )
@@ -7564,31 +7387,18 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                                       </div>
                                     </td>
                                     <td className="py-1.5 px-2 text-right">
-                                      <div className="inline-flex items-center gap-1">
-                                        <button
-                                          type="button"
-                                          onClick={() => onToggleHideSection(sec)}
-                                          className="boss-flat-btn p-1 rounded bg-[#14181F] border border-slate-700 text-slate-300"
-                                          title={isHidden ? 'Unhide' : 'Hide'}
-                                        >
-                                          {isHidden ? (
-                                            <EyeOff className="w-3.5 h-3.5 text-amber-400" />
-                                          ) : (
-                                            <Eye className="w-3.5 h-3.5" />
-                                          )}
-                                        </button>
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            onDeleteSection(sec);
-                                            showSettingsToast(`Deleted "${sec}"`);
-                                          }}
-                                          className="boss-flat-btn p-1 rounded bg-rose-950/80 border border-rose-500/50 text-rose-300"
-                                          title="Delete section"
-                                        >
-                                          <Trash2 className="w-3.5 h-3.5" />
-                                        </button>
-                                      </div>
+                                      <button
+                                        type="button"
+                                        onClick={() => onToggleHideSection(sec)}
+                                        className="boss-flat-btn p-1 rounded bg-[#14181F] border border-slate-700 text-slate-300"
+                                        title={isHidden ? 'Unhide' : 'Hide'}
+                                      >
+                                        {isHidden ? (
+                                          <EyeOff className="w-3.5 h-3.5 text-amber-400" />
+                                        ) : (
+                                          <Eye className="w-3.5 h-3.5" />
+                                        )}
+                                      </button>
                                     </td>
                                   </tr>
                                 );
@@ -7601,19 +7411,14 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
 
                     return (
                       <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-1.5 max-h-[420px] overflow-y-auto pr-0.5">
-                        {filteredSections.map((sec) => {
+                        {filteredEntries.map(({ sec, rate: val }) => {
                           const isHidden = hiddenSections.some((h) => isSectionCodeMatch(h, sec));
-                          const val =
-                            findMatchingSectionRate(rates[rateGaugeTab]?.[rateColorTab], sec) ??
-                            resolveSectionRate(rates, rateGaugeTab, rateColorTab, sec);
-                          const barLen = normalizeSectionCode(sec).endsWith('F') ? 19 : 18;
+                          const barLen = sec.endsWith('F') ? 19 : 18;
                           return (
                             <div
                               key={sec}
                               className={`p-2 rounded-xl border space-y-1 ${
-                                rateMultiDeleteMode
-                                  ? 'bg-rose-950/20 border-rose-500/60'
-                                  : isHidden
+                                isHidden
                                   ? 'bg-[#0C0F14]/50 border-rose-900/50 opacity-60'
                                   : 'bg-[#0C0F14] border-slate-800'
                               }`}
@@ -7622,31 +7427,18 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                                 <span className="text-xs font-extrabold text-[#F5B738] font-mono truncate">
                                   {sec}
                                 </span>
-                                <div className="flex items-center gap-0.5 shrink-0">
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      onDeleteSection(sec);
-                                      showSettingsToast(`Deleted "${sec}"`);
-                                    }}
-                                    className="boss-flat-btn p-0.5 text-rose-400 hover:text-rose-300 cursor-pointer"
-                                    title="Delete Section"
-                                  >
-                                    <Trash2 className="w-3 h-3" />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => onToggleHideSection(sec)}
-                                    className="boss-flat-btn p-0.5 text-slate-400 hover:text-white cursor-pointer"
-                                    title={isHidden ? 'Unhide Section' : 'Hide Section'}
-                                  >
-                                    {isHidden ? (
-                                      <EyeOff className="w-3 h-3 text-amber-400" />
-                                    ) : (
-                                      <Eye className="w-3 h-3" />
-                                    )}
-                                  </button>
-                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => onToggleHideSection(sec)}
+                                  className="boss-flat-btn p-0.5 text-slate-400 hover:text-white cursor-pointer shrink-0"
+                                  title={isHidden ? 'Unhide Section' : 'Hide Section'}
+                                >
+                                  {isHidden ? (
+                                    <EyeOff className="w-3 h-3 text-amber-400" />
+                                  ) : (
+                                    <Eye className="w-3 h-3" />
+                                  )}
+                                </button>
                               </div>
 
                               <div className="text-[9px] text-slate-400 truncate">
@@ -7664,8 +7456,8 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                                   value={val}
                                   onChange={(e) =>
                                     onUpdateSectionRate(
-                                      rateGaugeTab,
-                                      rateColorTab,
+                                      normGaugeTab,
+                                      normColorTab,
                                       sec,
                                       parseFloat(e.target.value) || 0
                                     )
@@ -8151,7 +7943,9 @@ export const AppLayoutCalculatorScreen: React.FC<AppLayoutCalculatorScreenProps>
                         : 'bg-rose-600 text-white'
                     }`}
                   >
-                    {ctxGaugeMode === 'ON' ? `ON (${ctxGauge}mm Locked)` : 'OFF (Separate Unlocked)'}
+                    {ctxGaugeMode === 'ON'
+                      ? `ON (${formatGaugeLabel(ctxGauge)} Locked)`
+                      : 'OFF (Separate Unlocked)'}
                   </button>
                 </div>
 

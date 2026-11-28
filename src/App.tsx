@@ -43,6 +43,8 @@ import {
   DEFAULT_COLORS,
   DEFAULT_SECTIONS,
   GAUGES,
+  OFFICIAL_COLORS,
+  extractEffectiveDateFromConfigs,
   getClearedZeroRates,
   getDefaultCategoryFormula,
   getDefaultDgWindowFormula,
@@ -58,6 +60,9 @@ import {
   isSectionCodeMatch,
   mergeAvailableColorsWithDefaults,
   mergeGlassRatesWithDefaults,
+  normalizeGauge,
+  normalizeOfficialColor,
+  normalizeRatesMatrix,
   normalizeSectionCode,
 } from './utils/bossDefaultRates';
 import bossLionLogoImg from './assets/images/boss_lion_logo_1791741005749.jpg';
@@ -773,8 +778,8 @@ export default function App() {
   const [isSubscriptionExpired, setIsSubscriptionExpired] = useState<boolean>(false);
   const [currentCalcTab, setCurrentCalcTab] = useState<BossTab>('WINDOWS');
 
-  // Context State
-  const [ctxGauge, setCtxGauge] = useState<string>('1.6');
+  // Context State (Standardized ITTEHAD Aluminium Gauges & Locked 5 Official Colors)
+  const [ctxGauge, setCtxGauge] = useState<string>('1.6mm');
   const [ctxGaugeMode, setCtxGaugeMode] = useState<'ON' | 'OFF'>('ON');
   const [ctxColor, setCtxColor] = useState<string>('DULL');
   const [ctxFrameType, setCtxFrameType] = useState<string>('C');
@@ -785,9 +790,7 @@ export default function App() {
   const [glassFittingOption, setGlassFittingOption] = useState<'FIX_RUBBER' | 'U_PVC'>('FIX_RUBBER');
 
   // Catalog, Rates & Visibility
-  const [availableColors, setAvailableColors] = useState<string[]>(() =>
-    mergeAvailableColorsWithDefaults(DEFAULT_COLORS)
-  );
+  const [availableColors, setAvailableColors] = useState<string[]>(() => [...OFFICIAL_COLORS]);
   const [customSections, setCustomSections] = useState<string[]>([
     'CW50-MULLION',
     'CW50-TRANSOM',
@@ -966,6 +969,26 @@ export default function App() {
     } catch {}
     return null;
   });
+  const [rateListEffectiveDate, setRateListEffectiveDate] = useState<string>(() => {
+    try {
+      const devRaw = localStorage.getItem(DEVICE_RATES_KEY);
+      if (devRaw) {
+        const dp = JSON.parse(devRaw);
+        if (typeof dp?.effectiveDate === 'string' && dp.effectiveDate.trim()) {
+          return dp.effectiveDate.trim().toUpperCase();
+        }
+      }
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const p = JSON.parse(raw);
+        if (typeof p?.rateListEffectiveDate === 'string' && p.rateListEffectiveDate.trim()) {
+          return p.rateListEffectiveDate.trim().toUpperCase();
+        }
+      }
+    } catch {}
+    return '';
+  });
+  const [syncedGeminiApiKey, setSyncedGeminiApiKey] = useState<string>('');
 
   // Stable Client Device ID for Supabase access & support requests
   const [clientDeviceId, setClientDeviceId] = useState<string>(() =>
@@ -1170,6 +1193,7 @@ export default function App() {
           saveCachedMasterEngineConfig(globalCfg);
         }
         const ratesCfg = cfgMap.aluminium_rates_v1 || {};
+        const pricingMetaCfg = cfgMap.pricing_meta_v1 || {};
         const sectionsCfg = cfgMap.custom_sections_v1 || {};
         const formulasCfg = cfgMap.formulas_v1 || {};
         const layoutCfg = cfgMap.layout_config_v1 || {};
@@ -1179,6 +1203,25 @@ export default function App() {
           globalCfg.supabaseMigration ||
           globalCfg.supabaseConfig ||
           {};
+
+        const cloudGeminiKey = String(
+          globalCfg.geminiApiKey ||
+            globalCfg.geminiKey ||
+            pricingMetaCfg.geminiApiKey ||
+            ''
+        ).trim();
+        if (cloudGeminiKey) {
+          setSyncedGeminiApiKey(cloudGeminiKey);
+        }
+
+        const cloudEffectiveDate = extractEffectiveDateFromConfigs(
+          pricingMetaCfg,
+          ratesCfg,
+          globalCfg
+        );
+        if (cloudEffectiveDate) {
+          setRateListEffectiveDate(cloudEffectiveDate.toUpperCase());
+        }
 
         // 0. Auto-Migrate Supabase Database if Admin publishes a new Supabase URL + Key
         const candidateNewUrl = String(
@@ -1509,10 +1552,8 @@ export default function App() {
           setCustomSections((prev) => Array.from(new Set([...prev, ...normalizedCodes])));
         }
       }
-      const incomingCols = sectionsCfg.availableColors || globalCfg.availableColors;
-      if (Array.isArray(incomingCols) && incomingCols.length > 0) {
-        setAvailableColors(mergeAvailableColorsWithDefaults(incomingCols));
-      }
+      // Official 5 Colors always locked
+      setAvailableColors([...OFFICIAL_COLORS]);
       const incomingHidden = sectionsCfg.hiddenSections || globalCfg.hiddenSections;
       if (Array.isArray(incomingHidden)) {
         setHiddenSections(incomingHidden);
@@ -1609,31 +1650,42 @@ export default function App() {
           : null;
 
       if (shouldApplyCloudRates && cloudRates && typeof cloudRates === 'object') {
-        const mergedRates: Record<string, Record<string, Record<string, number>>> = JSON.parse(
-          JSON.stringify(getInitialRates())
-        );
-        Object.entries(cloudRates).forEach(([g, colObj]: [string, any]) => {
-          if (!colObj || typeof colObj !== 'object') return;
+        const mergedRates = normalizeRatesMatrix(getInitialRates());
+        const normalizedCloud = normalizeRatesMatrix(cloudRates);
+        Object.entries(normalizedCloud).forEach(([g, colObj]) => {
           if (!mergedRates[g]) mergedRates[g] = {};
-          Object.entries(colObj).forEach(([col, secObj]: [string, any]) => {
-            if (!secObj || typeof secObj !== 'object') return;
-            mergedRates[g][col] = { ...(mergedRates[g][col] || {}), ...secObj };
-            if (col === 'H23') {
-              mergedRates[g]['H.23'] = { ...(mergedRates[g]['H.23'] || {}), ...secObj };
-            } else if (col === 'H.23') {
-              mergedRates[g]['H23'] = { ...(mergedRates[g]['H23'] || {}), ...secObj };
-            }
+          Object.entries(colObj || {}).forEach(([col, secObj]) => {
+            if (!mergedRates[g][col]) mergedRates[g][col] = {};
+            Object.entries(secObj || {}).forEach(([sec, val]) => {
+              if (val > 0) {
+                mergedRates[g][col][sec] = val;
+              }
+            });
           });
         });
         setRates(mergedRates);
         if (forceRates) {
-          persistRatesSnapshotToDevice(mergedRates, nextMergedGlassRates || glassRates);
+          persistRatesSnapshotToDevice(
+            mergedRates,
+            nextMergedGlassRates || glassRates,
+            [...OFFICIAL_COLORS],
+            customSections,
+            hiddenSections,
+            cloudEffectiveDate || rateListEffectiveDate
+          );
         }
       }
       if (nextMergedGlassRates) {
         setGlassRates(nextMergedGlassRates);
         if (forceRates && (!cloudRates || typeof cloudRates !== 'object')) {
-          persistRatesSnapshotToDevice(rates, nextMergedGlassRates);
+          persistRatesSnapshotToDevice(
+            rates,
+            nextMergedGlassRates,
+            [...OFFICIAL_COLORS],
+            customSections,
+            hiddenSections,
+            cloudEffectiveDate || rateListEffectiveDate
+          );
         }
       }
         }
@@ -2631,9 +2683,12 @@ export default function App() {
         if (fsSrc) setFSectionFormula({ ...getDefaultFSectionFormula(), ...fsSrc });
         if (parsed.savedQuotations) setSavedQuotations(parsed.savedQuotations);
         if (parsed.rates) {
-          setRates(parsed.rates);
+          setRates(normalizeRatesMatrix(parsed.rates));
         } else {
           setRates(getInitialRates());
+        }
+        if (typeof parsed.rateListEffectiveDate === 'string' && parsed.rateListEffectiveDate.trim()) {
+          setRateListEffectiveDate(parsed.rateListEffectiveDate.trim().toUpperCase());
         }
         if (parsed.packages?.length) {
           setPackages(parsed.packages.filter(isPackageVisibleToClient));
@@ -2759,9 +2814,7 @@ export default function App() {
         if (parsed.downloadedThemes) setDownloadedThemes(parsed.downloadedThemes);
         setDeletedBackupVault([]);
         if (parsed.glassRates) setGlassRates(mergeGlassRatesWithDefaults(parsed.glassRates));
-        if (parsed.availableColors?.length) {
-          setAvailableColors(mergeAvailableColorsWithDefaults(parsed.availableColors));
-        }
+        setAvailableColors([...OFFICIAL_COLORS]);
         if (parsed.customSections) setCustomSections(parsed.customSections);
         if (parsed.hiddenSections) setHiddenSections(parsed.hiddenSections);
         if (typeof parsed.companyName === 'string') setCompanyName(parsed.companyName);
@@ -2885,16 +2938,17 @@ export default function App() {
       const devRaw = localStorage.getItem(DEVICE_RATES_KEY);
       if (devRaw) {
         const devParsed = JSON.parse(devRaw);
-        if (!raw && devParsed.rates) setRates(devParsed.rates);
+        if (!raw && devParsed.rates) setRates(normalizeRatesMatrix(devParsed.rates));
         if (!raw && devParsed.glassRates) {
           setGlassRates(mergeGlassRatesWithDefaults(devParsed.glassRates));
         }
-        if (!raw && devParsed.availableColors?.length) {
-          setAvailableColors(mergeAvailableColorsWithDefaults(devParsed.availableColors));
-        }
+        setAvailableColors([...OFFICIAL_COLORS]);
         if (!raw && devParsed.customSections) setCustomSections(devParsed.customSections);
         if (!raw && devParsed.hiddenSections) setHiddenSections(devParsed.hiddenSections);
         if (typeof devParsed.savedAt === 'number') setRateListSavedAt(devParsed.savedAt);
+        if (typeof devParsed.effectiveDate === 'string' && devParsed.effectiveDate.trim()) {
+          setRateListEffectiveDate(devParsed.effectiveDate.trim().toUpperCase());
+        }
       }
     } catch {
       // ignore storage errors
@@ -2949,6 +3003,8 @@ export default function App() {
             'master_engine_config',
             'global_config',
             'packages_v1',
+            'pricing_meta_v1',
+            'aluminium_rates_v1',
             'company_branding_v1',
             'company_branding',
             'layout_config_v1',
@@ -2975,6 +3031,23 @@ export default function App() {
                   };
             if (Object.keys(mergedCfg).length > 0 && cfgOnlyRes.changed) {
               saveCachedMasterEngineConfig(mergedCfg);
+            }
+            const preGeminiKey = String(
+              mergedCfg.geminiApiKey ||
+                mergedCfg.geminiKey ||
+                mapOnly.pricing_meta_v1?.geminiApiKey ||
+                ''
+            ).trim();
+            if (preGeminiKey) {
+              setSyncedGeminiApiKey(preGeminiKey);
+            }
+            const preEffDate = extractEffectiveDateFromConfigs(
+              mapOnly.pricing_meta_v1,
+              mapOnly.aluminium_rates_v1,
+              mergedCfg
+            );
+            if (preEffDate) {
+              setRateListEffectiveDate(preEffDate.toUpperCase());
             }
             const resolvedPre = resolveLivePackagesAndOfferFromConfigs(mapOnly, tsOnly, mergedCfg);
             if (resolvedPre.hasOfferKeyInCloud) {
@@ -3485,6 +3558,7 @@ export default function App() {
           availableColors,
           customSections,
           hiddenSections,
+          rateListEffectiveDate,
           companyName,
           companyTagline,
           companyAddress,
@@ -3528,6 +3602,7 @@ export default function App() {
     availableColors,
     customSections,
     hiddenSections,
+    rateListEffectiveDate,
     companyName,
     companyTagline,
     companyAddress,
@@ -3544,7 +3619,8 @@ export default function App() {
     nextGlassRates = glassRates,
     nextColors = availableColors,
     nextCustomSections = customSections,
-    nextHiddenSections = hiddenSections
+    nextHiddenSections = hiddenSections,
+    nextEffectiveDate = rateListEffectiveDate
   ) => {
     const savedAt = Date.now();
     try {
@@ -3553,9 +3629,10 @@ export default function App() {
         JSON.stringify({
           rates: nextRates,
           glassRates: nextGlassRates,
-          availableColors: nextColors,
+          availableColors: [...OFFICIAL_COLORS],
           customSections: nextCustomSections,
           hiddenSections: nextHiddenSections,
+          effectiveDate: nextEffectiveDate,
           savedAt,
         })
       );
@@ -3563,9 +3640,10 @@ export default function App() {
       const curObj = curRaw ? JSON.parse(curRaw) : {};
       curObj.rates = nextRates;
       curObj.glassRates = nextGlassRates;
-      curObj.availableColors = nextColors;
+      curObj.availableColors = [...OFFICIAL_COLORS];
       curObj.customSections = nextCustomSections;
       curObj.hiddenSections = nextHiddenSections;
+      curObj.rateListEffectiveDate = nextEffectiveDate;
       localStorage.setItem(STORAGE_KEY, JSON.stringify(curObj));
       setRateListSavedAt(savedAt);
     } catch {
@@ -3586,81 +3664,60 @@ export default function App() {
       gauge: string;
       color: string;
       rate: number;
-    }[]
+    }[],
+    effectiveDate?: string
   ) => {
-    const nextRates = JSON.parse(JSON.stringify(rates || {}));
-    const nextColors = [...availableColors];
+    const nextRates = normalizeRatesMatrix(rates || {});
+    const lockedColors = [...OFFICIAL_COLORS];
     const nextCustomSecs = [...customSections];
     let updated = 0;
     let inserted = 0;
 
     rows.forEach((r) => {
-      const g = (r.gauge || '1.6').replace(/mm/i, '').trim() || '1.6';
-      const col = (r.color || 'DULL').trim().toUpperCase();
-      const sec = (r.sectionCode || '').trim().toUpperCase();
+      const g = normalizeGauge(r.gauge || '1.6mm');
+      const col = normalizeOfficialColor(r.color || 'DULL');
+      const sec = normalizeSectionCode(r.sectionCode || '');
       if (!sec || !(r.rate > 0)) return;
 
-      if (!nextColors.includes(col)) nextColors.push(col);
       if (!nextRates[g]) nextRates[g] = {};
       if (!nextRates[g][col]) nextRates[g][col] = {};
 
-      const allSecCodes = Array.from(
-        new Set([
-          sec,
-          sec.replace(/\s+(1\.6M|2MM|1\.6MM|1\.2|1\.4|1\.5|1\.6|2\.0)$/i, '').trim(),
-          sec.replace(/\./g, ''),
-        ])
-      ).filter(Boolean);
+      const alreadyKnown =
+        DEFAULT_SECTIONS.some((s) => isSectionCodeMatch(s, sec)) ||
+        nextCustomSecs.some((s) => isSectionCodeMatch(s, sec));
+      if (!alreadyKnown) {
+        nextCustomSecs.push(sec);
+      }
 
-      allSecCodes.forEach((code) => {
-        const existingMatchedKeys = Object.keys(nextRates[g][col] || {}).filter((k) =>
-          isSectionCodeMatch(k, code)
-        );
-        const alreadyKnown =
-          DEFAULT_SECTIONS.some((s) => isSectionCodeMatch(s, code)) ||
-          nextCustomSecs.some((s) => isSectionCodeMatch(s, code));
-        if (!alreadyKnown) {
-          nextCustomSecs.push(code);
-        }
-        if (nextRates[g][col][code] !== undefined || existingMatchedKeys.length > 0) {
-          updated++;
-        } else {
-          inserted++;
-        }
-        nextRates[g][col][code] = Math.round(r.rate);
-        existingMatchedKeys.forEach((mk) => {
-          nextRates[g][col][mk] = Math.round(r.rate);
-        });
-
-        if (col === 'H23' || col === 'H.23' || col === 'PC-RAL') {
-          if (!nextRates[g]['H23/PC-RAL']) nextRates[g]['H23/PC-RAL'] = {};
-          nextRates[g]['H23/PC-RAL'][code] = Math.round(r.rate);
-          if (col === 'H23') {
-            if (!nextRates[g]['H.23']) nextRates[g]['H.23'] = {};
-            nextRates[g]['H.23'][code] = Math.round(r.rate);
-          } else if (col === 'H.23') {
-            if (!nextRates[g]['H23']) nextRates[g]['H23'] = {};
-            nextRates[g]['H23'][code] = Math.round(r.rate);
-          }
-        }
-        if (col === 'SAHARA' || col === 'BROWN') {
-          if (!nextRates[g]['SAHARA/BROWN']) nextRates[g]['SAHARA/BROWN'] = {};
-          nextRates[g]['SAHARA/BROWN'][code] = Math.round(r.rate);
-        }
-        if (col === 'BLACK' || col === 'MULTI') {
-          if (!nextRates[g]['BLACK/MULTI']) nextRates[g]['BLACK/MULTI'] = {};
-          nextRates[g]['BLACK/MULTI'][code] = Math.round(r.rate);
-        }
-      });
+      if ((nextRates[g][col][sec] || 0) > 0) {
+        updated++;
+      } else {
+        inserted++;
+      }
+      nextRates[g][col][sec] = Math.round(r.rate);
     });
 
-    const uniqueColors = Array.from(new Set(nextColors));
+    const cleanEffDate = String(effectiveDate || '').trim().toUpperCase();
+    const nextEffectiveDate = cleanEffDate || rateListEffectiveDate;
+    if (cleanEffDate) {
+      setRateListEffectiveDate(cleanEffDate);
+    }
+
     const uniqueCustom = Array.from(new Set(nextCustomSecs));
     setRates(nextRates);
-    setAvailableColors(uniqueColors);
+    setAvailableColors(lockedColors);
     setCustomSections(uniqueCustom);
-    persistRatesSnapshotToDevice(nextRates, glassRates, uniqueColors, uniqueCustom, hiddenSections);
-    triggerGlobalToast(`✅ Updated ${updated} & added ${inserted} rates — saved to your device!`);
+    persistRatesSnapshotToDevice(
+      nextRates,
+      glassRates,
+      lockedColors,
+      uniqueCustom,
+      hiddenSections,
+      nextEffectiveDate
+    );
+    triggerGlobalToast(
+      `✅ Updated ${updated} & added ${inserted} ITTEHAD rates — saved to your device!`
+    );
     return { updated, inserted };
   };
 
@@ -3670,10 +3727,12 @@ export default function App() {
     const nextRates: Record<string, Record<string, Record<string, number>>> = JSON.parse(
       JSON.stringify(rates || {})
     );
+    const normGFilter = gaugeFilter && gaugeFilter !== 'ALL' ? normalizeGauge(gaugeFilter) : 'ALL';
+    const normCFilter = colorFilter && colorFilter !== 'ALL' ? normalizeOfficialColor(colorFilter) : 'ALL';
     Object.keys(nextRates).forEach((g) => {
-      if (gaugeFilter && gaugeFilter !== 'ALL' && g !== gaugeFilter) return;
+      if (normGFilter !== 'ALL' && normalizeGauge(g) !== normGFilter) return;
       Object.keys(nextRates[g] || {}).forEach((c) => {
-        if (colorFilter && colorFilter !== 'ALL' && c !== colorFilter) return;
+        if (normCFilter !== 'ALL' && normalizeOfficialColor(c) !== normCFilter) return;
         Object.keys(nextRates[g][c] || {}).forEach((sec) => {
           const cur = Number(nextRates[g][c][sec]) || 0;
           if (cur > 0) {
@@ -4026,11 +4085,11 @@ export default function App() {
           ctxGauge={ctxGauge}
           ctxGaugeMode={ctxGaugeMode}
           onSetCtxGauge={(g, m) => {
-            setCtxGauge(g);
+            setCtxGauge(normalizeGauge(g));
             setCtxGaugeMode(m);
           }}
           ctxColor={ctxColor}
-          onSetCtxColor={setCtxColor}
+          onSetCtxColor={(c) => setCtxColor(normalizeOfficialColor(c))}
           ctxFrameType={ctxFrameType}
           onSetCtxFrameType={setCtxFrameType}
           ctxGlassMode={ctxGlassMode}
@@ -4045,59 +4104,26 @@ export default function App() {
               setCtxGlassMode('OFF');
             }
           }}
-          availableColors={availableColors}
-          onAddColor={(col) => {
-            const up = col.trim().toUpperCase();
-            if (up && !availableColors.includes(up)) {
-              setAvailableColors([...availableColors, up]);
-            }
+          availableColors={[...OFFICIAL_COLORS]}
+          onAddColor={() => {
+            triggerGlobalToast('Official 5 Colors locked hain (DULL, H-23 / RAL/PC, SAHARA / BROWN, BLACK, ALU WOOD).');
           }}
-          onEditColor={handleEditColor}
-          onDeleteColor={handleDeleteColor}
+          onEditColor={() => {
+            triggerGlobalToast('Official 5 Colors Admin specification par locked hain.');
+          }}
+          onDeleteColor={() => {
+            triggerGlobalToast('Official 5 Colors delete karna band hai.');
+          }}
           customSections={customSections}
-          onDeleteSection={handleDeleteSection}
-          onAddCustomSection={(sec, rate) => {
-            const clean = sec.trim().toUpperCase();
-            if (!clean) return;
-            const norm = normalizeSectionCode(clean);
-            if (!customSections.some((s) => isSectionCodeMatch(s, clean))) {
-              setCustomSections([...customSections, clean]);
-            }
-            if (rate > 0) {
-              const next = { ...rates };
-              GAUGES.forEach((g) => {
-                if (!next[g]) next[g] = {};
-                availableColors.forEach((c) => {
-                  if (!next[g][c]) next[g][c] = {};
-                  next[g][c][clean] = rate;
-                  if (norm) {
-                    Object.keys(next[g][c]).forEach((k) => {
-                      if (normalizeSectionCode(k) === norm) {
-                        next[g][c][k] = rate;
-                      }
-                    });
-                  }
-                });
-              });
-              setRates(next);
-            }
+          onDeleteSection={() => {
+            triggerGlobalToast('Sections delete karna band hai.');
           }}
-          onAddCustomSectionPair={(s1, r1, s2, r2) => {
-            const pairName = s2 && s2 !== s1 ? `${s1} / ${s2}` : s1;
-            if (!customSections.includes(pairName)) {
-              setCustomSections([...customSections, pairName]);
-            }
-            const next = { ...rates };
-            GAUGES.forEach((g) => {
-              if (!next[g]) next[g] = {};
-              availableColors.forEach((c) => {
-                if (!next[g][c]) next[g][c] = {};
-                if (r1 > 0) next[g][c][s1] = r1;
-                if (s2 && r2 > 0) next[g][c][s2] = r2;
-              });
-            });
-            setRates(next);
-            return pairName;
+          onAddCustomSection={() => {
+            triggerGlobalToast('Manual section add karna band hai — AI Rate Scanner use karein.');
+          }}
+          onAddCustomSectionPair={() => {
+            triggerGlobalToast('Manual section add karna band hai — AI Rate Scanner use karein.');
+            return '';
           }}
           windows={windows}
           onUpdateWindows={setWindows}
@@ -4115,30 +4141,21 @@ export default function App() {
           onUpdateProjectExtras={setProjectExtras}
           rates={rates}
           onUpdateSectionRate={(g, c, sec, r) => {
+            const normG = normalizeGauge(g);
+            const normCol = normalizeOfficialColor(c);
             const normSec = normalizeSectionCode(sec);
+            if (!normSec) return;
             const updatedColorMap: Record<string, number> = {
-              ...(rates[g]?.[c] || {}),
-              [sec]: r,
+              ...(rates[normG]?.[normCol] || {}),
+              [normSec]: r,
             };
-            if (normSec) {
-              Object.keys(updatedColorMap).forEach((k) => {
-                if (normalizeSectionCode(k) === normSec) {
-                  updatedColorMap[k] = r;
-                }
-              });
-            }
             const nextG = {
-              ...(rates[g] || {}),
-              [c]: updatedColorMap,
+              ...(rates[normG] || {}),
+              [normCol]: updatedColorMap,
             };
-            if (c === 'H.23') {
-              nextG['H23'] = { ...(nextG['H23'] || {}), [sec]: r };
-            } else if (c === 'H23') {
-              nextG['H.23'] = { ...(nextG['H.23'] || {}), [sec]: r };
-            }
             setRates({
               ...rates,
-              [g]: nextG,
+              [normG]: nextG,
             });
           }}
           glassRates={glassRates}
@@ -4279,6 +4296,9 @@ export default function App() {
             }));
           }}
           rateListSavedAt={rateListSavedAt}
+          rateListEffectiveDate={rateListEffectiveDate}
+          onUpdateEffectiveDate={setRateListEffectiveDate}
+          geminiApiKey={syncedGeminiApiKey}
           onSaveRatesToDevice={handleSaveRatesToDevice}
           onApplyRateListRows={handleApplyRateListRows}
           onBulkAdjustRatesPct={handleBulkAdjustRatesPct}
@@ -4300,7 +4320,10 @@ export default function App() {
               const parsed = JSON.parse(jsonStr);
               if (parsed.windowFormula) setWindowFormula(parsed.windowFormula);
               if (parsed.dgWindowFormula) setDgWindowFormula(parsed.dgWindowFormula);
-              if (parsed.rates) setRates(parsed.rates);
+              if (parsed.rates) setRates(normalizeRatesMatrix(parsed.rates));
+              if (typeof parsed.rateListEffectiveDate === 'string' && parsed.rateListEffectiveDate.trim()) {
+                setRateListEffectiveDate(parsed.rateListEffectiveDate.trim().toUpperCase());
+              }
               if (parsed.packages) setPackages(parsed.packages);
               if (parsed.layoutConfig) setLayoutConfig(parsed.layoutConfig);
               if (typeof parsed.customLetterheadBgUrl === 'string') {
