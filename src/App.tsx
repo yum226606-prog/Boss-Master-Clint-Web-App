@@ -4100,6 +4100,9 @@ export default function App() {
               setCtxGlassGauge(g);
               setCtxGlassColor(c);
               setCtxGlassMode('ON');
+              if (Array.isArray(dgWindows) && dgWindows.length > 0) {
+                setDgWindows(dgWindows.map((dw) => ({ ...dw, glassColor: c })));
+              }
             } else {
               setCtxGlassMode('OFF');
             }
